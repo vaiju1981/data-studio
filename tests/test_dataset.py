@@ -105,3 +105,32 @@ def test_oversized_result_becomes_a_digest_describing_every_row() -> None:
         assert len(json.dumps(result.rows_payload(), default=str)) > MAX_LLM_PAYLOAD_CHARS
     finally:
         dataset.close()
+
+
+def test_a_result_column_named_like_the_counter_is_not_clobbered() -> None:
+    """The row count is read positionally; by name it would pick up the user's column."""
+    rows = b"a,__total_rows\n1,99\n2,98\n"
+    dataset = Dataset.load([CsvSource.from_upload("clash.csv", rows)])
+    try:
+        result = dataset.query("SELECT * FROM clash")
+        assert result.total_rows == 2  # not 99, the user's first value
+        assert result.frame["__total_rows"].tolist() == [99, 98]
+    finally:
+        dataset.close()
+
+
+def test_digest_stays_within_budget_when_the_statistics_alone_overflow() -> None:
+    width = 400
+    header = ",".join(f"some_longish_column_name_{index}" for index in range(width))
+    row = ",".join(str(index) for index in range(width))
+    rows = (f"{header}\n{row}\n{row}\n").encode()
+    dataset = Dataset.load([CsvSource.from_upload("verywide.csv", rows)])
+    try:
+        payload = dataset.tool_payload(dataset.query("SELECT * FROM verywide"))
+        assert payload["returned"] == "digest"
+        assert not payload["sample_rows"]  # samples are given up first
+        # Describing fewer columns is the last resort, and it says so.
+        assert payload["columns_described"] == f"{len(payload['columns'])} of {width}"
+        assert len(json.dumps(payload, default=str)) <= MAX_LLM_PAYLOAD_CHARS
+    finally:
+        dataset.close()

@@ -193,21 +193,32 @@ class Dataset:
             "narrower or aggregated query."
         )
 
-        def build(rows: list[object]) -> dict[str, object]:
-            return {
+        def build(rows: list[object], described: dict[str, dict[str, object]]) -> dict[str, object]:
+            digest: dict[str, object] = {
                 "returned": "digest",
                 "row_count": result.total_rows,
-                "columns": columns,
+                "columns": described,
                 "sample_rows": rows,
                 "note": note,
             }
+            if len(described) < len(columns):
+                digest["columns_described"] = f"{len(described)} of {len(columns)}"
+            return digest
 
-        # The digest has to fit the budget too. On a very wide table the sample rows
-        # outweigh the statistics, and the statistics are the part worth keeping.
-        digest = build(sample)
-        while sample and len(json.dumps(digest, default=str)) > MAX_LLM_PAYLOAD_CHARS:
+        def too_big(digest: dict[str, object]) -> bool:
+            return len(json.dumps(digest, default=str)) > MAX_LLM_PAYLOAD_CHARS
+
+        # The digest has to fit the budget too. Sample rows go first, since the
+        # statistics are the part worth keeping; on a result wide enough that the
+        # statistics alone overflow, describe fewer columns rather than overrun.
+        described = columns
+        digest = build(sample, described)
+        while sample and too_big(digest):
             sample = sample[: len(sample) // 2]
-            digest = build(sample)
+            digest = build(sample, described)
+        while len(described) > 1 and too_big(digest):
+            described = dict(list(described.items())[: len(described) // 2])
+            digest = build(sample, described)
         return digest
 
     def query(self, sql: str, row_limit: int = MAX_DISPLAY_ROWS) -> QueryResult:
@@ -219,10 +230,13 @@ class Dataset:
             f"FROM ({clean_sql}) AS result_rows LIMIT {int(row_limit)}"
         )
         frame = self.connection.execute(counted_sql).fetchdf()
-        total_rows = int(frame[TOTAL_ROWS_COLUMN].iloc[0]) if len(frame) else 0
+        # Read the count positionally. A result of its own carrying this column name
+        # would otherwise shadow ours, and we would report the user's data as the
+        # row count and drop their column instead of the one we added.
+        total_rows = int(frame.iloc[0, -1]) if len(frame) else 0
         return QueryResult(
             sql=clean_sql,
-            frame=frame.drop(columns=TOTAL_ROWS_COLUMN),
+            frame=frame.iloc[:, :-1],
             total_rows=total_rows,
         )
 

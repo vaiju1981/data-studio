@@ -7,6 +7,7 @@ from pathlib import Path
 import streamlit as st
 
 from smart_data_studio.agent import Answer, DataAgent
+from smart_data_studio.config import MODEL_ID, OLLAMA_HOST
 from smart_data_studio.dataset import CsvSource, Dataset
 from smart_data_studio.profile import profile_dataset
 from smart_data_studio.ui import render
@@ -85,8 +86,8 @@ def _sidebar() -> None:
 
     st.divider()
     st.caption(
-        "The configured model is cloud-hosted through Ollama. Schema, profile statistics, and "
-        "query result rows are sent to it when insights or chat are used."
+        f"Queries run locally in DuckDB. Schema, profile statistics and query results are sent "
+        f"to `{MODEL_ID}` at `{OLLAMA_HOST}` when insights or chat are used."
     )
 
 
@@ -112,6 +113,10 @@ def _load(uploads: list[object], paths: str) -> None:
         st.session_state.profiles = profiles
         st.session_state.agent = agent
         st.session_state.chat = []
+        # Export caches are keyed by position in the chat, which restarts at zero
+        # with the new conversation — stale entries would hand back the old data.
+        for stale in [key for key in st.session_state if str(key).startswith("export-")]:
+            del st.session_state[stale]
         st.session_state.insight_error = ""
         try:
             with st.spinner("Exploring your data…"):

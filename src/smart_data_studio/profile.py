@@ -75,7 +75,7 @@ def _entity_grain(
     candidates = [
         (_number(row.get("approx_unique")), str(row["column_name"]))
         for row in records
-        if str(row["column_name"]).lower().endswith("id")
+        if _looks_like_key(str(row["column_name"]))
         and 1 < _number(row.get("approx_unique")) < row_count
     ]
     if not candidates:
@@ -112,6 +112,15 @@ def _entity_grain(
         f"column varies, so adding one to GROUP BY {key} splits a single {key} across several "
         f"rows — aggregate those with MAX or SUM instead."
     )
+
+
+def _looks_like_key(name: str) -> bool:
+    """id, player_id, playerId, playerID — but not paid, valid, void or grid."""
+    lowered = name.lower()
+    if lowered == "id" or lowered.endswith("_id"):
+        return True
+    # A camelCase boundary is what separates playerId from paid.
+    return len(name) > 2 and lowered.endswith("id") and name[-2].isupper()
 
 
 def _exact_distinct(

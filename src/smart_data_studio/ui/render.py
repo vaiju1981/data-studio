@@ -16,6 +16,8 @@ def answer(item: Answer, key: str, dataset: Dataset) -> None:
     if item.chart is not None:
         st.plotly_chart(item.chart, use_container_width=True, key=f"chart-{key}")
     if not item.results:
+        # Never let an unsupported answer look like a verified one.
+        st.caption("No query was run for this answer.")
         return
 
     count = len(item.results)
