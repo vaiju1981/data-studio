@@ -6,7 +6,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from smart_data_studio import logs
+from smart_data_studio import logs, sessions
 from smart_data_studio.agent import Answer, DataAgent
 from smart_data_studio.config import ALLOW_LOCAL_PATHS, MODEL_ID, OLLAMA_HOST
 from smart_data_studio.dataset import CsvSource, Dataset
@@ -24,6 +24,7 @@ def main() -> None:
         st.session_state.session_id = logs.new_session()
         logs.event("session.started")
     logs.bind(session=st.session_state.session_id)
+    sessions.touch(st.session_state.session_id)
     render.styles()
     _initialize_state()
 
@@ -155,8 +156,11 @@ def _load(uploads: list[object], paths: str) -> None:
                 dataset.close()
                 raise
 
+        # Registering before adopting means a host that is already full refuses
+        # here, with the previous workspace still intact.
+        sessions.register(st.session_state.session_id, dataset)
         old_dataset = st.session_state.dataset
-        if old_dataset is not None:
+        if old_dataset is not None and old_dataset is not dataset:
             old_dataset.close()
         st.session_state.dataset = dataset
         st.session_state.profiles = profiles
@@ -174,7 +178,10 @@ def _load(uploads: list[object], paths: str) -> None:
             st.session_state.understanding = ""
             st.session_state.insight_error = str(error)
         st.rerun()
+    except sessions.TooManySessions as error:
+        st.error(str(error))
     except Exception as error:
+        logs.failure("load.failed")
         st.error(f"Could not load the CSV data: {error}")
 
 

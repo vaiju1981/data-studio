@@ -42,12 +42,73 @@ Large results never reach the prompt verbatim. Past a size budget the model
 receives a digest — column types, exact row count, and statistics computed over
 the whole result — while the table and the export keep every row.
 
+## Running it as a service
+
+```bash
+docker build -t smart-data-studio .
+docker run -p 8501:8501 --read-only --tmpfs /tmp -v sds-work:/workspace \
+  -e SDS_OLLAMA_HOST=http://ollama:11434 smart-data-studio
+```
+
+The image runs as a non-root user, keeps all writable state under `/workspace`,
+and turns local-path loading **off** — a hosted instance should not read arbitrary
+files from its host. Liveness is Streamlit's own `/_stcore/health`; readiness is
+`python -m smart_data_studio.healthcheck`, which additionally proves DuckDB works
+and that the configured model is actually served by the configured endpoint.
+
+### Configuration
+
+Everything a deployment needs to change is an environment variable, so the image
+is configured rather than edited.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `SDS_MODEL_ID`, `SDS_OLLAMA_HOST` | `gemma4:31b-cloud`, `localhost:11434` | Which model, served from where |
+| `SDS_ALLOW_LOCAL_PATHS` | `true` (`false` in the image) | Read CSVs from the host filesystem |
+| `SDS_SENSITIVE_COLUMNS` | *(empty)* | Comma-separated names; matching columns are withheld from everything the model sees |
+| `SDS_DUCKDB_MEMORY_LIMIT`, `SDS_DUCKDB_THREADS` | `4GB`, `4` | Query budget, applied before the connection locks |
+| `SDS_QUERY_TIMEOUT_SECONDS` | `60` | A query past this is interrupted; the session survives |
+| `SDS_MAX_UPLOAD_BYTES`, `SDS_MAX_INGEST_ROWS`, `SDS_MAX_INGEST_COLUMNS` | 500MB, 20M, 512 | Upload ceilings, checked before parsing |
+| `SDS_MAX_ACTIVE_SESSIONS`, `SDS_SESSION_IDLE_SECONDS` | `8`, `3600` | Concurrent workspaces, and when an idle one is reclaimed |
+| `SDS_LOG_FORMAT`, `SDS_LOG_LEVEL` | `json`, `INFO` | Structured logs on stdout |
+
+**Sizing.** Each session holds its own in-memory DuckDB, so a 2.7GB file is a
+2.7GB workspace and concurrency is bounded by RAM, not CPU. Set
+`SDS_MAX_ACTIVE_SESSIONS` to what the host can actually hold; the ninth user is
+turned away rather than the first eight being starved.
+
+### Operating
+
+- **Logs** are one JSON object per event on stdout, carrying session and question
+  ids, the app and prompt versions, and timings for ingest, queries, tool calls and
+  model calls. No cell value is logged. The SQL is, because it is already shown to
+  the user beside every answer.
+- **Rollback** is redeploying the previous image tag; the app holds no durable
+  state, so nothing migrates and nothing needs restoring. That is also the backup
+  story: uploads and results live only in the running process and the mounted
+  `/workspace`, and both are discarded on stop.
+- **Model outage** degrades to the profile: loading and the data profile still
+  work, and the readiness check reports which half is down.
+
 ## Checks
 
 ```bash
 ruff check src tests
 ruff format --check src tests
 pytest -q
+```
+
+The live-model regression replays the whole question bank against a real dataset.
+It is slow and needs a model endpoint, so it is opt-in:
+
+```bash
+USE_LLM=1 pytest tests/test_question_bank.py -q
+```
+
+Regenerate the pinned runtime after changing dependencies:
+
+```bash
+python tools/lock.py
 ```
 
 ## Choosing a model

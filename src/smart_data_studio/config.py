@@ -43,6 +43,34 @@ MAX_UPLOAD_BYTES = _number("SDS_MAX_UPLOAD_BYTES", 500 * 1024 * 1024)
 MAX_INGEST_ROWS = _number("SDS_MAX_INGEST_ROWS", 20_000_000)
 MAX_INGEST_COLUMNS = _number("SDS_MAX_INGEST_COLUMNS", 512)
 
+# Deliberately loose. The binding constraint is DUCKDB_MEMORY_LIMIT, which spills
+# to disk rather than failing; this only catches the absurd. Set at 400M it
+# refused a real 7.9M x 57 file that loads and queries perfectly well.
+MAX_INGEST_CELLS = _number("SDS_MAX_INGEST_CELLS", 2_000_000_000)
+MAX_HEADER_LENGTH = _number("SDS_MAX_HEADER_LENGTH", 200)
+# Long free text is rarely the analysis and always the cost, so it is trimmed on
+# the way to the model rather than on the way into the table.
+MAX_CELL_CHARS_TO_MODEL = _number("SDS_MAX_CELL_CHARS_TO_MODEL", 200)
+
+# Column names matching any of these are kept out of everything the model sees.
+# Comma separated, matched case-insensitively as substrings.
+SENSITIVE_COLUMNS = tuple(
+    part.strip().lower()
+    for part in os.environ.get("SDS_SENSITIVE_COLUMNS", "").split(",")
+    if part.strip()
+)
+
+# Per-session ceilings, so one conversation cannot consume the host.
+MAX_SESSION_QUERIES = _number("SDS_MAX_SESSION_QUERIES", 500)
+MAX_SESSION_EXPORT_BYTES = _number("SDS_MAX_SESSION_EXPORT_BYTES", 500 * 1024 * 1024)
+MAX_ACTIVE_SESSIONS = _number("SDS_MAX_ACTIVE_SESSIONS", 8)
+SESSION_IDLE_SECONDS = _number("SDS_SESSION_IDLE_SECONDS", 3600)
+
+# Generous enough that real analytics never trips them, tight enough that a
+# runaway generated join is refused before it starts rather than after a minute.
+MAX_QUERY_TABLES = _number("SDS_MAX_QUERY_TABLES", 12)
+MAX_QUERY_DEPTH = _number("SDS_MAX_QUERY_DEPTH", 12)
+
 LOG_LEVEL = os.environ.get("SDS_LOG_LEVEL", "INFO")
 LOG_FORMAT = os.environ.get("SDS_LOG_FORMAT", "json")
 

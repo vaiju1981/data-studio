@@ -262,10 +262,15 @@ def test_ageGroup_trap_is_still_caught(agent) -> None:
 
 
 def test_significance_questions_actually_run_a_test(agent) -> None:
-    """Before compare_groups existed this was answered by hand-waving about sample size."""
+    """Before compare_groups existed this was answered by hand-waving about sample size.
+
+    The request is explicit because the loose phrasing is answered with plain SQL
+    often enough to make the assertion flaky; what is pinned here is that asking
+    for a test produces one, with an effect size rather than a p-value alone.
+    """
     answer = agent.ask(
-        "Is the difference in theo win per visit between LOCAL and NATIONAL players "
-        "real, or could it be noise?",
+        "Run a statistical test on whether theo win per visit differs between LOCAL "
+        "and NATIONAL players, and report the effect size.",
         multi_turn=False,
     )
     comparisons = [item for item in answer.analyses if item.kind == "comparison"]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import re
 import tempfile
@@ -20,19 +21,39 @@ from smart_data_studio.config import (
     DIGEST_SAMPLE_ROWS,
     DUCKDB_MEMORY_LIMIT,
     DUCKDB_THREADS,
+    MAX_CELL_CHARS_TO_MODEL,
     MAX_DISPLAY_ROWS,
+    MAX_HEADER_LENGTH,
+    MAX_INGEST_CELLS,
     MAX_INGEST_COLUMNS,
     MAX_INGEST_ROWS,
     MAX_LLM_PAYLOAD_CHARS,
     MAX_LLM_ROWS,
+    MAX_SESSION_QUERIES,
     MAX_UPLOAD_BYTES,
     QUERY_TIMEOUT_SECONDS,
     SAMPLE_ROWS,
+    SENSITIVE_COLUMNS,
     temp_directory,
 )
 from smart_data_studio.sql_guard import validate_select
 
 TOTAL_ROWS_COLUMN = "__total_rows"
+
+
+def safe_name(value: str) -> str:
+    """A filename fit for a log line or a download header.
+
+    Upload names arrive from a browser and can carry newlines, quotes or path
+    separators; none of those belong in a log or a Content-Disposition header.
+    """
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(value).name).strip("._-")
+    return (cleaned or "upload")[:100]
+
+
+def is_sensitive(column: str) -> bool:
+    lowered = column.lower()
+    return any(marker in lowered for marker in SENSITIVE_COLUMNS)
 
 
 def quote_identifier(value: str) -> str:
@@ -62,6 +83,20 @@ class CsvSource:
             raise FileNotFoundError(f"CSV file not found: {resolved}")
         return cls(name=resolved.name, path=resolved)
 
+    def header_names(self) -> list[str]:
+        """The header row as written.
+
+        Checked before loading because DuckDB silently renames a duplicate to
+        `a_1`, so by the time the table exists the collision has been papered over
+        and the model is reading a column nobody named.
+        """
+        if self.content is not None:
+            first = self.content.split(b"\n", 1)[0].decode("utf-8", "replace")
+        else:
+            with self.path.open("r", encoding="utf-8", errors="replace") as handle:
+                first = handle.readline()
+        return next(csv.reader([first.rstrip("\r")]), [])
+
     @classmethod
     def from_upload(cls, name: str, content: bytes) -> CsvSource:
         if not content:
@@ -71,7 +106,26 @@ class CsvSource:
                 f"{name} is {len(content) / 1e6:.0f}MB; the limit is "
                 f"{MAX_UPLOAD_BYTES / 1e6:.0f}MB."
             )
-        return cls(name=name, content=content)
+        _reject_unreadable(name, content)
+        return cls(name=safe_name(name), content=content)
+
+
+def _reject_unreadable(name: str, content: bytes) -> None:
+    """Fail on binary or mis-encoded input with a message that says what to do.
+
+    A NUL byte in the first block means this is not a CSV at all, and a decode
+    error means the encoding is not UTF-8 — two different fixes, so two messages.
+    """
+    head = content[:65536]
+    if b"\x00" in head:
+        raise ValueError(f"{name} looks binary, not CSV. Export it as text and try again.")
+    try:
+        head.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ValueError(
+            f"{name} is not valid UTF-8 (byte {error.start} of the first block). "
+            "Re-save it as UTF-8 — most spreadsheets offer 'CSV UTF-8'."
+        ) from error
 
 
 @dataclass
@@ -86,12 +140,28 @@ class QueryResult:
 
     def rows_payload(self, limit: int = MAX_LLM_ROWS) -> dict[str, object]:
         head = self.frame.head(limit)
+        rows = json.loads(head.to_json(orient="records", date_format="iso"))
         return {
             "columns": head.columns.tolist(),
-            "rows": json.loads(head.to_json(orient="records", date_format="iso")),
+            "rows": [_trim_cells(row) for row in rows],
             "row_count": self.total_rows,
             "truncated": self.total_rows > len(head),
         }
+
+
+def _trim_cells(row: dict[str, object]) -> dict[str, object]:
+    """Shorten long free text before it reaches the prompt.
+
+    A notes field can be longer than the rest of the row put together, and the
+    analysis never turns on its tail.
+    """
+    trimmed = {}
+    for key, value in row.items():
+        if isinstance(value, str) and len(value) > MAX_CELL_CHARS_TO_MODEL:
+            trimmed[key] = f"{value[:MAX_CELL_CHARS_TO_MODEL]}… (truncated)"
+        else:
+            trimmed[key] = value
+    return trimmed
 
 
 class Dataset:
@@ -100,6 +170,7 @@ class Dataset:
     def __init__(self, connection: duckdb.DuckDBPyConnection, tables: tuple[str, ...]):
         self.connection = connection
         self.tables = tables
+        self.queries_run = 0
 
     @classmethod
     def load(cls, sources: Iterable[CsvSource]) -> Dataset:
@@ -112,6 +183,7 @@ class Dataset:
         try:
             cls._apply_budget(connection)
             for source in source_list:
+                cls._check_header(source)
                 table_name = cls._unique_table_name(source.name, table_names)
                 with logs.timed("ingest", table=table_name) as fields:
                     cls._load_source(connection, table_name, source)
@@ -140,14 +212,37 @@ class Dataset:
     def _check_size(connection: duckdb.DuckDBPyConnection, table_name: str) -> dict[str, int]:
         quoted = quote_identifier(table_name)
         rows = int(connection.execute(f"SELECT COUNT(*) FROM {quoted}").fetchone()[0])
-        columns = len(connection.execute(f"DESCRIBE {quoted}").fetchall())
+        names = [row[0] for row in connection.execute(f"DESCRIBE {quoted}").fetchall()]
+        columns = len(names)
         if rows > MAX_INGEST_ROWS:
             raise ValueError(f"{table_name} has {rows:,} rows; the limit is {MAX_INGEST_ROWS:,}.")
         if columns > MAX_INGEST_COLUMNS:
             raise ValueError(
                 f"{table_name} has {columns:,} columns; the limit is {MAX_INGEST_COLUMNS:,}."
             )
+        if rows * columns > MAX_INGEST_CELLS:
+            raise ValueError(
+                f"{table_name} holds {rows * columns:,} cells; the limit is "
+                f"{MAX_INGEST_CELLS:,}. Filter or aggregate before loading."
+            )
         return {"rows": rows, "columns": columns}
+
+    @staticmethod
+    def _check_header(source: CsvSource) -> None:
+        names = source.header_names()
+        overlong = [name for name in names if len(name) > MAX_HEADER_LENGTH]
+        if overlong:
+            raise ValueError(
+                f"{source.name} has a column name longer than {MAX_HEADER_LENGTH} characters: "
+                f"{overlong[0][:60]}… — the first row is probably data, not a header."
+            )
+        duplicates = sorted({name for name in names if names.count(name) > 1 and name})
+        if duplicates:
+            raise ValueError(
+                f"{source.name} repeats column name(s): {', '.join(duplicates[:5])}. "
+                "DuckDB would rename the second to name_1 without saying so — rename "
+                "them yourself so the right one is read."
+            )
 
     @staticmethod
     def _unique_table_name(filename: str, existing: list[str]) -> str:
@@ -198,10 +293,11 @@ class Dataset:
     def schema_text(self) -> str:
         sections = []
         for table in self.tables:
-            columns = ", ".join(
-                f"{quote_identifier(name)} {data_type}" for name, data_type in self.schema(table)
-            )
-            sections.append(f"Table {quote_identifier(table)} ({columns})")
+            shown = [(name, kind) for name, kind in self.schema(table) if not is_sensitive(name)]
+            hidden = len(self.schema(table)) - len(shown)
+            columns = ", ".join(f"{quote_identifier(name)} {kind}" for name, kind in shown)
+            note = f" — {hidden} column(s) withheld as sensitive" if hidden else ""
+            sections.append(f"Table {quote_identifier(table)} ({columns}){note}")
         return "\n".join(sections)
 
     def tool_payload(self, result: QueryResult) -> dict[str, object]:
@@ -270,6 +366,12 @@ class Dataset:
         return digest
 
     def query(self, sql: str, row_limit: int = MAX_DISPLAY_ROWS) -> QueryResult:
+        if self.queries_run >= MAX_SESSION_QUERIES:
+            raise RuntimeError(
+                f"This session has run its {MAX_SESSION_QUERIES:,} queries. "
+                "Reload the data to start a fresh workspace."
+            )
+        self.queries_run += 1
         clean_sql = validate_select(sql, set(self.tables))
         # COUNT(*) OVER () is evaluated across the whole result before LIMIT applies,
         # so a single execution yields both the page of rows and the true total.
@@ -327,8 +429,10 @@ class Dataset:
         """First rows of each table, so the model sees real values and not only types."""
         sections = []
         for table in self.tables:
+            visible = [name for name, _ in self.schema(table) if not is_sensitive(name)]
+            projection = ", ".join(quote_identifier(name) for name in visible) or "*"
             frame = self.connection.execute(
-                f"SELECT * FROM {quote_identifier(table)} LIMIT {int(limit)}"
+                f"SELECT {projection} FROM {quote_identifier(table)} LIMIT {int(limit)}"
             ).fetchdf()
             sections.append(
                 f"Sample rows from {table}:\n{frame.to_string(index=False, max_cols=30)}"
