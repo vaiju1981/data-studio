@@ -39,6 +39,12 @@ Use make_chart after run_sql when a visualization materially helps. The chart mu
 names from the latest result. Mention truncation whenever the tool says truncated is true.
 Keep the final answer concise, explain the important result, and never hide limitations.
 
+For questions about trends, forecasts or unusual periods, first run_sql to aggregate one row per
+whole period, then call forecast, analyze_trend or detect_anomalies on that result. Exclude
+incomplete first and last periods in the SQL — a part-covered month reads as a collapse. When a
+forecast reports that it does not beat the do-nothing baselines, say so and describe the result as
+a level with a range rather than a trend.
+
 Two rules that are easy to get wrong here:
 - Anchor every relative time expression — "last 30 days", "recent", "lapsed 90 days" — on the
   latest date present in the data, never on CURRENT_DATE or today. The data ends before today.
@@ -117,7 +123,7 @@ class DataAgent:
         text = self._run_loop(
             self.messages,
             MAX_TOOL_ROUNDS,
-            [self.tools.run_sql, self.tools.make_chart],
+            self._chat_tools(),
         )
         self._trim_tool_payloads()
         return Answer(
@@ -125,6 +131,15 @@ class DataAgent:
             results=self._turn_results(first_new_result),
             chart=self.tools.chart,
         )
+
+    def _chat_tools(self) -> list[Callable[..., str]]:
+        return [
+            self.tools.run_sql,
+            self.tools.make_chart,
+            self.tools.forecast,
+            self.tools.analyze_trend,
+            self.tools.detect_anomalies,
+        ]
 
     def _run_loop(
         self, messages: list[dict[str, Any]], max_rounds: int, tools: list[Callable[..., str]]
@@ -151,7 +166,7 @@ class DataAgent:
 
     def _invoke(self, call: Any) -> str:
         name = call.function.name
-        available = {"run_sql": self.tools.run_sql, "make_chart": self.tools.make_chart}
+        available = {function.__name__: function for function in self._chat_tools()}
         function = available.get(name)
         if function is None:
             return json.dumps({"error": f"Unknown tool: {name}"})

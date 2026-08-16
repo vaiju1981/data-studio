@@ -6,6 +6,7 @@ import json
 
 from plotly.graph_objects import Figure
 
+from smart_data_studio import timeseries
 from smart_data_studio.charts import ChartSpec, make_figure
 from smart_data_studio.config import MAX_CHART_ROWS
 from smart_data_studio.dataset import Dataset, QueryResult
@@ -102,3 +103,67 @@ class AnalysisTools:
         return json.dumps(
             {"status": "chart_created", "kind": kind, "rows_plotted": len(frame), "title": title}
         )
+
+    def forecast(self, date_column: str, value_column: str, periods: int) -> str:
+        """Forecast a time series from the most recent SQL result.
+
+        Args:
+          date_column: Column holding one row per whole period, such as a month.
+          value_column: Numeric column to project forward.
+          periods: How many future periods to forecast.
+
+        Returns:
+          JSON with the forecast, an 80% range per period, and an accuracy check
+          against do-nothing baselines.
+        """
+        return self._on_series(
+            date_column, value_column, lambda series: timeseries.forecast(series, int(periods))
+        )
+
+    def analyze_trend(self, date_column: str, value_column: str) -> str:
+        """Split a time series into trend, seasonality and remainder.
+
+        Args:
+          date_column: Column holding one row per whole period, such as a month.
+          value_column: Numeric column to analyse.
+
+        Returns:
+          JSON with direction, total change, and how much of the variation the
+          trend and the season each explain.
+        """
+        return self._on_series(date_column, value_column, timeseries.decompose)
+
+    def detect_anomalies(self, date_column: str, value_column: str) -> str:
+        """Find periods that break the pattern of a time series.
+
+        Args:
+          date_column: Column holding one row per whole period, such as a month.
+          value_column: Numeric column to check.
+
+        Returns:
+          JSON listing unusual periods with a score and direction.
+        """
+        return self._on_series(date_column, value_column, timeseries.anomalies)
+
+    def _on_series(self, date_column: str, value_column: str, analyse) -> str:
+        """Every series tool runs on the full result, not the page shown to the model."""
+        if not self.results:
+            return json.dumps({"error": "Run a SQL query before analysing a series."})
+        source = self.results[-1]
+        frame = source.frame
+        if source.truncated:
+            full = self.dataset.query(source.sql, row_limit=MAX_CHART_ROWS)
+            if full.truncated:
+                return json.dumps(
+                    {
+                        "error": (
+                            f"This result has {full.total_rows:,} rows. Aggregate it to one row "
+                            "per period (month, week, day) before analysing it as a series."
+                        )
+                    }
+                )
+            frame = full.frame
+        try:
+            return json.dumps(analyse(timeseries.prepare(frame, date_column, value_column)))
+        except timeseries.NotEnoughData as error:
+            return json.dumps({"error": str(error)})
