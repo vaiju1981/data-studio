@@ -240,6 +240,18 @@ class Dataset:
             total_rows=total_rows,
         )
 
+    def columns_mentioned_in(self, text: str) -> list[str]:
+        """Loaded column names that appear in free text.
+
+        Used to confirm a metric definition refers to real columns: a name absent
+        from the result is the typo, and the user sees it before the model does.
+        """
+        words = {word.lower() for word in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", text)}
+        found = {
+            name for table in self.tables for name, _ in self.schema(table) if name.lower() in words
+        }
+        return sorted(found)
+
     def sample_text(self, limit: int = SAMPLE_ROWS) -> str:
         """First rows of each table, so the model sees real values and not only types."""
         sections = []

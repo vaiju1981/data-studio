@@ -50,6 +50,7 @@ def _initialize_state() -> None:
         "agent": None,
         "chat": [],
         "mode": MULTI_TURN,
+        "metrics": "",
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -72,6 +73,10 @@ def _sidebar() -> None:
     if st.button("Load and analyze", type="primary", use_container_width=True):
         _load(uploads, paths)
 
+    if st.session_state.agent is not None:
+        st.divider()
+        _metrics_controls()
+
     st.divider()
     st.radio(
         "Conversation mode",
@@ -91,6 +96,37 @@ def _sidebar() -> None:
     )
 
 
+def _metrics_controls() -> None:
+    st.subheader("Your metrics")
+    metrics = st.text_area(
+        "Definitions",
+        key="metrics",
+        height=140,
+        placeholder=(
+            "avgBet = 0 if handlePulls or coinIn is 0, else coinIn / handlePulls\n"
+            "theo_last_90 = sum of theoWin over the last 90 days\n"
+            "high bet = avgBet above the median, minimum 100 handle pulls"
+        ),
+        help=(
+            "One definition per line, in plain English. Press ⌘/Ctrl+Enter or click away to "
+            "apply. They are added to the model's instructions, so they survive reloads and "
+            "apply in single-turn mode too. Pin anything ambiguous — a boundary like "
+            "'including the cutoff day' is worth stating."
+        ),
+    )
+    st.session_state.agent.set_metrics(metrics)
+
+    if not metrics.strip():
+        return
+    # Naming the columns we recognised is how a typo surfaces: the misspelt one
+    # simply will not be listed.
+    known = st.session_state.dataset.columns_mentioned_in(metrics)
+    if known:
+        st.caption(f"Columns recognised: {', '.join(known)}")
+    else:
+        st.warning("No loaded column names found in these definitions — check the spelling.")
+
+
 def _load(uploads: list[object], paths: str) -> None:
     try:
         sources = [CsvSource.from_upload(upload.name, upload.getvalue()) for upload in uploads]
@@ -102,6 +138,9 @@ def _load(uploads: list[object], paths: str) -> None:
             try:
                 profiles = profile_dataset(dataset)
                 agent = DataAgent(dataset, profiles)
+                # Carry existing definitions onto the new dataset, so the exploration
+                # below already knows them rather than learning them afterwards.
+                agent.set_metrics(st.session_state.get("metrics", ""))
             except Exception:
                 dataset.close()
                 raise

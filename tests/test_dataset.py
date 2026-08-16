@@ -134,3 +134,14 @@ def test_digest_stays_within_budget_when_the_statistics_alone_overflow() -> None
         assert len(json.dumps(payload, default=str)) <= MAX_LLM_PAYLOAD_CHARS
     finally:
         dataset.close()
+
+
+def test_columns_mentioned_in_definitions_surface_typos() -> None:
+    dataset = Dataset.load([CsvSource.from_upload("sales.csv", SALES)])
+    try:
+        good = dataset.columns_mentioned_in("avgBet = amount / order_id, ignore note")
+        assert good == ["amount", "note", "order_id"]
+        # A misspelt column simply does not appear, which is how the user sees it.
+        assert dataset.columns_mentioned_in("avgBet = amountt / orderid") == []
+    finally:
+        dataset.close()

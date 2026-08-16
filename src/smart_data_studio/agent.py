@@ -73,7 +73,22 @@ class DataAgent:
         # result produced by an earlier turn.
         self.tools = AnalysisTools(dataset)
         self.understanding = ""
+        self.metrics = ""
         self.messages: list[dict[str, Any]] = [{"role": "system", "content": self._system_prompt()}]
+
+    def set_metrics(self, metrics: str) -> bool:
+        """Record the user's metric definitions, returning whether they changed.
+
+        They belong in the system prompt rather than the conversation: there they
+        survive a single-turn reset and stay in one editable place, instead of
+        scrolling away with the chat that introduced them.
+        """
+        cleaned = metrics.strip()
+        if cleaned == self.metrics:
+            return False
+        self.metrics = cleaned
+        self.messages[0] = {"role": "system", "content": self._system_prompt()}
+        return True
 
     def build_understanding(self) -> str:
         """Explore the data with real queries before any question is asked.
@@ -196,4 +211,11 @@ class DataAgent:
             if self.understanding
             else ""
         )
-        return f"{ANALYST_PROMPT}\n\n{self._data_context()}{learned}"
+        defined = (
+            "\n\nMetric definitions set by the user. When one of these names is used, apply the "
+            "definition exactly as written — do not substitute your own — and state the rule you "
+            f"applied in the answer:\n{self.metrics}"
+            if self.metrics
+            else ""
+        )
+        return f"{ANALYST_PROMPT}\n\n{self._data_context()}{learned}{defined}"

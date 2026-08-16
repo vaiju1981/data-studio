@@ -193,3 +193,20 @@ def test_context_states_the_date_range_to_anchor_relative_time_on() -> None:
         assert "never on CURRENT_DATE" in prompt
     finally:
         dataset.close()
+
+
+def test_metrics_live_in_the_system_prompt_and_survive_single_turn() -> None:
+    client = FakeClient([Message(role="assistant", content="ok")])
+    agent, dataset = make_agent(client)
+    try:
+        assert agent.set_metrics("avgBet = coinIn / handlePulls") is True
+        assert agent.set_metrics("avgBet = coinIn / handlePulls") is False  # unchanged
+
+        assert "avgBet = coinIn / handlePulls" in agent.messages[0]["content"]
+        assert "apply the definition exactly as written" in agent.messages[0]["content"]
+
+        # A single-turn question rebuilds the history, and the definitions must ride along.
+        agent.ask("anything", multi_turn=False)
+        assert "avgBet = coinIn / handlePulls" in agent.messages[0]["content"]
+    finally:
+        dataset.close()
