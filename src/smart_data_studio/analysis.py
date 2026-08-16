@@ -8,8 +8,9 @@ from scipy import stats
 
 from smart_data_studio.config import MAX_DRIVER_LEVELS, MAX_RELATE_SAMPLE, MAX_TEST_SAMPLE
 
-# Cohen's conventions, used only to translate a number into a word.
-EFFECT_BANDS = ((0.8, "large"), (0.5, "medium"), (0.2, "small"))
+# Romano's conventions for Cliff's delta. Cohen's 0.2/0.5/0.8 belong to d and
+# would call a delta of 0.5 "medium" where it is in fact large.
+CLIFF_BANDS = ((0.474, "large"), (0.33, "medium"), (0.147, "small"))
 SEED = 0
 
 
@@ -32,7 +33,7 @@ def _sample(values: pd.Series, limit: int) -> tuple[pd.Series, bool]:
 
 
 def _describe_effect(magnitude: float) -> str:
-    for threshold, word in EFFECT_BANDS:
+    for threshold, word in CLIFF_BANDS:
         if magnitude >= threshold:
             return word
     return "negligible"
@@ -154,22 +155,30 @@ def rank_drivers(frame: pd.DataFrame, measure: str, split: str) -> dict[str, obj
         if before not in pivot.columns or after not in pivot.columns:
             continue
         change = (pivot[after] - pivot[before]).sort_values()
+        # head and tail overlap once there are six levels or fewer, which listed
+        # every mover twice.
+        shown = change if len(change) <= 6 else pd.concat([change.head(3), change.tail(3)])
         movers = [
             {"level": str(level), "change": round(float(delta), 2)}
-            for level, delta in list(change.head(3).items()) + list(change.tail(3).items())
+            for level, delta in shown.items()
         ]
+        spread = float(change.abs().sum())
+        largest = float(change.abs().max())
         dimensions.append(
             {
                 "dimension": column,
                 "levels": int(len(change)),
-                # How concentrated the movement is: a dimension where one level
-                # explains the whole move is more informative than one spread thin.
-                "spread": round(float(change.abs().sum()), 2),
+                # The biggest single move is what a reader acts on. Spread is total
+                # churn, which ranks a dimension high merely for having many levels
+                # and ties whenever movement is symmetric.
+                "largest_move": round(largest, 2),
+                "concentration": round(largest / spread, 3) if spread else None,
+                "spread": round(spread, 2),
                 "movers": sorted(movers, key=lambda item: item["change"]),
             }
         )
 
-    dimensions.sort(key=lambda item: item["spread"], reverse=True)
+    dimensions.sort(key=lambda item: (item["largest_move"], item["spread"]), reverse=True)
     return {
         "measure": measure,
         "comparing": {"from": str(before), "to": str(after)},
@@ -180,9 +189,10 @@ def rank_drivers(frame: pd.DataFrame, measure: str, split: str) -> dict[str, obj
         ],
         "drivers": dimensions[:6],
         "reading": (
-            "Dimensions are ranked by how much movement they account for. Positive "
-            "changes are gains, negative are losses; within a dimension they sum to the "
-            "total change."
+            "Ranked by the largest single level movement. concentration is that move "
+            "as a share of all movement in the dimension: near 1 means one level "
+            "explains it, near 0 means many small offsetting shifts. Positive changes "
+            "are gains, negative are losses; within a dimension they sum to the total."
         ),
     }
 

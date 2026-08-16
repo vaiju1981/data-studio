@@ -138,3 +138,52 @@ def test_series_tools_reach_the_model_as_readable_json() -> None:
         assert "Column not found" in json.loads(tools.forecast("month", "nope", 3))["error"]
     finally:
         dataset.close()
+
+
+def test_a_steady_decline_at_the_boundary_survives() -> None:
+    """Only a step out of line with the series marks a partial period."""
+    falling = [100.0 * (0.93**index) for index in range(24)]  # ends at 82% of the median
+    series = timeseries.prepare(monthly(falling), "month", "amount")
+    assert len(series.values) == 24, "a genuine decline was removed"
+    assert series.notes and "kept as a real change" in series.notes[0]
+
+    # A stub that breaks the step is still removed.
+    stubbed = timeseries.prepare(monthly([100.0] * 24 + [30.0]), "month", "amount")
+    assert len(stubbed.values) == 24
+    assert "Dropped the last period" in stubbed.notes[0]
+
+
+def test_backtest_survives_a_zero_in_the_held_out_window() -> None:
+    values = [100.0] * 20 + [0.0, 100.0, 100.0, 100.0]
+    result = timeseries.forecast(timeseries.prepare(monthly(values), "month", "amount"), 3)
+    accuracy = result["accuracy"]
+
+    assert accuracy["zero_periods_skipped"] == 1
+    for key in ("model_mape_pct", "repeat_last_value_mape_pct", "history_mean_mape_pct"):
+        assert np.isfinite(accuracy[key]), f"{key} is not a finite number"
+    # Infinity is not valid JSON, whatever json.dumps permits.
+    assert "Infinity" not in json.dumps(result)
+
+
+@pytest.mark.parametrize(
+    ("alias", "expected"),
+    [
+        ("MS", 12),
+        ("ME", 12),
+        ("M", 12),
+        ("W-SUN", 52),
+        ("W", 52),
+        ("QS-OCT", 4),
+        ("D", 7),
+        ("h", 24),
+    ],
+)
+def test_calendar_aliases_keep_their_season(alias: str, expected: int) -> None:
+    """pandas reports W-SUN and QS-OCT, not W and QS."""
+    assert timeseries.seasonal_period(alias) == expected
+
+
+def test_weekly_data_is_recognised_as_seasonal() -> None:
+    index = pd.date_range("2022-01-02", periods=120, freq="W")
+    frame = pd.DataFrame({"week": index, "amount": [100.0 + i % 52 for i in range(120)]})
+    assert timeseries.prepare(frame, "week", "amount").season == 52

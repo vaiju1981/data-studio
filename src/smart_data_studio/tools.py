@@ -207,11 +207,23 @@ class AnalysisTools:
         """
         return self._on_frame("associations", lambda frame: analysis.relate(frame, target))
 
-    def _on_frame(self, kind: str, analyse) -> str:
+    def _on_frame(self, kind: str, analyse, may_sample: bool = True) -> str:
         """Run a whole-result analysis, on every row rather than the page shown."""
         if not self.results:
             return json.dumps({"error": "Run a SQL query before analysing it."})
-        frame, sampling = self._analysis_frame(self.results[-1])
+        source = self.results[-1]
+        if not may_sample and source.total_rows > self._affordable(source):
+            return json.dumps(
+                {
+                    "error": (
+                        f"This result has {source.total_rows:,} rows, too many to total "
+                        "exactly, and sampled totals would be wrong. Aggregate first: "
+                        "GROUP BY the dimensions and the two-sided split column, summing "
+                        "the measure, then analyse that."
+                    )
+                }
+            )
+        frame, sampling = self._analysis_frame(source)
         try:
             outcome = analyse(frame)
         except analysis.NotAnalysable as error:
@@ -230,8 +242,7 @@ class AnalysisTools:
         """
         if not source.truncated:
             return source.frame, None
-        width = max(1, source.frame.shape[1])
-        affordable = min(MAX_ANALYSIS_ROWS, MAX_ANALYSIS_CELLS // width)
+        affordable = self._affordable(source)
         if source.total_rows <= affordable:
             return self.dataset.query(source.sql, row_limit=affordable).frame, None
         drawn = self.dataset.query(
@@ -242,6 +253,11 @@ class AnalysisTools:
         return drawn.frame, (
             f"A random {len(drawn.frame):,} of {source.total_rows:,} rows were analysed."
         )
+
+    @staticmethod
+    def _affordable(source: QueryResult) -> int:
+        """Rows that fit the memory budget, counted in cells so width matters."""
+        return min(MAX_ANALYSIS_ROWS, MAX_ANALYSIS_CELLS // max(1, source.frame.shape[1]))
 
     def _on_series(self, kind: str, date_column: str, value_column: str, analyse) -> str:
         """Every series tool runs on the full result, not the page shown to the model."""

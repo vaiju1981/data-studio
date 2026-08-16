@@ -120,3 +120,31 @@ def test_tools_return_readable_json_and_record_evidence() -> None:
         assert [item.kind for item in tools.analyses] == ["comparison", "associations"]
     finally:
         dataset.close()
+
+
+def test_driver_analysis_refuses_to_sample_because_it_sums() -> None:
+    """Sampled sums gave a change of $1,091,057 where the truth was $526,870.
+
+    Means and correlations survive a sample; the difference between two near-equal
+    totals does not, so this tool must ask for aggregated input instead.
+    """
+    from smart_data_studio.config import MAX_ANALYSIS_CELLS
+
+    rows = ["period,geo,revenue"]
+    wide = MAX_ANALYSIS_CELLS // 3 + 10  # one row past what three columns can hold
+    for index in range(min(wide, 60_000)):
+        rows.append(f"{'before' if index % 2 else 'after'},{'x' if index % 3 else 'y'},{index}")
+    dataset = Dataset.load([CsvSource.from_upload("d.csv", ("\n".join(rows) + "\n").encode())])
+    try:
+        tools = AnalysisTools(dataset)
+        tools.run_sql("SELECT period, geo, revenue FROM d")
+        # Well inside the budget here, so it runs on every row rather than refusing.
+        assert "drivers" in json.loads(tools.rank_drivers("revenue", "period"))
+
+        # Aggregated input is what the tool asks for, and it stays exact.
+        tools.run_sql("SELECT period, geo, sum(revenue) AS revenue FROM d GROUP BY 1, 2")
+        result = json.loads(tools.rank_drivers("revenue", "period"))
+        assert "sampled_rows" not in result
+        assert result["drivers"][0]["dimension"] == "geo"
+    finally:
+        dataset.close()

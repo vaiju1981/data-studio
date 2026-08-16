@@ -15,12 +15,31 @@ from statsmodels.tsa.seasonal import STL
 # partial period rather than a real collapse. Left in, a 23-day trailing month
 # turned a flat series into a fabricated 15% decline.
 BOUNDARY_RATIO = 0.85
+# ...and the step into it must be this many times the usual one.
+BOUNDARY_STEP_MULTIPLE = 3.0
 MIN_POINTS = 6
 # Deliberately strict. Looser values flagged ordinary noise as anomalies on clean
 # series, and inventing an anomaly is worse here than missing a marginal one.
 ANOMALY_ALPHA = 0.001
 MIN_CYCLES_FOR_ANOMALY = 4
-SEASONAL_PERIODS = {"MS": 12, "M": 12, "QS": 4, "Q": 4, "W": 52, "D": 7, "H": 24}
+# pandas reports aliases like "W-SUN", "QS-OCT" and "ME", so match on the base
+# rather than the whole string or weekly and quarterly data lose their season.
+SEASONAL_PERIODS = {
+    "M": 12,
+    "MS": 12,
+    "ME": 12,
+    "Q": 4,
+    "QS": 4,
+    "QE": 4,
+    "W": 52,
+    "D": 7,
+    "B": 5,
+    "H": 24,
+}
+
+
+def seasonal_period(freq: str) -> int | None:
+    return SEASONAL_PERIODS.get(freq.split("-")[0].upper())
 
 
 class NotEnoughData(ValueError):
@@ -36,7 +55,7 @@ class Series:
     @property
     def season(self) -> int | None:
         """Points per cycle, or None when the series cannot cover two cycles."""
-        period = SEASONAL_PERIODS.get(self.freq)
+        period = seasonal_period(self.freq)
         return period if period and len(self.values) >= 2 * period else None
 
 
@@ -85,15 +104,30 @@ def _drop_partial_boundaries(series: pd.Series, notes: list[str]) -> pd.Series:
         if len(series) < MIN_POINTS + 1:
             break
         interior = series.iloc[1:] if edge == "first" else series.iloc[:-1]
-        point = series.iloc[0] if edge == "first" else series.iloc[-1]
+        point = float(series.iloc[0] if edge == "first" else series.iloc[-1])
+        neighbour = float(series.iloc[1] if edge == "first" else series.iloc[-2])
+        stamp = series.index[0] if edge == "first" else series.index[-1]
         median = float(interior.median())
         if median <= 0 or point >= BOUNDARY_RATIO * median:
             continue
-        stamp = series.index[0] if edge == "first" else series.index[-1]
+
+        # A steady decline also leaves the last point below the median. What marks
+        # a partial period is that the step into it dwarfs every other step, so
+        # require both before removing a point that may be a real fall.
+        typical_step = float(interior.diff().abs().median())
+        if typical_step > 0 and abs(point - neighbour) < BOUNDARY_STEP_MULTIPLE * typical_step:
+            notes.append(
+                f"The {edge} period {stamp.date()} is {point / median:.0%} of the median "
+                "but moves no more than the series usually does, so it was kept as a "
+                "real change. Exclude it in SQL if the period is incomplete."
+            )
+            continue
+
         notes.append(
             f"Dropped the {edge} period {stamp.date()} ({point:,.0f} is "
-            f"{point / median:.0%} of the median {median:,.0f}) — it looks partly "
-            "covered. Filter incomplete periods in SQL if that is wrong."
+            f"{point / median:.0%} of the median {median:,.0f} and breaks the usual "
+            "step) — it looks partly covered. Filter incomplete periods in SQL if "
+            "that is wrong."
         )
         series = series.iloc[1:] if edge == "first" else series.iloc[:-1]
     return series
@@ -149,10 +183,16 @@ def _backtest(values: pd.Series, season: int | None) -> dict[str, object]:
         return {"note": "Too few periods to backtest"}
     train, test = values.iloc[:-horizon], values.iloc[-horizon:]
 
-    def mape(prediction) -> float:
-        return round(
-            float(np.mean(np.abs((test.to_numpy() - prediction) / test.to_numpy())) * 100), 2
-        )
+    actual = test.to_numpy()
+    usable = actual != 0
+    if not usable.any():
+        return {"note": "Every held-out period is zero, so percentage error is undefined"}
+
+    def mape(prediction) -> float | None:
+        """Percentage error over the non-zero periods; dividing by zero gives Infinity,
+        which is not valid JSON and means nothing to a reader."""
+        errors = np.abs((actual[usable] - np.asarray(prediction)[usable]) / actual[usable])
+        return round(float(np.mean(errors) * 100), 2)
 
     # Holding out the tail can leave too few points for a seasonal fit even when
     # the full series had enough. Fall back rather than lose the comparison, which
@@ -172,8 +212,10 @@ def _backtest(values: pd.Series, season: int | None) -> dict[str, object]:
     naive = mape(np.repeat(train.iloc[-1], horizon))
     mean = mape(np.repeat(train.mean(), horizon))
     best_baseline = min(naive, mean)
+    skipped = int((~usable).sum())
     return {
         "held_out_periods": horizon,
+        **({"zero_periods_skipped": skipped} if skipped else {}),
         "model_mape_pct": model_error,
         "repeat_last_value_mape_pct": naive,
         "history_mean_mape_pct": mean,
@@ -199,7 +241,7 @@ def decompose(series: Series) -> dict[str, object]:
     }
     if season is None:
         result["seasonality"] = (
-            f"Not assessed — needs two full cycles ({SEASONAL_PERIODS.get(series.freq, '?')} "
+            f"Not assessed — needs two full cycles ({seasonal_period(series.freq) or '?'} "
             f"periods each) and there are {len(values)}."
         )
         return result
@@ -254,7 +296,7 @@ def anomalies(series: Series) -> dict[str, object]:
     values = series.values
     # A seasonal estimate from only two or three cycles is itself shaky, and
     # subtracting it invents outliers. Below that, test the raw level instead.
-    period = SEASONAL_PERIODS.get(series.freq)
+    period = seasonal_period(series.freq)
     season = period if period and len(values) >= MIN_CYCLES_FOR_ANOMALY * period else None
 
     with warnings.catch_warnings():

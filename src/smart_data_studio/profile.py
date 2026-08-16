@@ -115,12 +115,16 @@ def _entity_grain(
 
 
 def _looks_like_key(name: str) -> bool:
-    """id, player_id, playerId, playerID — but not paid, valid, void or grid."""
+    """id, player_id, playerId, playerID — but not paid, valid, PAID or PYRAMID.
+
+    The separator is what counts. Testing only that the character before "id" is
+    upper-case accepted every all-caps word ending in those letters, so the letter
+    before the suffix has to be lower-case: the boundary in playerId, absent in PAID.
+    """
     lowered = name.lower()
     if lowered == "id" or lowered.endswith("_id"):
         return True
-    # A camelCase boundary is what separates playerId from paid.
-    return len(name) > 2 and lowered.endswith("id") and name[-2].isupper()
+    return len(name) > 2 and name.endswith(("Id", "ID")) and name[-3].islower()
 
 
 def _exact_distinct(
