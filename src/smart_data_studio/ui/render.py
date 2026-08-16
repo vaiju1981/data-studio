@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import pandas as pd
 import streamlit as st
 
 from smart_data_studio.agent import Answer
 from smart_data_studio.config import MAX_EXPORT_ROWS
 from smart_data_studio.dataset import Dataset, QueryResult
 from smart_data_studio.profile import TableProfile
+from smart_data_studio.tools import SeriesAnalysis
 
 
 def answer(item: Answer, key: str, dataset: Dataset) -> None:
@@ -15,6 +17,9 @@ def answer(item: Answer, key: str, dataset: Dataset) -> None:
     st.markdown(item.text)
     if item.chart is not None:
         st.plotly_chart(item.chart, use_container_width=True, key=f"chart-{key}")
+    for index, analysis in enumerate(item.analyses, start=1):
+        _analysis(analysis, f"{key}-{index}")
+
     if not item.results:
         # Never let an unsupported answer look like a verified one.
         st.caption("No query was run for this answer.")
@@ -32,6 +37,68 @@ def answer(item: Answer, key: str, dataset: Dataset) -> None:
             st.code(result.sql, language="sql", wrap_lines=True)
             st.dataframe(result.frame, use_container_width=True, hide_index=True)
             _export(result, f"{key}-{index}", dataset)
+
+
+TITLES = {"forecast": "Forecast", "trend": "Trend", "anomalies": "Anomalies"}
+
+
+def _analysis(analysis: SeriesAnalysis, key: str) -> None:
+    """Show what the model was told, so a quoted MAPE or forecast can be checked."""
+    result = analysis.result
+    with st.container(border=True):
+        st.caption(
+            f"{TITLES.get(analysis.kind, analysis.kind)} · {analysis.value_column} "
+            f"by {analysis.date_column} · {result.get('periods_used', '?')} periods"
+        )
+        for note in result.get("notes") or []:
+            st.warning(note)
+
+        if analysis.kind == "forecast":
+            accuracy = result.get("accuracy") or {}
+            st.markdown(f"**Model** `{result.get('model', '')}`")
+            if "model_mape_pct" in accuracy:
+                st.dataframe(
+                    pd.DataFrame(
+                        [
+                            {"Method": "This model", "Error (MAPE %)": accuracy["model_mape_pct"]},
+                            {
+                                "Method": "Repeat last value",
+                                "Error (MAPE %)": accuracy["repeat_last_value_mape_pct"],
+                            },
+                            {
+                                "Method": "History average",
+                                "Error (MAPE %)": accuracy["history_mean_mape_pct"],
+                            },
+                        ]
+                    ),
+                    hide_index=True,
+                    use_container_width=True,
+                )
+            if accuracy.get("verdict"):
+                st.caption(accuracy["verdict"])
+            st.dataframe(
+                pd.DataFrame(result.get("forecast") or []),
+                hide_index=True,
+                use_container_width=True,
+            )
+        elif analysis.kind == "anomalies":
+            found = result.get("anomalies") or []
+            st.caption(result.get("method", ""))
+            if found:
+                st.dataframe(pd.DataFrame(found), hide_index=True, use_container_width=True)
+            else:
+                st.markdown("No period broke the pattern.")
+        else:
+            shown = {
+                name: value
+                for name, value in result.items()
+                if name not in {"notes", "periods_used"}
+            }
+            st.dataframe(
+                pd.DataFrame([{"Measure": k, "Value": v} for k, v in shown.items()]),
+                hide_index=True,
+                use_container_width=True,
+            )
 
 
 def _export(result: QueryResult, key: str, dataset: Dataset) -> None:

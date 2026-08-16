@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import ollama
@@ -19,7 +19,7 @@ from smart_data_studio.config import (
 )
 from smart_data_studio.dataset import Dataset, QueryResult
 from smart_data_studio.profile import TableProfile
-from smart_data_studio.tools import AnalysisTools
+from smart_data_studio.tools import AnalysisTools, SeriesAnalysis
 
 EXPLORE_PROMPT = """Explore this dataset with SQL before drawing any conclusion.
 Run several queries: read real values, check how low-cardinality columns are distributed,
@@ -63,6 +63,7 @@ class Answer:
     text: str
     results: list[QueryResult]
     chart: Figure | None = None
+    analyses: list[SeriesAnalysis] = field(default_factory=list)
 
 
 class DataAgent:
@@ -118,6 +119,7 @@ class DataAgent:
             # reaches this one. The UI keeps showing the full history regardless.
             self.messages = [{"role": "system", "content": self._system_prompt()}]
         first_new_result = len(self.tools.results)
+        first_new_analysis = len(self.tools.analyses)
         self.tools.reset_chart(keep_history=multi_turn)
         self.messages.append({"role": "user", "content": question})
         text = self._run_loop(
@@ -130,6 +132,7 @@ class DataAgent:
             text=text,
             results=self._turn_results(first_new_result),
             chart=self.tools.chart,
+            analyses=self.tools.analyses[first_new_analysis:],
         )
 
     def _chat_tools(self) -> list[Callable[..., str]]:

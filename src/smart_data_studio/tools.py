@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 
 from plotly.graph_objects import Figure
 
@@ -12,12 +13,27 @@ from smart_data_studio.config import MAX_CHART_ROWS
 from smart_data_studio.dataset import Dataset, QueryResult
 
 
+@dataclass
+class SeriesAnalysis:
+    """A series tool's own output, kept so the UI can show it as evidence.
+
+    Without this the model can quote a MAPE or a forecast the user has no way to
+    check — the same failure the SQL panel exists to prevent.
+    """
+
+    kind: str
+    date_column: str
+    value_column: str
+    result: dict[str, object]
+
+
 class AnalysisTools:
     """Tools shared across a whole conversation, so a later turn can chart an earlier result."""
 
     def __init__(self, dataset: Dataset):
         self.dataset = dataset
         self.results: list[QueryResult] = []
+        self.analyses: list[SeriesAnalysis] = []
         self.chart: Figure | None = None
         self.chart_spec: ChartSpec | None = None
         self.chart_source: QueryResult | None = None
@@ -117,7 +133,10 @@ class AnalysisTools:
           against do-nothing baselines.
         """
         return self._on_series(
-            date_column, value_column, lambda series: timeseries.forecast(series, int(periods))
+            "forecast",
+            date_column,
+            value_column,
+            lambda series: timeseries.forecast(series, int(periods)),
         )
 
     def analyze_trend(self, date_column: str, value_column: str) -> str:
@@ -131,7 +150,7 @@ class AnalysisTools:
           JSON with direction, total change, and how much of the variation the
           trend and the season each explain.
         """
-        return self._on_series(date_column, value_column, timeseries.decompose)
+        return self._on_series("trend", date_column, value_column, timeseries.decompose)
 
     def detect_anomalies(self, date_column: str, value_column: str) -> str:
         """Find periods that break the pattern of a time series.
@@ -143,9 +162,9 @@ class AnalysisTools:
         Returns:
           JSON listing unusual periods with a score and direction.
         """
-        return self._on_series(date_column, value_column, timeseries.anomalies)
+        return self._on_series("anomalies", date_column, value_column, timeseries.anomalies)
 
-    def _on_series(self, date_column: str, value_column: str, analyse) -> str:
+    def _on_series(self, kind: str, date_column: str, value_column: str, analyse) -> str:
         """Every series tool runs on the full result, not the page shown to the model."""
         if not self.results:
             return json.dumps({"error": "Run a SQL query before analysing a series."})
@@ -164,6 +183,8 @@ class AnalysisTools:
                 )
             frame = full.frame
         try:
-            return json.dumps(analyse(timeseries.prepare(frame, date_column, value_column)))
+            outcome = analyse(timeseries.prepare(frame, date_column, value_column))
         except timeseries.NotEnoughData as error:
             return json.dumps({"error": str(error)})
+        self.analyses.append(SeriesAnalysis(kind, date_column, value_column, outcome))
+        return json.dumps(outcome)

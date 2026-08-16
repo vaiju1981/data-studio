@@ -210,3 +210,29 @@ def test_metrics_live_in_the_system_prompt_and_survive_single_turn() -> None:
         assert "avgBet = coinIn / handlePulls" in agent.messages[0]["content"]
     finally:
         dataset.close()
+
+
+def test_forecast_output_travels_to_the_ui_as_evidence() -> None:
+    """The model can quote a MAPE; the user must be able to see where it came from."""
+    rows = ["month,amount"]
+    rows += [f"2024-{m:02d}-01,{100 + m}" for m in range(1, 13)]
+    rows += [f"2025-{m:02d}-01,{110 + m}" for m in range(1, 13)]
+    client = FakeClient(
+        [
+            tool_call("run_sql", sql="SELECT month, amount FROM sales ORDER BY month"),
+            tool_call("forecast", date_column="month", value_column="amount", periods=6),
+            Message(role="assistant", content="Roughly flat."),
+        ]
+    )
+    agent, dataset = make_agent(client, data=("\n".join(rows) + "\n").encode())
+    try:
+        answer = agent.ask("forecast the next six months")
+        assert len(answer.analyses) == 1
+        analysis = answer.analyses[0]
+        assert analysis.kind == "forecast"
+        assert analysis.value_column == "amount"
+        # The accuracy comparison the model relied on is available to render.
+        assert "model_mape_pct" in analysis.result["accuracy"]
+        assert len(analysis.result["forecast"]) == 6
+    finally:
+        dataset.close()

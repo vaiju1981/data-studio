@@ -154,11 +154,19 @@ def _backtest(values: pd.Series, season: int | None) -> dict[str, object]:
             float(np.mean(np.abs((test.to_numpy() - prediction) / test.to_numpy())) * 100), 2
         )
 
-    try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            model_error = mape(_fit(train, season).forecast(horizon).to_numpy())
-    except Exception:
+    # Holding out the tail can leave too few points for a seasonal fit even when
+    # the full series had enough. Fall back rather than lose the comparison, which
+    # is the part that keeps a flat forecast honest.
+    model_error = None
+    for attempt in (season, None) if season else (None,):
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                model_error = mape(_fit(train, attempt).forecast(horizon).to_numpy())
+            break
+        except Exception:
+            continue
+    if model_error is None:
         return {"note": "Backtest could not be fitted"}
 
     naive = mape(np.repeat(train.iloc[-1], horizon))
