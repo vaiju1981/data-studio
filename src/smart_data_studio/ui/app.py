@@ -6,8 +6,9 @@ from pathlib import Path
 
 import streamlit as st
 
+from smart_data_studio import logs
 from smart_data_studio.agent import Answer, DataAgent
-from smart_data_studio.config import MODEL_ID, OLLAMA_HOST
+from smart_data_studio.config import ALLOW_LOCAL_PATHS, MODEL_ID, OLLAMA_HOST
 from smart_data_studio.dataset import CsvSource, Dataset
 from smart_data_studio.profile import profile_dataset
 from smart_data_studio.ui import render
@@ -18,6 +19,11 @@ SINGLE_TURN = "Single turn"
 
 def main() -> None:
     st.set_page_config(page_title="Smart Data Studio", page_icon="▦", layout="wide")
+    logs.configure()
+    if "session_id" not in st.session_state:
+        st.session_state.session_id = logs.new_session()
+        logs.event("session.started")
+    logs.bind(session=st.session_state.session_id)
     render.styles()
     _initialize_state()
 
@@ -65,11 +71,15 @@ def _sidebar() -> None:
         accept_multiple_files=True,
         help="Select one or more related CSV files.",
     )
-    paths = st.text_area(
-        "Or local CSV paths",
-        placeholder="/Users/me/data/sales.csv\n/Users/me/data/regions.csv",
-        help="One path per line. Paths are read by the machine running this app.",
-    )
+    if ALLOW_LOCAL_PATHS:
+        paths = st.text_area(
+            "Or local CSV paths",
+            placeholder="/Users/me/data/sales.csv\n/Users/me/data/regions.csv",
+            help="One path per line. Paths are read by the machine running this app.",
+        )
+    else:
+        paths = ""
+        st.caption("Server paths are disabled on this deployment. Upload the file instead.")
     if st.button("Load and analyze", type="primary", use_container_width=True):
         _load(uploads, paths)
 

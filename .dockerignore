@@ -1,0 +1,13 @@
+.git
+.github
+.venv
+docs
+tests
+.claude
+.remember
+.tmp
+.pytest_cache
+.ruff_cache
+**/__pycache__
+*.duckdb
+*.csv

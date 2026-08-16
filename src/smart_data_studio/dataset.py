@@ -5,19 +5,30 @@ from __future__ import annotations
 import json
 import re
 import tempfile
+import threading
 from collections.abc import Iterable
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
 import duckdb
 import pandas as pd
 
+from smart_data_studio import logs
 from smart_data_studio.config import (
+    ALLOW_LOCAL_PATHS,
     DIGEST_SAMPLE_ROWS,
+    DUCKDB_MEMORY_LIMIT,
+    DUCKDB_THREADS,
     MAX_DISPLAY_ROWS,
+    MAX_INGEST_COLUMNS,
+    MAX_INGEST_ROWS,
     MAX_LLM_PAYLOAD_CHARS,
     MAX_LLM_ROWS,
+    MAX_UPLOAD_BYTES,
+    QUERY_TIMEOUT_SECONDS,
     SAMPLE_ROWS,
+    temp_directory,
 )
 from smart_data_studio.sql_guard import validate_select
 
@@ -42,6 +53,10 @@ class CsvSource:
 
     @classmethod
     def from_path(cls, path: str | Path) -> CsvSource:
+        if not ALLOW_LOCAL_PATHS:
+            raise PermissionError(
+                "Loading from a server path is disabled on this deployment. Upload the file."
+            )
         resolved = Path(path).expanduser().resolve()
         if not resolved.is_file():
             raise FileNotFoundError(f"CSV file not found: {resolved}")
@@ -51,6 +66,11 @@ class CsvSource:
     def from_upload(cls, name: str, content: bytes) -> CsvSource:
         if not content:
             raise ValueError(f"{name} is empty")
+        if len(content) > MAX_UPLOAD_BYTES:
+            raise ValueError(
+                f"{name} is {len(content) / 1e6:.0f}MB; the limit is "
+                f"{MAX_UPLOAD_BYTES / 1e6:.0f}MB."
+            )
         return cls(name=name, content=content)
 
 
@@ -90,9 +110,12 @@ class Dataset:
         connection = duckdb.connect(database=":memory:")
         table_names: list[str] = []
         try:
+            cls._apply_budget(connection)
             for source in source_list:
                 table_name = cls._unique_table_name(source.name, table_names)
-                cls._load_source(connection, table_name, source)
+                with logs.timed("ingest", table=table_name) as fields:
+                    cls._load_source(connection, table_name, source)
+                    fields.update(cls._check_size(connection, table_name))
                 table_names.append(table_name)
             connection.execute("SET enable_external_access = false")
             connection.execute("SET lock_configuration = true")
@@ -100,6 +123,31 @@ class Dataset:
             connection.close()
             raise
         return cls(connection, tuple(table_names))
+
+    @staticmethod
+    def _apply_budget(connection: duckdb.DuckDBPyConnection) -> None:
+        """Bound memory, threads and spill before the connection is locked shut.
+
+        Without this one careless join takes the whole process with it, and after
+        the lock these settings can no longer be changed — which is the point.
+        """
+        Path(temp_directory()).mkdir(parents=True, exist_ok=True)
+        connection.execute(f"SET memory_limit='{DUCKDB_MEMORY_LIMIT}'")
+        connection.execute(f"SET threads={int(DUCKDB_THREADS)}")
+        connection.execute(f"SET temp_directory='{temp_directory()}'")
+
+    @staticmethod
+    def _check_size(connection: duckdb.DuckDBPyConnection, table_name: str) -> dict[str, int]:
+        quoted = quote_identifier(table_name)
+        rows = int(connection.execute(f"SELECT COUNT(*) FROM {quoted}").fetchone()[0])
+        columns = len(connection.execute(f"DESCRIBE {quoted}").fetchall())
+        if rows > MAX_INGEST_ROWS:
+            raise ValueError(f"{table_name} has {rows:,} rows; the limit is {MAX_INGEST_ROWS:,}.")
+        if columns > MAX_INGEST_COLUMNS:
+            raise ValueError(
+                f"{table_name} has {columns:,} columns; the limit is {MAX_INGEST_COLUMNS:,}."
+            )
+        return {"rows": rows, "columns": columns}
 
     @staticmethod
     def _unique_table_name(filename: str, existing: list[str]) -> str:
@@ -229,7 +277,9 @@ class Dataset:
             f"SELECT *, COUNT(*) OVER () AS {TOTAL_ROWS_COLUMN} "
             f"FROM ({clean_sql}) AS result_rows LIMIT {int(row_limit)}"
         )
-        frame = self.connection.execute(counted_sql).fetchdf()
+        with logs.timed("query", sql=clean_sql) as fields, self._deadline():
+            frame = self.connection.execute(counted_sql).fetchdf()
+            fields["returned"] = len(frame)
         # Read the count positionally. A result of its own carrying this column name
         # would otherwise shadow ours, and we would report the user's data as the
         # row count and drop their column instead of the one we added.
@@ -251,6 +301,27 @@ class Dataset:
             name for table in self.tables for name, _ in self.schema(table) if name.lower() in words
         }
         return sorted(found)
+
+    @contextmanager
+    def _deadline(self):
+        """Interrupt a query that outstays its welcome.
+
+        DuckDB has no statement timeout, but a connection can be interrupted from
+        another thread, which is enough to stop a runaway cross join without
+        losing the session.
+        """
+        timer = threading.Timer(QUERY_TIMEOUT_SECONDS, self.connection.interrupt)
+        timer.daemon = True
+        timer.start()
+        try:
+            yield
+        except duckdb.InterruptException as error:
+            raise TimeoutError(
+                f"The query ran past {QUERY_TIMEOUT_SECONDS}s and was cancelled. "
+                "Narrow it — filter, aggregate, or add a LIMIT."
+            ) from error
+        finally:
+            timer.cancel()
 
     def sample_text(self, limit: int = SAMPLE_ROWS) -> str:
         """First rows of each table, so the model sees real values and not only types."""

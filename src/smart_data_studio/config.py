@@ -1,7 +1,55 @@
-"""Runtime settings kept small enough to audit at a glance."""
+"""Runtime settings kept small enough to audit at a glance.
 
-MODEL_ID = "gemma4:31b-cloud"
-OLLAMA_HOST = "http://localhost:11434"
+Anything a deployment must change is read from the environment, so a hosted
+instance is configured rather than edited.
+"""
+
+import os
+from pathlib import Path
+
+VERSION = "0.1.0"
+# Bumped whenever the analyst prompt changes, so a logged answer can be traced to
+# the instructions that produced it.
+PROMPT_VERSION = "2026-08-16.1"
+
+
+def _flag(name: str, default: bool) -> bool:
+    return os.environ.get(name, str(default)).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _number(name: str, default: int) -> int:
+    try:
+        return int(os.environ[name])
+    except (KeyError, ValueError):
+        return default
+
+
+MODEL_ID = os.environ.get("SDS_MODEL_ID", "gemma4:31b-cloud")
+OLLAMA_HOST = os.environ.get("SDS_OLLAMA_HOST", "http://localhost:11434")
+
+# Reading a path off the host is right for a local tool and disqualifying for a
+# shared one, so hosted deployments turn it off.
+ALLOW_LOCAL_PATHS = _flag("SDS_ALLOW_LOCAL_PATHS", True)
+
+# DuckDB is given a budget before the connection is locked; without one a single
+# careless join can take the whole process down with it.
+DUCKDB_MEMORY_LIMIT = os.environ.get("SDS_DUCKDB_MEMORY_LIMIT", "4GB")
+DUCKDB_THREADS = _number("SDS_DUCKDB_THREADS", 4)
+DUCKDB_TEMP_DIR = os.environ.get("SDS_DUCKDB_TEMP_DIR", "")
+QUERY_TIMEOUT_SECONDS = _number("SDS_QUERY_TIMEOUT_SECONDS", 60)
+
+# Upload ceilings, checked before parsing rather than after.
+MAX_UPLOAD_BYTES = _number("SDS_MAX_UPLOAD_BYTES", 500 * 1024 * 1024)
+MAX_INGEST_ROWS = _number("SDS_MAX_INGEST_ROWS", 20_000_000)
+MAX_INGEST_COLUMNS = _number("SDS_MAX_INGEST_COLUMNS", 512)
+
+LOG_LEVEL = os.environ.get("SDS_LOG_LEVEL", "INFO")
+LOG_FORMAT = os.environ.get("SDS_LOG_FORMAT", "json")
+
+
+def temp_directory() -> str:
+    return DUCKDB_TEMP_DIR or str(Path(os.environ.get("TMPDIR", "/tmp")) / "smart-data-studio")
+
 
 # Three separate ceilings. They were one value before, which silently truncated
 # downloads to whatever the model happened to be allowed to read.
