@@ -1,0 +1,122 @@
+from __future__ import annotations
+
+import json
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from smart_data_studio import analysis
+from smart_data_studio.dataset import CsvSource, Dataset
+from smart_data_studio.tools import AnalysisTools
+
+
+def two_groups(shift: float, size: int = 4000, seed: int = 0) -> pd.DataFrame:
+    rng = np.random.default_rng(seed)
+    return pd.DataFrame(
+        {
+            "segment": ["A"] * size + ["B"] * size,
+            "value": np.concatenate([rng.normal(100, 10, size), rng.normal(100 + shift, 10, size)]),
+        }
+    )
+
+
+def test_a_real_difference_and_a_trivial_one_are_told_apart() -> None:
+    """Both are significant at this size; only the effect size separates them."""
+    real = analysis.compare_groups(two_groups(shift=12.0), "segment", "value")["test"]
+    trivial = analysis.compare_groups(two_groups(shift=0.15), "segment", "value")["test"]
+
+    assert real["mann_whitney_p_value"] < 0.01
+    assert real["effect"] in {"large", "medium"}
+
+    # The trivial difference may well be "significant" — the effect size is what saves us.
+    assert trivial["effect"] == "negligible"
+    assert abs(trivial["cliffs_delta"]) < abs(real["cliffs_delta"])
+
+
+def test_group_summaries_cover_every_row_even_when_the_test_samples() -> None:
+    frame = two_groups(shift=5.0, size=60_000)
+    result = analysis.compare_groups(frame, "segment", "value")
+    assert "sampling" in result
+    assert [group["rows"] for group in result["groups"]] == [60_000, 60_000]
+
+
+def test_comparison_rejects_unusable_columns() -> None:
+    with pytest.raises(analysis.NotAnalysable, match="not found"):
+        analysis.compare_groups(two_groups(1.0), "nope", "value")
+    single = pd.DataFrame({"segment": ["A"] * 5, "value": [1.0] * 5})
+    with pytest.raises(analysis.NotAnalysable, match="fewer than two groups"):
+        analysis.compare_groups(single, "segment", "value")
+
+
+def test_driver_sweep_finds_the_dimension_that_moved_not_the_one_asked_about() -> None:
+    """The point of sweeping: the mover is geo, while tier is flat and would mislead."""
+    frame = pd.DataFrame(
+        {
+            "period": ["before"] * 4 + ["after"] * 4,
+            "tier": ["gold", "gold", "silver", "silver"] * 2,
+            "geo": ["local", "national"] * 4,
+            "revenue": [100.0, 100.0, 100.0, 100.0, 40.0, 160.0, 40.0, 160.0],
+        }
+    )
+    result = analysis.rank_drivers(frame, "revenue", "period")
+
+    assert result["total_change"] == 0.0  # the total hides the movement underneath
+    assert result["drivers"][0]["dimension"] == "geo"
+    moves = {item["level"]: item["change"] for item in result["drivers"][0]["movers"]}
+    assert moves["local"] == -120.0 and moves["national"] == 120.0
+
+
+def test_driver_sweep_needs_exactly_two_sides() -> None:
+    frame = pd.DataFrame({"period": ["a", "b", "c"], "revenue": [1.0, 2.0, 3.0]})
+    with pytest.raises(analysis.NotAnalysable, match="exactly two values"):
+        analysis.rank_drivers(frame, "revenue", "period")
+
+
+def test_association_ranks_by_explained_variation_not_by_the_biggest_gap() -> None:
+    """A tiny extreme group looks impressive by eye but explains almost nothing."""
+    rng = np.random.default_rng(1)
+    size = 3000
+    driver = rng.normal(0, 1, size)
+    frame = pd.DataFrame(
+        {
+            "strong_numeric": driver,
+            "noise": rng.normal(0, 1, size),
+            "rare_extreme": ["normal"] * (size - 5) + ["rare"] * 5,
+            "target": driver * 10 + rng.normal(0, 1, size),
+        }
+    )
+    frame.loc[frame["rare_extreme"] == "rare", "target"] += 500
+
+    ranked = analysis.relate(frame, "target")["associations"]
+    order = [item["column"] for item in ranked]
+    assert order[0] == "strong_numeric"
+    assert order.index("noise") > order.index("strong_numeric")
+    strength = {item["column"]: item["strength"] for item in ranked}
+    assert strength["strong_numeric"] > strength["rare_extreme"]
+
+
+def test_tools_return_readable_json_and_record_evidence() -> None:
+    rows = ["segment,geo,value"]
+    rng = np.random.default_rng(2)
+    for index in range(600):
+        segment = "A" if index % 2 else "B"
+        rows.append(f"{segment},{'local' if index % 3 else 'national'},{rng.normal(100, 10):.3f}")
+    dataset = Dataset.load([CsvSource.from_upload("g.csv", ("\n".join(rows) + "\n").encode())])
+    try:
+        tools = AnalysisTools(dataset)
+        assert json.loads(tools.compare_groups("segment", "value"))["error"]  # no query yet
+
+        tools.run_sql("SELECT segment, geo, value FROM g")
+        compared = json.loads(tools.compare_groups("segment", "value"))
+        assert compared["compared"] == ["A", "B"]
+        assert "cliffs_delta" in compared["test"]
+
+        related = json.loads(tools.relate("value"))
+        assert related["target"] == "value"
+
+        assert "not found" in json.loads(tools.compare_groups("missing", "value"))["error"]
+        # Every analysis is captured so the UI can show it as evidence.
+        assert [item.kind for item in tools.analyses] == ["comparison", "associations"]
+    finally:
+        dataset.close()

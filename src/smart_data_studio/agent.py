@@ -40,7 +40,11 @@ names from the latest result. Mention truncation whenever the tool says truncate
 Keep the final answer concise, explain the important result, and never hide limitations.
 
 For questions about trends, forecasts or unusual periods, first run_sql to aggregate one row per
-whole period, then call forecast, analyze_trend or detect_anomalies on that result. Exclude
+whole period, then call forecast, analyze_trend or detect_anomalies on that result.
+For "is this difference real", call compare_groups. For "what drove this change", run_sql with a
+column labelling the two sides and every dimension you want swept, then call rank_drivers. For
+"what is associated with X", call relate. Report effect size and association strength rather than
+p-values alone — at this scale almost everything is significant. Exclude
 incomplete first and last periods in the SQL — a part-covered month reads as a collapse. When a
 forecast reports that it does not beat the do-nothing baselines, say so and describe the result as
 a level with a range rather than a trend.
@@ -142,6 +146,9 @@ class DataAgent:
             self.tools.forecast,
             self.tools.analyze_trend,
             self.tools.detect_anomalies,
+            self.tools.compare_groups,
+            self.tools.rank_drivers,
+            self.tools.relate,
         ]
 
     def _run_loop(
@@ -162,10 +169,18 @@ class DataAgent:
                     }
                 )
 
+        # Out of rounds. Ask once more with no tools offered, so the model has to
+        # answer from what it already gathered rather than the user getting nothing
+        # after a dozen queries ran.
+        try:
+            final = self.client.chat(model=MODEL_ID, messages=messages)
+            text = final.message.content or EXHAUSTED_MESSAGE
+        except Exception:
+            text = EXHAUSTED_MESSAGE
         # Never leave the history ending on a tool message: the next turn would then
         # place a user message straight after a tool result, with no reply between.
-        messages.append({"role": "assistant", "content": EXHAUSTED_MESSAGE})
-        return EXHAUSTED_MESSAGE
+        messages.append({"role": "assistant", "content": text})
+        return text
 
     def _invoke(self, call: Any) -> str:
         name = call.function.name

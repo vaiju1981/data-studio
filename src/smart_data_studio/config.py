@@ -15,9 +15,19 @@ MAX_LLM_PAYLOAD_CHARS = 12_000
 DIGEST_SAMPLE_ROWS = 10
 
 MAX_CHART_ROWS = 5_000
+# Statistical tools read the whole result, so this bounds what they will pull.
+MAX_ANALYSIS_ROWS = 500_000
 SAMPLE_ROWS = 5
 
-MAX_TOOL_ROUNDS = 6
+# Statistical tests get their power from sample size; past this the extra rows only
+# cost time, and effect size — the part that matters — is already stable.
+MAX_TEST_SAMPLE = 50_000
+MAX_RELATE_SAMPLE = 100_000
+# A column with more levels than this is an identifier, not a dimension to sweep.
+MAX_DRIVER_LEVELS = 50
+
+# Eight tools means longer chains; six rounds left complex questions unanswered.
+MAX_TOOL_ROUNDS = 10
 MAX_EXPLORE_ROUNDS = 8
 
 # Older tool results are replaced by a placeholder once this many newer ones exist.

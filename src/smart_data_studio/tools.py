@@ -7,9 +7,9 @@ from dataclasses import dataclass
 
 from plotly.graph_objects import Figure
 
-from smart_data_studio import timeseries
+from smart_data_studio import analysis, timeseries
 from smart_data_studio.charts import ChartSpec, make_figure
-from smart_data_studio.config import MAX_CHART_ROWS
+from smart_data_studio.config import MAX_ANALYSIS_ROWS, MAX_CHART_ROWS
 from smart_data_studio.dataset import Dataset, QueryResult
 
 
@@ -163,6 +163,76 @@ class AnalysisTools:
           JSON listing unusual periods with a score and direction.
         """
         return self._on_series("anomalies", date_column, value_column, timeseries.anomalies)
+
+    def compare_groups(self, dimension: str, measure: str) -> str:
+        """Test whether groups genuinely differ on a measure, and by how much.
+
+        Args:
+          dimension: Column holding the groups to compare, such as a segment or tier.
+          measure: Numeric column to compare across those groups.
+
+        Returns:
+          JSON with per-group summaries, p-values and — the part that matters at
+          scale — effect size.
+        """
+        return self._on_frame(
+            "comparison", lambda frame: analysis.compare_groups(frame, dimension, measure)
+        )
+
+    def rank_drivers(self, measure: str, split: str) -> str:
+        """Rank which dimensions explain a change in a measure between two sides.
+
+        Args:
+          measure: Numeric column whose change is being explained.
+          split: Column holding exactly two values, such as period or segment labels.
+
+        Returns:
+          JSON ranking every usable dimension by how much movement it accounts for.
+        """
+        return self._on_frame("drivers", lambda frame: analysis.rank_drivers(frame, measure, split))
+
+    def relate(self, target: str) -> str:
+        """Rank every column by strength of association with a target column.
+
+        Args:
+          target: Numeric column to explain.
+
+        Returns:
+          JSON ranking columns by association strength on a comparable 0 to 1 scale.
+        """
+        return self._on_frame("associations", lambda frame: analysis.relate(frame, target))
+
+    def _on_frame(self, kind: str, analyse) -> str:
+        """Run a whole-result analysis, on every row rather than the page shown."""
+        frame = self._full_frame()
+        if isinstance(frame, str):
+            return frame
+        try:
+            outcome = analyse(frame)
+        except analysis.NotAnalysable as error:
+            return json.dumps({"error": str(error)})
+        self.analyses.append(SeriesAnalysis(kind, "", "", outcome))
+        return json.dumps(outcome, default=str)
+
+    def _full_frame(self):
+        """The complete result behind the last query, or a JSON error to hand back."""
+        if not self.results:
+            return json.dumps({"error": "Run a SQL query before analysing it."})
+        source = self.results[-1]
+        if not source.truncated:
+            return source.frame
+        full = self.dataset.query(source.sql, row_limit=MAX_ANALYSIS_ROWS)
+        if full.truncated:
+            return json.dumps(
+                {
+                    "error": (
+                        f"This result has {full.total_rows:,} rows, more than the "
+                        f"{MAX_ANALYSIS_ROWS:,} that can be analysed at once. Aggregate or "
+                        "filter it first."
+                    )
+                }
+            )
+        return full.frame
 
     def _on_series(self, kind: str, date_column: str, value_column: str, analyse) -> str:
         """Every series tool runs on the full result, not the page shown to the model."""
