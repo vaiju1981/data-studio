@@ -1,13 +1,18 @@
-"""Opt-in regression run of the question bank against the real visits file.
+"""Opt-in regression run of the whole question bank against the real visits file.
 
-Slow (loads 2.7GB and calls a live model), so it is skipped unless both the CSV
-is present and USE_LLM=1 is set:
+Slow (loads 2.7GB and calls a live model for every question), so it is skipped
+unless the CSV is present and USE_LLM=1 is set:
 
-    USE_LLM=1 pytest tests/test_question_bank.py -v
+    USE_LLM=1 pytest tests/test_question_bank.py -q
 
-Run it before shipping a change to prompts, tools or the profile. Assertions
-anchor on numbers verified independently in SQL rather than on wording, so the
-model is free to phrase an answer however it likes and still pass.
+Run it before shipping a change to prompts, tools or the profile. Expect roughly
+five minutes for the full bank.
+
+Every question is asked in single-turn mode so the cases stay independent of each
+other and of the order they run in. Assertions anchor on numbers verified
+separately in SQL rather than on wording — the model is free to phrase an answer
+however it likes and still pass. Where a value depends on a judgement the model
+is entitled to make, the case checks only that real evidence was produced.
 """
 
 from __future__ import annotations
@@ -24,11 +29,139 @@ from smart_data_studio.profile import profile_dataset
 
 CSV = Path("~/ga_cache/training_data/STATION_playerVisits_REDROCK.csv").expanduser()
 
+METRICS = """avgBet = 0 if handlePulls or coinIn is 0, else total coinIn / total handlePulls per player
+theo_last_90 = sum of theoWin over the 90 days ending at the latest date in the data
+eligible player = at least 100 total handle pulls
+high bet = eligible player with avgBet above the median avgBet of eligible players"""
+
 pytestmark = [
     pytest.mark.skipif(not CSV.is_file(), reason=f"visits file not present at {CSV}"),
     pytest.mark.skipif(
         os.environ.get("USE_LLM") != "1",
         reason="slow and needs a live model; set USE_LLM=1 to run",
+    ),
+]
+
+# (number, question, anchors). Anchors are values proved independently in SQL and
+# not dependent on any choice the model is free to make.
+BANK: list[tuple[int, str, list[float]]] = [
+    # Tier 1 — simple
+    (1, "How many unique players visited, and what was total coin in?", [460_442]),
+    (2, "What is the split of visits by club level?", [3_652_373]),
+    (3, "Which 10 cities send the most players?", []),
+    (4, "What is the average theo win per visit by geo type?", [55.04]),
+    (5, "How many visits had zero coin in?", [5_332_339]),
+    # Tier 2 — moderate
+    (
+        6,
+        "Top 15 players by net win in the last 30 days of available data, with club level and visit count.",
+        [],
+    ),
+    (7, "Monthly coin in for the last 12 months with month-over-month change.", []),
+    (8, "Which hosts manage the most players, and what is their total theo win?", []),
+    (9, "Average theo win per visit by club level and geo type together.", []),
+    (10, "What share of total coin in comes from the top 1% of players?", []),
+    # Tier 3 — multi-step
+    (
+        11,
+        "Find the single worst month for net win, then break that month down by club level to explain what drove it.",
+        [],
+    ),
+    (
+        12,
+        "Which club level has the largest gap between theo win and actual net win? Then show that tier's monthly trend.",
+        [],
+    ),
+    (
+        13,
+        "For each club level compute free play used versus theo win, rank tiers by return, then drill into the worst tier by month.",
+        [],
+    ),
+    (
+        14,
+        "Which city has the highest theo win per player? Then show that city's club level mix against the overall mix.",
+        [],
+    ),
+    (
+        15,
+        "Find the day of week with the lowest theo win per visit, then check whether that pattern holds within each club level.",
+        [],
+    ),
+    # Tier 4 — very complex
+    (
+        16,
+        # No means anchored: asked about NATIONAL the model repeatedly answers about
+        # REGIONAL, and large groups are sampled, so both figures move.
+        "Compare LOCAL versus NATIONAL players on visits per player and theo win per visit. Take whichever group underperforms, break it down by club level, then show that group's monthly trend.",
+        [],
+    ),
+    (
+        17,
+        "Which host had the biggest year-over-year decline in theo win? List that host's top 10 players by lost theo value, then show that host's monthly trend.",
+        [],
+    ),
+    (
+        18,
+        "Take the top 100 players by theo win in the first 6 months, then show how much those same players contributed in the most recent 6 months.",
+        [],
+    ),
+    (
+        19,
+        "Find players active in the first year with zero visits in the second year. What was their combined theo win, and which club level lost the most?",
+        [],
+    ),
+    (
+        20,
+        "Reactivation: players who went 90+ days without visiting and then returned — how many, and what is their theo win before versus after the gap?",
+        [],
+    ),
+    # Tier 5 — data-quality traps
+    (
+        21,
+        "Is the ageGroup field trustworthy for segmentation? Check the distinct values and their date ranges before answering.",
+        [],
+    ),
+    (
+        22,
+        "What was the worst full calendar month for net win? Ignore any partial months at the start or end.",
+        [],
+    ),
+    (23, "Break down theo win by market segment.", []),
+    (24, "Which players do we need for a win-back campaign? Use a 90 day lapse.", []),
+    # Tier 6 — analytics tools
+    (
+        25,
+        "Based on past monthly theo win, what are the next 12 months predictions and the salient points?",
+        [22.08e6],
+    ),
+    (26, "Forecast coin in for the next 6 months by club level.", []),
+    (27, "If the last 12 months repeat, what does that imply for next quarter?", []),
+    (
+        28,
+        "Is theo win trending up or down over the available history, and how strong is the trend?",
+        [],
+    ),
+    (29, "How has coin in per visit trended, and is there seasonality?", []),
+    (30, "Compare the trend in slot coin in against table buy-in.", []),
+    (31, "Which individual days had unusual theo win?", []),
+    (32, "Were there unusual weeks for visit volume in the last year?", []),
+    (33, "Any days where coin in broke the normal pattern for that day of week?", []),
+    (34, "Forecast theo_last_90 for the next 6 months for high bet players.", []),
+    (35, "Which days were unusual for avgBet among eligible players?", []),
+    (
+        36,
+        "Is the difference in theo win per visit between LOCAL and NATIONAL players real, or could it be noise?",
+        [],
+    ),
+    (
+        37,
+        "Theo win year to date versus the same period last year — what drove the change? Sweep all dimensions.",
+        [526_870],
+    ),
+    (
+        38,
+        "Which player attributes are most strongly associated with theo win? Rank them by strength.",
+        [],
     ),
 ]
 
@@ -38,6 +171,7 @@ def agent():
     dataset = Dataset.load([CsvSource.from_path(CSV)])
     try:
         built = DataAgent(dataset, profile_dataset(dataset))
+        built.set_metrics(METRICS)
         built.build_understanding()
         yield built
     finally:
@@ -59,63 +193,29 @@ def mentions(text: str, value: float, tolerance: float = 0.01) -> bool:
 
 def test_understanding_covers_the_basics(agent) -> None:
     """Only the scale is guaranteed; which other facts make the summary varies by run."""
-    text = agent.understanding
-    assert mentions(text, 7_857_098) or mentions(text, 460_442)
+    assert mentions(agent.understanding, 7_857_098) or mentions(agent.understanding, 460_442)
 
 
 @pytest.mark.parametrize(
-    ("label", "question", "anchors"),
-    [
-        (
-            "profile totals",
-            "How many visits and how many distinct players are in the data?",
-            [7_857_098, 460_442],
-        ),
-        (
-            "ytd comparison",
-            "How is theo win year to date this year compared to last year same period?",
-            [126.31e6, 126.84e6],
-        ),
-        (
-            "win-back",
-            "Which players do we need for a win back campaign? Use a 90 day lapse.",
-            [],
-        ),
-        (
-            "forecast",
-            "Based on past monthly theo win, what are the next 12 months predictions?",
-            [22.08e6],
-        ),
-        (
-            "trend",
-            "Is total monthly theo win trending up or down across the available history?",
-            [],
-        ),
-        (
-            "daily anomalies",
-            "Which individual days had unusual total theo win?",
-            [],
-        ),
-        (
-            "club level split",
-            "How many visits are there at each club level?",
-            [3_652_373],
-        ),
-    ],
+    ("number", "question", "anchors"), BANK, ids=[f"q{item[0]:02d}" for item in BANK]
 )
-def test_question_bank_answers_stay_correct(agent, label, question, anchors) -> None:
-    answer = agent.ask(question)
-    assert answer.text and "could not be completed" not in answer.text, label
-    assert answer.results or answer.analyses, f"{label}: no evidence produced"
+def test_question_bank(agent, number, question, anchors) -> None:
+    answer = agent.ask(question, multi_turn=False)
+
+    assert answer.text.strip(), f"q{number}: empty answer"
+    assert "could not finish" not in answer.text, f"q{number}: ran out of tool rounds"
+    assert "could not be completed" not in answer.text, f"q{number}: the turn raised"
+    assert answer.results or answer.analyses, f"q{number}: answered with no evidence"
     for value in anchors:
-        assert mentions(answer.text, value), f"{label}: expected {value:,.0f} in the answer"
+        assert mentions(answer.text, value), f"q{number}: expected {value:,.2f} in the answer"
 
 
 def test_win_back_groups_by_player_alone(agent) -> None:
     """The original bug: GROUP BY playerId, lastVisit split one player across rows."""
     answer = agent.ask(
         "Which players do we need for a win back campaign? Use a 90 day lapse "
-        "and rank by lifetime coin in."
+        "and rank by lifetime coin in.",
+        multi_turn=False,
     )
     sql = " ".join(result.sql for result in answer.results).lower()
     assert "group by" in sql
@@ -128,9 +228,9 @@ def test_ageGroup_trap_is_still_caught(agent) -> None:
     """Anchor on the verdict, not the route: it reaches this by more than one path."""
     answer = agent.ask(
         "Is the ageGroup field trustworthy for segmentation? Check the distinct "
-        "values and their date ranges before answering."
+        "values and their date ranges before answering.",
+        multi_turn=False,
     )
-    # The SQL is the stable part; the wording of the verdict moves between runs.
     sql = " ".join(result.sql for result in answer.results).lower()
     assert "agegroup" in sql, "it never looked at the field"
 
@@ -151,8 +251,21 @@ def test_ageGroup_trap_is_still_caught(agent) -> None:
     )
 
 
+def test_significance_questions_actually_run_a_test(agent) -> None:
+    """Before compare_groups existed this was answered by hand-waving about sample size."""
+    answer = agent.ask(
+        "Is the difference in theo win per visit between LOCAL and NATIONAL players "
+        "real, or could it be noise?",
+        multi_turn=False,
+    )
+    comparisons = [item for item in answer.analyses if item.kind == "comparison"]
+    assert comparisons, "no statistical test was run"
+    test = comparisons[0].result["test"]
+    assert "cliffs_delta" in test and "effect" in test
+
+
 def test_partial_months_are_still_excluded_from_a_forecast(agent) -> None:
-    answer = agent.ask("Forecast monthly theo win for the next 6 months.")
+    answer = agent.ask("Forecast monthly theo win for the next 6 months.", multi_turn=False)
     forecasts = [item for item in answer.analyses if item.kind == "forecast"]
     assert forecasts, "no forecast analysis was recorded"
     result = forecasts[0].result

@@ -9,7 +9,12 @@ from plotly.graph_objects import Figure
 
 from smart_data_studio import analysis, timeseries
 from smart_data_studio.charts import ChartSpec, make_figure
-from smart_data_studio.config import MAX_ANALYSIS_ROWS, MAX_CHART_ROWS
+from smart_data_studio.config import (
+    ANALYSIS_SAMPLE_SEED,
+    MAX_ANALYSIS_CELLS,
+    MAX_ANALYSIS_ROWS,
+    MAX_CHART_ROWS,
+)
 from smart_data_studio.dataset import Dataset, QueryResult
 
 
@@ -204,35 +209,39 @@ class AnalysisTools:
 
     def _on_frame(self, kind: str, analyse) -> str:
         """Run a whole-result analysis, on every row rather than the page shown."""
-        frame = self._full_frame()
-        if isinstance(frame, str):
-            return frame
+        if not self.results:
+            return json.dumps({"error": "Run a SQL query before analysing it."})
+        frame, sampling = self._analysis_frame(self.results[-1])
         try:
             outcome = analyse(frame)
         except analysis.NotAnalysable as error:
             return json.dumps({"error": str(error)})
+        if sampling:
+            outcome["sampled_rows"] = sampling
         self.analyses.append(SeriesAnalysis(kind, "", "", outcome))
         return json.dumps(outcome, default=str)
 
-    def _full_frame(self):
-        """The complete result behind the last query, or a JSON error to hand back."""
-        if not self.results:
-            return json.dumps({"error": "Run a SQL query before analysing it."})
-        source = self.results[-1]
+    def _analysis_frame(self, source: QueryResult):
+        """The whole result, or a random sample of it when that is too large.
+
+        Sampling beats refusing. Told a result was too big to analyse, the model
+        reached for LIMIT — which takes the first rows in whatever order the scan
+        produced, and skewed a group mean by 22% while looking perfectly ordinary.
+        """
         if not source.truncated:
-            return source.frame
-        full = self.dataset.query(source.sql, row_limit=MAX_ANALYSIS_ROWS)
-        if full.truncated:
-            return json.dumps(
-                {
-                    "error": (
-                        f"This result has {full.total_rows:,} rows, more than the "
-                        f"{MAX_ANALYSIS_ROWS:,} that can be analysed at once. Aggregate or "
-                        "filter it first."
-                    )
-                }
-            )
-        return full.frame
+            return source.frame, None
+        width = max(1, source.frame.shape[1])
+        affordable = min(MAX_ANALYSIS_ROWS, MAX_ANALYSIS_CELLS // width)
+        if source.total_rows <= affordable:
+            return self.dataset.query(source.sql, row_limit=affordable).frame, None
+        drawn = self.dataset.query(
+            f"SELECT * FROM ({source.sql}) AS analysed USING SAMPLE "
+            f"reservoir({affordable} ROWS) REPEATABLE ({ANALYSIS_SAMPLE_SEED})",
+            row_limit=affordable,
+        )
+        return drawn.frame, (
+            f"A random {len(drawn.frame):,} of {source.total_rows:,} rows were analysed."
+        )
 
     def _on_series(self, kind: str, date_column: str, value_column: str, analyse) -> str:
         """Every series tool runs on the full result, not the page shown to the model."""

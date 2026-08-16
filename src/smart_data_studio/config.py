@@ -16,7 +16,13 @@ DIGEST_SAMPLE_ROWS = 10
 
 MAX_CHART_ROWS = 5_000
 # Statistical tools read the whole result, so this bounds what they will pull.
-MAX_ANALYSIS_ROWS = 500_000
+# Budgeted in cells rather than rows: a two-column comparison can hold every row
+# of a large table, while a 57-column result cannot, and one row cap cannot serve
+# both without either sampling needlessly or running out of memory.
+MAX_ANALYSIS_CELLS = 20_000_000
+MAX_ANALYSIS_ROWS = 2_000_000
+# Fixed so the same question gives the same answer twice.
+ANALYSIS_SAMPLE_SEED = 42
 SAMPLE_ROWS = 5
 
 # Statistical tests get their power from sample size; past this the extra rows only
