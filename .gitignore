@@ -1,0 +1,23 @@
+# Local working notes, kept out of the published repo
+CLAUDE.md
+docs/
+.claude/
+.remember/
+.tmp/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Local data and scratch
+*.duckdb
+*.csv
