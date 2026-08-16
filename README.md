@@ -9,8 +9,8 @@ before it sees a single query.
 
 ## Run
 
-The project uses the `data-studio` conda environment and a local Ollama server.
-The configured model is `gemma4:31b-cloud`.
+The project uses the `data-studio` conda environment and an Ollama endpoint of
+your choosing — see [Choosing a model](#choosing-a-model).
 
 ```bash
 conda activate data-studio
@@ -50,9 +50,25 @@ ruff format --check src tests
 pytest -q
 ```
 
-## Note on the model
+## Choosing a model
 
-`gemma4:31b-cloud` runs on Ollama's infrastructure rather than locally. Schema
-information, profile statistics and query results used in chat leave the machine.
-The model id is a single value in `config.py`, so pointing at a fully local model
-is a one-line change.
+Two settings in `src/smart_data_studio/config.py` decide what you run against:
+
+```python
+OLLAMA_HOST = "http://localhost:11434"   # whichever Ollama endpoint you use
+MODEL_ID    = "your-model-here"          # any tool-calling model it serves
+```
+
+Point `OLLAMA_HOST` wherever your Ollama runs — this machine, a server you host,
+or a hosted Ollama endpoint — and pick any model that endpoint serves. Those two
+lines are the only place a model or provider is named; nothing else in the code
+depends on either.
+
+**Tool calling is the one requirement**, because the agent is a tool loop and
+cannot run a query without it. Ollama lists tool-capable models at
+<https://ollama.com/search?c=tools>; confirm a particular one with
+`ollama show <model>` and look for `tools` under `Capabilities`.
+
+Where your data goes follows from that endpoint: a model you run yourself keeps
+schema, profile statistics and query results on your own machine, while a hosted
+endpoint receives them.
