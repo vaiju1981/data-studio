@@ -6,7 +6,12 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-from smart_data_studio.config import MAX_DRIVER_LEVELS, MAX_RELATE_SAMPLE, MAX_TEST_SAMPLE
+from smart_data_studio.config import (
+    MAX_DRIVER_LEVELS,
+    MAX_RELATE_SAMPLE,
+    MAX_TEST_SAMPLE,
+    MIN_COMPARISON_ROWS,
+)
 
 # Romano's conventions for Cliff's delta. Cohen's 0.2/0.5/0.8 belong to d and
 # would call a delta of 0.5 "medium" where it is in fact large.
@@ -82,6 +87,12 @@ def compare_groups(frame: pd.DataFrame, dimension: str, measure: str) -> dict[st
         )
 
     first, second = sizes.index[0], sizes.index[1]
+    if int(sizes.iloc[1]) < MIN_COMPARISON_ROWS:
+        raise NotAnalysable(
+            f"The second largest group in {dimension} has {int(sizes.iloc[1])} rows; at least "
+            f"{MIN_COMPARISON_ROWS} are needed to tell a difference from noise. Filter to "
+            "groups with enough data, or compare a coarser dimension."
+        )
     left, sampled_left = _sample(working.loc[working[dimension] == first, measure], MAX_TEST_SAMPLE)
     right, sampled_right = _sample(
         working.loc[working[dimension] == second, measure], MAX_TEST_SAMPLE
@@ -94,6 +105,11 @@ def compare_groups(frame: pd.DataFrame, dimension: str, measure: str) -> dict[st
         )
 
     left_values, right_values = left.to_numpy(), right.to_numpy()
+    if left_values.std() == 0 and right_values.std() == 0:
+        raise NotAnalysable(
+            f"{measure} is constant within both groups, so there is nothing to test. The "
+            f"values are {left_values[0]:g} and {right_values[0]:g}."
+        )
     welch = stats.ttest_ind(left_values, right_values, equal_var=False)
     whitney = stats.mannwhitneyu(left_values, right_values, alternative="two-sided")
 

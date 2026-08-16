@@ -187,3 +187,27 @@ def test_weekly_data_is_recognised_as_seasonal() -> None:
     index = pd.date_range("2022-01-02", periods=120, freq="W")
     frame = pd.DataFrame({"week": index, "amount": [100.0 + i % 52 for i in range(120)]})
     assert timeseries.prepare(frame, "week", "amount").season == 52
+
+
+@pytest.mark.parametrize("horizon", [0, -3, 100_000])
+def test_unusable_forecast_horizons_are_refused_readably(horizon: int) -> None:
+    """statsmodels raises an opaque ValueError for 0 and overflows the calendar for huge."""
+    series = timeseries.prepare(monthly([100.0] * 24), "month", "amount")
+    with pytest.raises(timeseries.NotEnoughData, match="Forecast between 1 and"):
+        timeseries.forecast(series, horizon)
+
+
+def test_a_never_negative_series_is_not_forecast_negative() -> None:
+    """The additive model projected a declining series to -67.2 with a bound of -71.7."""
+    declining = [max(0.0, 200.0 - 8 * index) for index in range(24)]
+    result = timeseries.forecast(timeseries.prepare(monthly(declining), "month", "amount"), 12)
+
+    assert all(point["value"] >= 0 for point in result["forecast"])
+    assert all(point["low_80"] >= 0 for point in result["forecast"])
+    assert any("held at zero" in note for note in result["notes"])
+
+
+def test_a_series_with_real_negatives_keeps_them() -> None:
+    swinging = [50.0 if index % 2 else -50.0 for index in range(24)]
+    result = timeseries.forecast(timeseries.prepare(monthly(swinging), "month", "amount"), 6)
+    assert not any("held at zero" in note for note in result["notes"])

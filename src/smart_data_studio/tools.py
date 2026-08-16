@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 
 from plotly.graph_objects import Figure
@@ -19,17 +20,33 @@ from smart_data_studio.dataset import Dataset, QueryResult
 
 
 @dataclass
-class SeriesAnalysis:
-    """A series tool's own output, kept so the UI can show it as evidence.
+class AnalysisRecord:
+    """An analysis tool's own output, kept so the UI can show it as evidence.
 
     Without this the model can quote a MAPE or a forecast the user has no way to
-    check — the same failure the SQL panel exists to prevent.
+    check — the same failure the SQL panel exists to prevent. `subject` is free
+    text because the tools describe different things: a series has a date and a
+    value, a comparison has a dimension and a measure.
     """
 
     kind: str
-    date_column: str
-    value_column: str
+    subject: str
     result: dict[str, object]
+
+
+def _finite(value: object) -> object:
+    """Strip NaN and Infinity, which are not valid JSON and say nothing to a reader."""
+    if isinstance(value, dict):
+        return {key: _finite(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_finite(item) for item in value]
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
+
+
+def _dump(payload: dict[str, object]) -> str:
+    return json.dumps(_finite(payload), default=str)
 
 
 class AnalysisTools:
@@ -38,7 +55,7 @@ class AnalysisTools:
     def __init__(self, dataset: Dataset):
         self.dataset = dataset
         self.results: list[QueryResult] = []
-        self.analyses: list[SeriesAnalysis] = []
+        self.analyses: list[AnalysisRecord] = []
         self.chart: Figure | None = None
         self.chart_spec: ChartSpec | None = None
         self.chart_source: QueryResult | None = None
@@ -68,9 +85,9 @@ class AnalysisTools:
         try:
             result = self.dataset.query(sql)
         except Exception as error:
-            return json.dumps({"error": str(error)})
+            return _dump({"error": str(error)})
         self.results.append(result)
-        return json.dumps(self.dataset.tool_payload(result), default=str)
+        return _dump(self.dataset.tool_payload(result))
 
     def make_chart(
         self,
@@ -118,7 +135,7 @@ class AnalysisTools:
         try:
             self.chart = make_figure(frame, spec)
         except ValueError as error:
-            return json.dumps({"error": str(error)})
+            return _dump({"error": str(error)})
         self.chart_spec = spec
         self.chart_source = source
         return json.dumps(
@@ -181,7 +198,9 @@ class AnalysisTools:
           scale — effect size.
         """
         return self._on_frame(
-            "comparison", lambda frame: analysis.compare_groups(frame, dimension, measure)
+            "comparison",
+            f"{measure} across {dimension}",
+            lambda frame: analysis.compare_groups(frame, dimension, measure),
         )
 
     def rank_drivers(self, measure: str, split: str) -> str:
@@ -194,7 +213,15 @@ class AnalysisTools:
         Returns:
           JSON ranking every usable dimension by how much movement it accounts for.
         """
-        return self._on_frame("drivers", lambda frame: analysis.rank_drivers(frame, measure, split))
+        return self._on_frame(
+            "drivers",
+            f"{measure} between the two sides of {split}",
+            lambda frame: analysis.rank_drivers(frame, measure, split),
+            # This one sums. Means and correlations survive a sample; the difference
+            # between two near-equal sums does not — it reported a change of
+            # $1,091,057 where the truth was $526,870.
+            may_sample=False,
+        )
 
     def relate(self, target: str) -> str:
         """Rank every column by strength of association with a target column.
@@ -205,9 +232,13 @@ class AnalysisTools:
         Returns:
           JSON ranking columns by association strength on a comparable 0 to 1 scale.
         """
-        return self._on_frame("associations", lambda frame: analysis.relate(frame, target))
+        return self._on_frame(
+            "associations",
+            f"what relates to {target}",
+            lambda frame: analysis.relate(frame, target),
+        )
 
-    def _on_frame(self, kind: str, analyse, may_sample: bool = True) -> str:
+    def _on_frame(self, kind: str, subject: str, analyse, may_sample: bool = True) -> str:
         """Run a whole-result analysis, on every row rather than the page shown."""
         if not self.results:
             return json.dumps({"error": "Run a SQL query before analysing it."})
@@ -227,11 +258,11 @@ class AnalysisTools:
         try:
             outcome = analyse(frame)
         except analysis.NotAnalysable as error:
-            return json.dumps({"error": str(error)})
+            return _dump({"error": str(error)})
         if sampling:
             outcome["sampled_rows"] = sampling
-        self.analyses.append(SeriesAnalysis(kind, "", "", outcome))
-        return json.dumps(outcome, default=str)
+        self.analyses.append(AnalysisRecord(kind, subject, outcome))
+        return _dump(outcome)
 
     def _analysis_frame(self, source: QueryResult):
         """The whole result, or a random sample of it when that is too large.
@@ -280,6 +311,6 @@ class AnalysisTools:
         try:
             outcome = analyse(timeseries.prepare(frame, date_column, value_column))
         except timeseries.NotEnoughData as error:
-            return json.dumps({"error": str(error)})
-        self.analyses.append(SeriesAnalysis(kind, date_column, value_column, outcome))
-        return json.dumps(outcome)
+            return _dump({"error": str(error)})
+        self.analyses.append(AnalysisRecord(kind, f"{value_column} by {date_column}", outcome))
+        return _dump(outcome)

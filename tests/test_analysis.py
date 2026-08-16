@@ -148,3 +148,44 @@ def test_driver_analysis_refuses_to_sample_because_it_sums() -> None:
         assert result["drivers"][0]["dimension"] == "geo"
     finally:
         dataset.close()
+
+
+def test_a_group_too_small_to_test_is_refused_not_scored() -> None:
+    """A one-row group returned nan p-values and called Cliff's delta of -1.0 'large'."""
+    rng = np.random.default_rng(0)
+    frame = pd.DataFrame({"g": ["A"] * 40 + ["B"], "v": list(rng.normal(10, 2, 40)) + [99.0]})
+    with pytest.raises(analysis.NotAnalysable, match="at least"):
+        analysis.compare_groups(frame, "g", "v")
+
+
+def test_constant_groups_are_refused_rather_than_tested() -> None:
+    frame = pd.DataFrame({"g": ["A"] * 30 + ["B"] * 30, "v": [5.0] * 30 + [9.0] * 30})
+    with pytest.raises(analysis.NotAnalysable, match="constant within both groups"):
+        analysis.compare_groups(frame, "g", "v")
+
+
+def test_no_analysis_payload_can_carry_nan_or_infinity() -> None:
+    """Both are invalid JSON, so the guard lives at the serialization boundary."""
+    from smart_data_studio.tools import _finite
+
+    cleaned = _finite(
+        {"a": float("nan"), "b": float("inf"), "c": [1.0, float("-inf")], "d": {"e": float("nan")}}
+    )
+    assert cleaned == {"a": None, "b": None, "c": [1.0, None], "d": {"e": None}}
+    assert "NaN" not in json.dumps(cleaned) and "Infinity" not in json.dumps(cleaned)
+
+
+def test_every_analysis_record_carries_a_readable_subject() -> None:
+    """The panel rendered 'Comparison ·  by  · ? periods' when these reused the series record."""
+    rows = ["seg,val"] + [f"{'A' if i % 2 else 'B'},{i % 50}" for i in range(400)]
+    dataset = Dataset.load([CsvSource.from_upload("s.csv", ("\n".join(rows) + "\n").encode())])
+    try:
+        tools = AnalysisTools(dataset)
+        tools.run_sql("SELECT seg, val FROM s")
+        tools.compare_groups("seg", "val")
+        tools.relate("val")
+        subjects = [record.subject for record in tools.analyses]
+        assert subjects == ["val across seg", "what relates to val"]
+        assert all(subject.strip() for subject in subjects)
+    finally:
+        dataset.close()

@@ -19,7 +19,7 @@ from smart_data_studio.config import (
 )
 from smart_data_studio.dataset import Dataset, QueryResult
 from smart_data_studio.profile import TableProfile
-from smart_data_studio.tools import AnalysisTools, SeriesAnalysis
+from smart_data_studio.tools import AnalysisRecord, AnalysisTools
 
 EXPLORE_PROMPT = """Explore this dataset with SQL before drawing any conclusion.
 Run several queries: read real values, check how low-cardinality columns are distributed,
@@ -67,7 +67,7 @@ class Answer:
     text: str
     results: list[QueryResult]
     chart: Figure | None = None
-    analyses: list[SeriesAnalysis] = field(default_factory=list)
+    analyses: list[AnalysisRecord] = field(default_factory=list)
 
 
 class DataAgent:

@@ -31,6 +31,11 @@ MAX_TEST_SAMPLE = 50_000
 MAX_RELATE_SAMPLE = 100_000
 # A column with more levels than this is an identifier, not a dimension to sweep.
 MAX_DRIVER_LEVELS = 50
+# Below this a group cannot support a test: Cliff's delta from one observation is
+# 1.0, which reads as a maximal effect.
+MIN_COMPARISON_ROWS = 10
+# A forecast cannot reach further ahead than the history it was built from.
+MAX_FORECAST_PERIODS = 120
 
 # Eight tools means longer chains; six rounds left complex questions unanswered.
 MAX_TOOL_ROUNDS = 10

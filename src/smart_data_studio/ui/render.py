@@ -9,7 +9,7 @@ from smart_data_studio.agent import Answer
 from smart_data_studio.config import MAX_EXPORT_ROWS
 from smart_data_studio.dataset import Dataset, QueryResult
 from smart_data_studio.profile import TableProfile
-from smart_data_studio.tools import SeriesAnalysis
+from smart_data_studio.tools import AnalysisRecord
 
 
 def answer(item: Answer, key: str, dataset: Dataset) -> None:
@@ -39,16 +39,24 @@ def answer(item: Answer, key: str, dataset: Dataset) -> None:
             _export(result, f"{key}-{index}", dataset)
 
 
-TITLES = {"forecast": "Forecast", "trend": "Trend", "anomalies": "Anomalies"}
+TITLES = {
+    "forecast": "Forecast",
+    "trend": "Trend",
+    "anomalies": "Anomalies",
+    "comparison": "Group comparison",
+    "drivers": "Drivers",
+    "associations": "Associations",
+}
 
 
-def _analysis(analysis: SeriesAnalysis, key: str) -> None:
+def _analysis(analysis: AnalysisRecord, key: str) -> None:
     """Show what the model was told, so a quoted MAPE or forecast can be checked."""
     result = analysis.result
     with st.container(border=True):
+        periods = result.get("periods_used")
         st.caption(
-            f"{TITLES.get(analysis.kind, analysis.kind)} · {analysis.value_column} "
-            f"by {analysis.date_column} · {result.get('periods_used', '?')} periods"
+            f"{TITLES.get(analysis.kind, analysis.kind)} · {analysis.subject}"
+            + (f" · {periods} periods" if periods else "")
         )
         for note in result.get("notes") or []:
             st.warning(note)

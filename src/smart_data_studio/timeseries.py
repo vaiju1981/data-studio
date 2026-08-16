@@ -11,6 +11,8 @@ from scipy import stats
 from statsmodels.tsa.exponential_smoothing.ets import ETSModel
 from statsmodels.tsa.seasonal import STL
 
+from smart_data_studio.config import MAX_FORECAST_PERIODS
+
 # A first or last period this far below the interior median is nearly always a
 # partial period rather than a real collapse. Left in, a 23-day trailing month
 # turned a flat series into a fabricated 15% decline.
@@ -137,28 +139,52 @@ def forecast(series: Series, periods: int) -> dict[str, object]:
     """Forecast ahead, and say plainly whether the model beats doing nothing."""
     values = series.values
     season = series.season
+    # Bound the horizon before statsmodels does it for us: zero and negative raise
+    # an opaque ValueError, and a huge one overflows the timestamp range.
+    limit = min(MAX_FORECAST_PERIODS, len(values))
+    if periods < 1 or periods > limit:
+        raise NotEnoughData(
+            f"Forecast between 1 and {limit} periods. {len(values)} periods of history "
+            "cannot support a longer horizon than itself."
+        )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         fitted = _fit(values, season)
         prediction = fitted.get_prediction(start=len(values), end=len(values) + periods - 1)
         frame = prediction.summary_frame(alpha=0.20)
 
+    # A quantity that has never been negative should not be forecast negative; the
+    # additive model happily projects a declining series straight through zero.
+    floor_at_zero = bool((values >= 0).all())
+    ahead = [
+        {
+            "period": str(stamp.date()),
+            "value": _bounded(row["mean"], floor_at_zero),
+            "low_80": _bounded(row["pi_lower"], floor_at_zero),
+            "high_80": _bounded(row["pi_upper"], floor_at_zero),
+        }
+        for stamp, row in frame.iterrows()
+    ]
+    notes = list(series.notes)
+    if floor_at_zero and (frame[["mean", "pi_lower"]].to_numpy() < 0).any():
+        notes.append(
+            "The history is never negative, so the forecast and its range were held at "
+            "zero where the model projected below it. Read those periods as 'at or near "
+            "zero', not as a precise figure."
+        )
     return {
         "model": f"ETS(add trend, damped{f', seasonal {season}' if season else ', no seasonal'})",
         "periods_used": len(values),
         "history_mean": round(float(values.mean()), 2),
-        "forecast": [
-            {
-                "period": str(stamp.date()),
-                "value": round(float(row["mean"]), 2),
-                "low_80": round(float(row["pi_lower"]), 2),
-                "high_80": round(float(row["pi_upper"]), 2),
-            }
-            for stamp, row in frame.iterrows()
-        ],
+        "forecast": ahead,
         "accuracy": _backtest(values, season),
-        "notes": series.notes,
+        "notes": notes,
     }
+
+
+def _bounded(value: float, floor_at_zero: bool) -> float:
+    number = float(value)
+    return round(max(number, 0.0) if floor_at_zero else number, 2)
 
 
 def _fit(values: pd.Series, season: int | None):
