@@ -24,8 +24,8 @@ def test_key_detection_uses_exact_counts_not_the_sketch() -> None:
         findings = "\n".join(profile.findings)
 
         # id is genuinely unique; paired repeats every value twice and is not a key.
-        assert "id is a unique key" in findings
-        assert "paired is a unique key" not in findings
+        assert "id is unique across all" in findings
+        assert "paired is unique across all" not in findings
         assert "constant is constant" in findings
 
         # approx_unique overestimates here, so no finding may quote a distinct count

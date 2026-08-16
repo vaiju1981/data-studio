@@ -64,18 +64,18 @@ def _analysis(analysis: AnalysisRecord, key: str) -> None:
         if analysis.kind == "forecast":
             accuracy = result.get("accuracy") or {}
             st.markdown(f"**Model** `{result.get('model', '')}`")
-            if "model_mape_pct" in accuracy:
+            if "model_wape_pct" in accuracy:
                 st.dataframe(
                     pd.DataFrame(
                         [
-                            {"Method": "This model", "Error (MAPE %)": accuracy["model_mape_pct"]},
+                            {"Method": "This model", "Error (WAPE %)": accuracy["model_wape_pct"]},
                             {
                                 "Method": "Repeat last value",
-                                "Error (MAPE %)": accuracy["repeat_last_value_mape_pct"],
+                                "Error (WAPE %)": accuracy["repeat_last_value_wape_pct"],
                             },
                             {
                                 "Method": "History average",
-                                "Error (MAPE %)": accuracy["history_mean_mape_pct"],
+                                "Error (WAPE %)": accuracy["history_mean_wape_pct"],
                             },
                         ]
                     ),

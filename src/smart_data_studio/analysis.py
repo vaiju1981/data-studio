@@ -10,6 +10,7 @@ from smart_data_studio.config import (
     MAX_DRIVER_LEVELS,
     MAX_RELATE_SAMPLE,
     MAX_TEST_SAMPLE,
+    MIN_ASSOCIATION_ROWS,
     MIN_COMPARISON_ROWS,
 )
 
@@ -189,12 +190,19 @@ def rank_drivers(frame: pd.DataFrame, measure: str, split: str) -> dict[str, obj
                 # and ties whenever movement is symmetric.
                 "largest_move": round(largest, 2),
                 "concentration": round(largest / spread, 3) if spread else None,
+                # Against an even split of the churn. A dimension with many levels
+                # gets a large top move for free; lift near 1 means exactly that.
+                "lift_over_uniform": (
+                    round(largest / (spread / len(change)), 2) if spread else None
+                ),
                 "spread": round(spread, 2),
                 "movers": sorted(movers, key=lambda item: item["change"]),
             }
         )
 
-    dimensions.sort(key=lambda item: (item["largest_move"], item["spread"]), reverse=True)
+    dimensions.sort(
+        key=lambda item: (item["largest_move"], item["lift_over_uniform"] or 0), reverse=True
+    )
     return {
         "measure": measure,
         "comparing": {"from": str(before), "to": str(after)},
@@ -205,10 +213,12 @@ def rank_drivers(frame: pd.DataFrame, measure: str, split: str) -> dict[str, obj
         ],
         "drivers": dimensions[:6],
         "reading": (
-            "Ranked by the largest single level movement. concentration is that move "
-            "as a share of all movement in the dimension: near 1 means one level "
-            "explains it, near 0 means many small offsetting shifts. Positive changes "
-            "are gains, negative are losses; within a dimension they sum to the total."
+            "Ranked by the largest single level movement. concentration is that move as "
+            "a share of all movement in the dimension, and lift_over_uniform compares it "
+            "with an even split across levels — a many-levelled dimension earns a big "
+            "top move for free, and lift near 1 shows that is all it is. Positive "
+            "changes are gains, negative are losses; within a dimension they sum to the "
+            "total change."
         ),
     }
 
@@ -237,11 +247,14 @@ def relate(frame: pd.DataFrame, target: str) -> dict[str, object]:
         series = working[column]
         if series.nunique() < 2:
             continue
+        # Every association is computed on the rows where both columns are present,
+        # so a sparse column is scored on what it actually has rather than silently
+        # borrowing the target's row count.
+        paired = pd.DataFrame({"value": series, "target": outcome}).dropna()
+        if len(paired) < MIN_ASSOCIATION_ROWS or paired["value"].nunique() < 2:
+            continue
         if pd.api.types.is_numeric_dtype(series):
-            paired = pd.DataFrame({"a": series, "b": outcome}).dropna()
-            if len(paired) < 10:
-                continue
-            rho = stats.spearmanr(paired["a"], paired["b"]).statistic
+            rho = stats.spearmanr(paired["value"], paired["target"]).statistic
             if pd.isna(rho):
                 continue
             scored.append(
@@ -249,14 +262,15 @@ def relate(frame: pd.DataFrame, target: str) -> dict[str, object]:
                     "column": column,
                     "kind": "numeric",
                     "strength": round(abs(float(rho)), 4),
+                    "rows_used": int(len(paired)),
                     "detail": f"Spearman rho {float(rho):.4f}",
                 }
             )
-        elif series.nunique() <= MAX_DRIVER_LEVELS:
-            groups = outcome.groupby(series)
-            grand = float(outcome.mean())
+        elif paired["value"].nunique() <= MAX_DRIVER_LEVELS:
+            groups = paired.groupby("value")["target"]
+            grand = float(paired["target"].mean())
             between = float(((groups.mean() - grand) ** 2 * groups.size()).sum())
-            total = float(((outcome - grand) ** 2).sum())
+            total = float(((paired["target"] - grand) ** 2).sum())
             if total <= 0:
                 continue
             scored.append(
@@ -264,7 +278,10 @@ def relate(frame: pd.DataFrame, target: str) -> dict[str, object]:
                     "column": column,
                     "kind": "categorical",
                     "strength": round(between / total, 4),
-                    "detail": f"eta squared {between / total:.4f} over {series.nunique()} levels",
+                    "rows_used": int(len(paired)),
+                    "detail": (
+                        f"eta squared {between / total:.4f} over {paired['value'].nunique()} levels"
+                    ),
                 }
             )
 

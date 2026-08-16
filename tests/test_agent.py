@@ -232,7 +232,7 @@ def test_forecast_output_travels_to_the_ui_as_evidence() -> None:
         assert analysis.kind == "forecast"
         assert analysis.subject == "amount by month"
         # The accuracy comparison the model relied on is available to render.
-        assert "model_mape_pct" in analysis.result["accuracy"]
+        assert "model_wape_pct" in analysis.result["accuracy"]
         assert len(analysis.result["forecast"]) == 6
     finally:
         dataset.close()

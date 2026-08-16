@@ -34,6 +34,7 @@ MAX_DRIVER_LEVELS = 50
 # Below this a group cannot support a test: Cliff's delta from one observation is
 # 1.0, which reads as a maximal effect.
 MIN_COMPARISON_ROWS = 10
+MIN_ASSOCIATION_ROWS = 10
 # A forecast cannot reach further ahead than the history it was built from.
 MAX_FORECAST_PERIODS = 120
 

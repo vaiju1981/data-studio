@@ -171,7 +171,10 @@ def _findings(stats: pd.DataFrame, row_count: int, exact_distinct: dict[str, int
             findings.append(f"{name} is {null_percentage:.1f}% null.")
 
         if row_count > 1 and null_percentage == 0 and exact is not None and exact == row_count:
-            findings.append(f"{name} is a unique key across all {row_count:,} rows.")
+            findings.append(
+                f"{name} is unique across all {row_count:,} rows, so it is a candidate key. "
+                "Whether it identifies the entity is a semantic question the data cannot settle."
+            )
         elif "VARCHAR" in data_type.upper() and non_null >= 20 and unique / non_null >= 0.8:
             qualifier = "" if exact is not None else "about "
             findings.append(

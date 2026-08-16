@@ -42,7 +42,7 @@ def test_forecast_reports_its_accuracy_against_do_nothing_baselines() -> None:
     assert all(point["low_80"] < point["value"] < point["high_80"] for point in result["forecast"])
     # The comparison always travels with the forecast, whichever way it lands.
     accuracy = result["accuracy"]
-    assert {"model_mape_pct", "repeat_last_value_mape_pct", "history_mean_mape_pct"} <= set(
+    assert {"model_wape_pct", "repeat_last_value_wape_pct", "history_mean_wape_pct"} <= set(
         accuracy
     )
     assert "beats" in accuracy["verdict"] or "does not beat" in accuracy["verdict"]
@@ -154,15 +154,34 @@ def test_a_steady_decline_at_the_boundary_survives() -> None:
 
 
 def test_backtest_survives_a_zero_in_the_held_out_window() -> None:
+    """WAPE divides once by the total, so a zero period costs nothing."""
     values = [100.0] * 20 + [0.0, 100.0, 100.0, 100.0]
     result = timeseries.forecast(timeseries.prepare(monthly(values), "month", "amount"), 3)
     accuracy = result["accuracy"]
 
-    assert accuracy["zero_periods_skipped"] == 1
-    for key in ("model_mape_pct", "repeat_last_value_mape_pct", "history_mean_mape_pct"):
+    for key in ("model_wape_pct", "repeat_last_value_wape_pct", "history_mean_wape_pct"):
         assert np.isfinite(accuracy[key]), f"{key} is not a finite number"
     # Infinity is not valid JSON, whatever json.dumps permits.
     assert "Infinity" not in json.dumps(result)
+
+
+def test_coverage_proves_incompleteness_instead_of_guessing_it() -> None:
+    """Given day coverage, a short period is removed wherever it sits and a real
+    decline is never touched."""
+    index = pd.date_range("2024-01-01", periods=14, freq="MS")
+    frame = pd.DataFrame(
+        {
+            "month": index,
+            "amount": [100.0] * 14,
+            "days": [stamp.days_in_month for stamp in index],
+        }
+    )
+    frame.loc[7, "days"] = 9  # a mid-series month that only half happened
+    series = timeseries.prepare(frame, "month", "amount", coverage_column="days")
+
+    assert len(series.values) == 13
+    assert pd.Timestamp("2024-08-01") not in series.values.index
+    assert any("covers 9 of 31 days" in note for note in series.notes)
 
 
 @pytest.mark.parametrize(

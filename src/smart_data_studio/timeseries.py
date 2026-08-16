@@ -61,8 +61,18 @@ class Series:
         return period if period and len(self.values) >= 2 * period else None
 
 
-def prepare(frame: pd.DataFrame, date_column: str, value_column: str) -> Series:
-    """Turn two columns of a result into a regular series fit to model."""
+def prepare(
+    frame: pd.DataFrame,
+    date_column: str,
+    value_column: str,
+    coverage_column: str | None = None,
+) -> Series:
+    """Turn two columns of a result into a regular series fit to model.
+
+    `coverage_column` holds how many days each period actually covers. Given it,
+    incompleteness is proved rather than inferred from the value, and a genuine
+    collapse is never mistaken for a partial period.
+    """
     for column in (date_column, value_column):
         if column not in frame.columns:
             raise NotEnoughData(f"Column not found: {column}. Available: {list(frame.columns)}")
@@ -90,10 +100,53 @@ def prepare(frame: pd.DataFrame, date_column: str, value_column: str) -> Series:
     series = series.asfreq(freq)
 
     notes: list[str] = []
-    series = _drop_partial_boundaries(series, notes)
+    if coverage_column is not None:
+        if coverage_column not in frame.columns:
+            raise NotEnoughData(
+                f"Column not found: {coverage_column}. Available: {list(frame.columns)}"
+            )
+        covered = (
+            pd.Series(
+                pd.to_numeric(frame[coverage_column], errors="coerce").to_numpy(),
+                index=pd.DatetimeIndex(dates),
+            )
+            .groupby(level=0)
+            .max()
+        )
+        series = _drop_proven_partials(series, covered, freq, notes)
+    else:
+        series = _drop_partial_boundaries(series, notes)
     if len(series) < MIN_POINTS:
         raise NotEnoughData(f"Only {len(series)} complete periods remain")
     return Series(values=series, freq=freq, notes=notes)
+
+
+def _expected_days(index: pd.DatetimeIndex, freq: str) -> pd.Series:
+    """Days each period spans, from the frequency itself: 31 for a long month, 7 for a week."""
+    offset = pd.tseries.frequencies.to_offset(freq)
+    return pd.Series([(stamp + offset - stamp).days or 1 for stamp in index], index=index)
+
+
+def _drop_proven_partials(
+    series: pd.Series, covered: pd.Series, freq: str, notes: list[str]
+) -> pd.Series:
+    """Drop periods whose coverage falls short of the days they span.
+
+    This is the version worth having: it removes a genuinely incomplete period
+    wherever it sits, and never removes a real decline.
+    """
+    expected = _expected_days(series.index, freq)
+    actual = covered.reindex(series.index)
+    short = actual.notna() & (actual < expected)
+    if not short.any():
+        notes.append("Every period is fully covered, so none were excluded.")
+        return series
+    for stamp in series.index[short]:
+        notes.append(
+            f"Dropped {stamp.date()}: covers {int(actual[stamp])} of "
+            f"{int(expected[stamp])} days, so the period is incomplete."
+        )
+    return series[~short]
 
 
 def _drop_partial_boundaries(series: pd.Series, notes: list[str]) -> pd.Series:
@@ -210,15 +263,18 @@ def _backtest(values: pd.Series, season: int | None) -> dict[str, object]:
     train, test = values.iloc[:-horizon], values.iloc[-horizon:]
 
     actual = test.to_numpy()
-    usable = actual != 0
-    if not usable.any():
+    scale = float(np.abs(actual).sum())
+    if scale == 0:
         return {"note": "Every held-out period is zero, so percentage error is undefined"}
 
-    def mape(prediction) -> float | None:
-        """Percentage error over the non-zero periods; dividing by zero gives Infinity,
-        which is not valid JSON and means nothing to a reader."""
-        errors = np.abs((actual[usable] - np.asarray(prediction)[usable]) / actual[usable])
-        return round(float(np.mean(errors) * 100), 2)
+    def wape(prediction) -> float:
+        """Weighted absolute percentage error: total error over total actual.
+
+        MAPE averages per-period ratios, so a single near-zero period dominates it
+        and an exact zero makes it Infinity. WAPE divides once by the total, which
+        is defined whenever the actuals are not all zero.
+        """
+        return round(float(np.abs(actual - np.asarray(prediction)).sum() / scale * 100), 2)
 
     # Holding out the tail can leave too few points for a seasonal fit even when
     # the full series had enough. Fall back rather than lose the comparison, which
@@ -228,23 +284,22 @@ def _backtest(values: pd.Series, season: int | None) -> dict[str, object]:
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                model_error = mape(_fit(train, attempt).forecast(horizon).to_numpy())
+                model_error = wape(_fit(train, attempt).forecast(horizon).to_numpy())
             break
         except Exception:
             continue
     if model_error is None:
         return {"note": "Backtest could not be fitted"}
 
-    naive = mape(np.repeat(train.iloc[-1], horizon))
-    mean = mape(np.repeat(train.mean(), horizon))
+    naive = wape(np.repeat(train.iloc[-1], horizon))
+    mean = wape(np.repeat(train.mean(), horizon))
     best_baseline = min(naive, mean)
-    skipped = int((~usable).sum())
     return {
         "held_out_periods": horizon,
-        **({"zero_periods_skipped": skipped} if skipped else {}),
-        "model_mape_pct": model_error,
-        "repeat_last_value_mape_pct": naive,
-        "history_mean_mape_pct": mean,
+        "metric": "WAPE % (total absolute error over total actual)",
+        "model_wape_pct": model_error,
+        "repeat_last_value_wape_pct": naive,
+        "history_mean_wape_pct": mean,
         "verdict": (
             "The model beats both do-nothing baselines."
             if model_error < best_baseline

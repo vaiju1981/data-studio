@@ -142,13 +142,18 @@ class AnalysisTools:
             {"status": "chart_created", "kind": kind, "rows_plotted": len(frame), "title": title}
         )
 
-    def forecast(self, date_column: str, value_column: str, periods: int) -> str:
+    def forecast(
+        self, date_column: str, value_column: str, periods: int, coverage_column: str = ""
+    ) -> str:
         """Forecast a time series from the most recent SQL result.
 
         Args:
           date_column: Column holding one row per whole period, such as a month.
           value_column: Numeric column to project forward.
           periods: How many future periods to forecast.
+          coverage_column: Optional column holding how many days each period covers,
+            for example count(DISTINCT day). Supply it and incomplete periods are
+            proved rather than guessed at.
 
         Returns:
           JSON with the forecast, an 80% range per period, and an accuracy check
@@ -159,32 +164,41 @@ class AnalysisTools:
             date_column,
             value_column,
             lambda series: timeseries.forecast(series, int(periods)),
+            coverage_column,
         )
 
-    def analyze_trend(self, date_column: str, value_column: str) -> str:
+    def analyze_trend(self, date_column: str, value_column: str, coverage_column: str = "") -> str:
         """Split a time series into trend, seasonality and remainder.
 
         Args:
           date_column: Column holding one row per whole period, such as a month.
           value_column: Numeric column to analyse.
+          coverage_column: Optional column holding how many days each period covers.
 
         Returns:
           JSON with direction, total change, and how much of the variation the
           trend and the season each explain.
         """
-        return self._on_series("trend", date_column, value_column, timeseries.decompose)
+        return self._on_series(
+            "trend", date_column, value_column, timeseries.decompose, coverage_column
+        )
 
-    def detect_anomalies(self, date_column: str, value_column: str) -> str:
+    def detect_anomalies(
+        self, date_column: str, value_column: str, coverage_column: str = ""
+    ) -> str:
         """Find periods that break the pattern of a time series.
 
         Args:
           date_column: Column holding one row per whole period, such as a month.
           value_column: Numeric column to check.
+          coverage_column: Optional column holding how many days each period covers.
 
         Returns:
           JSON listing unusual periods with a score and direction.
         """
-        return self._on_series("anomalies", date_column, value_column, timeseries.anomalies)
+        return self._on_series(
+            "anomalies", date_column, value_column, timeseries.anomalies, coverage_column
+        )
 
     def compare_groups(self, dimension: str, measure: str) -> str:
         """Test whether groups genuinely differ on a measure, and by how much.
@@ -290,7 +304,9 @@ class AnalysisTools:
         """Rows that fit the memory budget, counted in cells so width matters."""
         return min(MAX_ANALYSIS_ROWS, MAX_ANALYSIS_CELLS // max(1, source.frame.shape[1]))
 
-    def _on_series(self, kind: str, date_column: str, value_column: str, analyse) -> str:
+    def _on_series(
+        self, kind: str, date_column: str, value_column: str, analyse, coverage_column: str = ""
+    ) -> str:
         """Every series tool runs on the full result, not the page shown to the model."""
         if not self.results:
             return json.dumps({"error": "Run a SQL query before analysing a series."})
@@ -309,7 +325,9 @@ class AnalysisTools:
                 )
             frame = full.frame
         try:
-            outcome = analyse(timeseries.prepare(frame, date_column, value_column))
+            outcome = analyse(
+                timeseries.prepare(frame, date_column, value_column, coverage_column or None)
+            )
         except timeseries.NotEnoughData as error:
             return _dump({"error": str(error)})
         self.analyses.append(AnalysisRecord(kind, f"{value_column} by {date_column}", outcome))

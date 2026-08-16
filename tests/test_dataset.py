@@ -29,7 +29,7 @@ def test_upload_loads_queries_profiles_and_locks_external_access() -> None:
         profiles = profile_dataset(dataset)
         assert profiles[0].row_count == 3
         assert "column_name" in profiles[0].stats.columns
-        assert any("order_id is a unique key" in item for item in profiles[0].findings)
+        assert any("order_id is unique across all" in item for item in profiles[0].findings)
         assert "Profile" in profiles[0].prompt_text()
         assert "Sample rows from sales_2026" in dataset.sample_text()
 
