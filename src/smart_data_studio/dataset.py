@@ -9,7 +9,8 @@ import tempfile
 import threading
 from collections.abc import Iterable
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 import duckdb
@@ -129,6 +130,22 @@ def _reject_unreadable(name: str, content: bytes) -> None:
 
 
 @dataclass
+class TableLineage:
+    """Where a table came from and what it turned into.
+
+    Shown before any analysis, because "which file, parsed how" is the first
+    question anyone asks of a number they did not expect.
+    """
+
+    table: str
+    source: str
+    loaded_at: str
+    rows: int
+    columns: int
+    warnings: list[str] = field(default_factory=list)
+
+
+@dataclass
 class QueryResult:
     sql: str
     frame: pd.DataFrame
@@ -167,9 +184,15 @@ def _trim_cells(row: dict[str, object]) -> dict[str, object]:
 class Dataset:
     """An in-memory database that becomes read-only after all CSVs are loaded."""
 
-    def __init__(self, connection: duckdb.DuckDBPyConnection, tables: tuple[str, ...]):
+    def __init__(
+        self,
+        connection: duckdb.DuckDBPyConnection,
+        tables: tuple[str, ...],
+        lineage: tuple[TableLineage, ...] = (),
+    ):
         self.connection = connection
         self.tables = tables
+        self.lineage = lineage
         self.queries_run = 0
 
     @classmethod
@@ -180,6 +203,7 @@ class Dataset:
 
         connection = duckdb.connect(database=":memory:")
         table_names: list[str] = []
+        lineage: list[TableLineage] = []
         try:
             cls._apply_budget(connection)
             for source in source_list:
@@ -187,14 +211,24 @@ class Dataset:
                 table_name = cls._unique_table_name(source.name, table_names)
                 with logs.timed("ingest", table=table_name) as fields:
                     cls._load_source(connection, table_name, source)
-                    fields.update(cls._check_size(connection, table_name))
+                    shape = cls._check_size(connection, table_name)
+                    fields.update(shape)
                 table_names.append(table_name)
+                lineage.append(
+                    TableLineage(
+                        table=table_name,
+                        source=safe_name(source.name),
+                        loaded_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                        warnings=cls._parse_warnings(connection, table_name),
+                        **shape,
+                    )
+                )
             connection.execute("SET enable_external_access = false")
             connection.execute("SET lock_configuration = true")
         except Exception:
             connection.close()
             raise
-        return cls(connection, tuple(table_names))
+        return cls(connection, tuple(table_names), tuple(lineage))
 
     @staticmethod
     def _apply_budget(connection: duckdb.DuckDBPyConnection) -> None:
@@ -226,6 +260,31 @@ class Dataset:
                 f"{MAX_INGEST_CELLS:,}. Filter or aggregate before loading."
             )
         return {"rows": rows, "columns": columns}
+
+    @staticmethod
+    def _parse_warnings(connection: duckdb.DuckDBPyConnection, table_name: str) -> list[str]:
+        """Flag columns whose inferred type is probably not what was meant.
+
+        The classic surprise is a numeric column that a handful of stray values
+        turned into text — every later SUM then silently does nothing.
+        """
+        warnings: list[str] = []
+        quoted = quote_identifier(table_name)
+        for row in connection.execute(f"DESCRIBE {quoted}").fetchall():
+            name, kind = row[0], row[1]
+            if "VARCHAR" not in str(kind).upper():
+                continue
+            column = quote_identifier(name)
+            total, numeric = connection.execute(
+                f"SELECT count({column}), count(TRY_CAST({column} AS DOUBLE)) FROM {quoted}"
+            ).fetchone()
+            if total and numeric and 0.9 <= numeric / total < 1.0:
+                warnings.append(
+                    f"{name} was read as text, but {numeric:,} of {total:,} values are numeric — "
+                    f"{total - numeric:,} stray value(s) changed the type. Sums and averages on "
+                    "it will need a cast."
+                )
+        return warnings
 
     @staticmethod
     def _check_header(source: CsvSource) -> None:

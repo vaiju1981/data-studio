@@ -165,6 +165,38 @@ def summary(profiles: list[TableProfile]) -> None:
     columns[3].metric("Profile flags", sum(len(p.findings) for p in profiles))
 
 
+def lineage_panel(dataset: Dataset) -> None:
+    """Where each table came from, and anything odd about how it parsed."""
+    warnings = [(item.table, note) for item in dataset.lineage for note in item.warnings]
+    label = "Source data" + (f" · {len(warnings)} parsing warning(s)" if warnings else "")
+    with st.expander(label, expanded=bool(warnings)):
+        for table, note in warnings:
+            st.warning(f"**{table}** — {note}")
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "Table": item.table,
+                        "From": item.source,
+                        "Rows": f"{item.rows:,}",
+                        "Columns": item.columns,
+                        "Loaded (UTC)": item.loaded_at.replace("+00:00", ""),
+                    }
+                    for item in dataset.lineage
+                ]
+            ),
+            hide_index=True,
+            use_container_width=True,
+        )
+        for table in dataset.tables:
+            st.markdown(f"**{table}** columns as parsed")
+            st.dataframe(
+                pd.DataFrame(dataset.schema(table), columns=["Column", "Type"]),
+                hide_index=True,
+                use_container_width=True,
+            )
+
+
 def profile_panel(profiles: list[TableProfile]) -> None:
     with st.expander("Data profile", expanded=False):
         for profile in profiles:

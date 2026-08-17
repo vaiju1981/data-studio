@@ -38,6 +38,7 @@ def main() -> None:
         return
 
     render.summary(st.session_state.profiles)
+    render.lineage_panel(st.session_state.dataset)
     render.profile_panel(st.session_state.profiles)
     _conversation()
 
@@ -100,6 +101,15 @@ def _sidebar() -> None:
         ),
     )
 
+    if st.session_state.dataset is not None:
+        st.divider()
+        st.caption(
+            "Nothing is stored. The workspace lives in memory and is discarded when the "
+            "session ends, is replaced, or is deleted here."
+        )
+        if st.button("Delete my data", use_container_width=True):
+            _forget()
+
     st.divider()
     st.caption(
         f"Queries run locally in DuckDB. Schema, profile statistics and query results are sent "
@@ -136,6 +146,26 @@ def _metrics_controls() -> None:
         st.caption(f"Columns recognised: {', '.join(known)}")
     else:
         st.warning("No loaded column names found in these definitions — check the spelling.")
+
+
+def _forget() -> None:
+    """Throw the workspace away on request, and prove it in the log.
+
+    Everything is in memory already, so deletion is closing the connection and
+    dropping the references — but it has to be something a user can actually do
+    rather than a property of the implementation.
+    """
+    sessions.release(st.session_state.session_id)
+    for key in ("dataset", "agent"):
+        st.session_state[key] = None
+    st.session_state.profiles = []
+    st.session_state.chat = []
+    st.session_state.understanding = ""
+    st.session_state.insight_error = ""
+    for stale in [key for key in st.session_state if str(key).startswith("export-")]:
+        del st.session_state[stale]
+    logs.event("data.deleted", by="user")
+    st.rerun()
 
 
 def _load(uploads: list[object], paths: str) -> None:

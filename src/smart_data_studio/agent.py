@@ -242,9 +242,15 @@ class DataAgent:
 
     def _data_context(self) -> str:
         profile_text = "\n\n".join(profile.prompt_text() for profile in self.profiles)
+        parsing = [
+            f"- {item.table}: {warning}"
+            for item in self.dataset.lineage
+            for warning in item.warnings
+        ]
+        parsing_text = "\n\nParsing notes:\n" + "\n".join(parsing) if parsing else ""
         return (
             f"Schema:\n{self.dataset.schema_text()}\n\n"
-            f"Profiles:\n{profile_text}{self._date_bounds()}\n\n"
+            f"Profiles:\n{profile_text}{parsing_text}{self._date_bounds()}\n\n"
             f"{self.dataset.sample_text()}"
         )
 
