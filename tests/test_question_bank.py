@@ -155,7 +155,10 @@ BANK: list[tuple[int, str, list[float]]] = [
     ),
     (
         37,
-        "Theo win year to date versus the same period last year — what drove the change? Sweep all dimensions.",
+        # "State the total change" because the anchor asserts that number, and left
+        # open-ended the model sometimes reports only the drivers. Second anchor to
+        # need this; the pattern is that an anchored figure must be asked for.
+        "Theo win year to date versus the same period last year — state the total change, then sweep all dimensions for what drove it.",
         [526_870],
     ),
     (

@@ -40,6 +40,8 @@ from smart_data_studio.config import (
 from smart_data_studio.sql_guard import validate_select
 
 TOTAL_ROWS_COLUMN = "__total_rows"
+# Enough to settle a heuristic without scanning a large file for advice.
+WARNING_SAMPLE_ROWS = 200_000
 
 
 def safe_name(value: str) -> str:
@@ -50,6 +52,19 @@ def safe_name(value: str) -> str:
     """
     cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(value).name).strip("._-")
     return (cleaned or "upload")[:100]
+
+
+CODE_WORDS = ("id", "code", "zip", "postal", "phone", "account", "number", "no", "ref")
+
+
+def _looks_like_code(name: str) -> bool:
+    """Is this column an identifier rather than a quantity?
+
+    zipCode is entirely digits and entirely not a number: summing it is nonsense
+    and casting it drops the leading zero that makes it correct.
+    """
+    parts = re.split(r"[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])", name)
+    return any(part.lower() in CODE_WORDS for part in parts if part)
 
 
 def is_sensitive(column: str) -> bool:
@@ -68,6 +83,7 @@ class CsvSource:
     name: str
     path: Path | None = None
     content: bytes | None = None
+    encoding: str = "utf-8"
 
     def __post_init__(self) -> None:
         if (self.path is None) == (self.content is None):
@@ -107,26 +123,35 @@ class CsvSource:
                 f"{name} is {len(content) / 1e6:.0f}MB; the limit is "
                 f"{MAX_UPLOAD_BYTES / 1e6:.0f}MB."
             )
-        _reject_unreadable(name, content)
-        return cls(name=safe_name(name), content=content)
+        text, encoding = decode_csv(name, content)
+        # Normalise to UTF-8 once, here, so nothing downstream has to care.
+        return cls(
+            name=safe_name(name),
+            content=text.encode("utf-8"),
+            encoding=encoding,
+        )
 
 
-def _reject_unreadable(name: str, content: bytes) -> None:
-    """Fail on binary or mis-encoded input with a message that says what to do.
+def decode_csv(name: str, content: bytes) -> tuple[str, str]:
+    """Decode a CSV that was not necessarily written in UTF-8.
 
-    A NUL byte in the first block means this is not a CSV at all, and a decode
-    error means the encoding is not UTF-8 — two different fixes, so two messages.
+    Refusing anything but UTF-8 turned away ordinary European and older Excel
+    exports. UTF-8 is tried first because it fails loudly on non-UTF-8 input;
+    cp1252 is the fallback because it decodes every byte, so trying it first would
+    silently mangle valid UTF-8.
     """
     head = content[:65536]
     if b"\x00" in head:
         raise ValueError(f"{name} looks binary, not CSV. Export it as text and try again.")
-    try:
-        head.decode("utf-8")
-    except UnicodeDecodeError as error:
-        raise ValueError(
-            f"{name} is not valid UTF-8 (byte {error.start} of the first block). "
-            "Re-save it as UTF-8 — most spreadsheets offer 'CSV UTF-8'."
-        ) from error
+    for encoding in ("utf-8-sig", "utf-8", "cp1252"):
+        try:
+            return content.decode(encoding), encoding
+        except UnicodeDecodeError:
+            continue
+    raise ValueError(
+        f"{name} is not readable as UTF-8 or Windows-1252. Re-save it as UTF-8 — "
+        "most spreadsheets offer 'CSV UTF-8'."
+    )
 
 
 @dataclass
@@ -219,7 +244,7 @@ class Dataset:
                         table=table_name,
                         source=safe_name(source.name),
                         loaded_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                        warnings=cls._parse_warnings(connection, table_name),
+                        warnings=cls._column_warnings(connection, table_name),
                         **shape,
                     )
                 )
@@ -262,28 +287,119 @@ class Dataset:
         return {"rows": rows, "columns": columns}
 
     @staticmethod
-    def _parse_warnings(connection: duckdb.DuckDBPyConnection, table_name: str) -> list[str]:
-        """Flag columns whose inferred type is probably not what was meant.
+    def _column_warnings(connection: duckdb.DuckDBPyConnection, table_name: str) -> list[str]:
+        """Everything worth saying about how the columns parsed, in one pass.
 
-        The classic surprise is a numeric column that a handful of stray values
-        turned into text — every later SUM then silently does nothing.
+        These are heuristics, not facts, so they are measured on a sample: scanning
+        7.9M rows with a regex per text column added 30s to load for advice that a
+        sample settles just as well. Counts are reported as shares for that reason.
         """
-        warnings: list[str] = []
         quoted = quote_identifier(table_name)
-        for row in connection.execute(f"DESCRIBE {quoted}").fetchall():
-            name, kind = row[0], row[1]
-            if "VARCHAR" not in str(kind).upper():
-                continue
+        described = [
+            (row[0], str(row[1]).upper())
+            for row in connection.execute(f"DESCRIBE {quoted}").fetchall()
+        ]
+        if not described:
+            return []
+
+        projections = ["count(*) AS total"]
+        for index, (name, kind) in enumerate(described):
             column = quote_identifier(name)
-            total, numeric = connection.execute(
-                f"SELECT count({column}), count(TRY_CAST({column} AS DOUBLE)) FROM {quoted}"
-            ).fetchone()
-            if total and numeric and 0.9 <= numeric / total < 1.0:
-                warnings.append(
-                    f"{name} was read as text, but {numeric:,} of {total:,} values are numeric — "
-                    f"{total - numeric:,} stray value(s) changed the type. Sums and averages on "
-                    "it will need a cast."
-                )
+            if "VARCHAR" in kind:
+                projections += [
+                    f"count({column}) AS present_{index}",
+                    f"count(TRY_CAST({column} AS DOUBLE)) AS numeric_{index}",
+                    # Decoration only: a bare digit string must not match, or a zip
+                    # code gets advised into losing its leading zero.
+                    f"count_if(regexp_matches({column}, '[$€£¥%]') OR "
+                    f"regexp_matches({column}, "
+                    f"'^[-+]?[0-9]{{1,3}}([.,][0-9]{{3}})+([.,][0-9]+)?$')"
+                    f") AS decorated_{index}",
+                    f"count_if(lower(trim({column})) IN "
+                    f"('na','n/a','nan','null','none','-','--','?','.','#n/a')) AS missing_{index}",
+                    # A leading zero is the mark of a code, not a quantity: zip,
+                    # phone, account. Casting one away is the bug, not the fix.
+                    f"count_if(regexp_matches({column}, '^0[0-9]+$')) AS coded_{index}",
+                ]
+            elif "DATE" in kind or "TIMESTAMP" in kind:
+                projections += [
+                    f"max(day({column})) AS maxday_{index}",
+                    f"count({column}) AS present_{index}",
+                ]
+        blank = " AND ".join(f"{quote_identifier(name)} IS NULL" for name, _ in described)
+        projections.append(f"count_if({blank}) AS blank_rows")
+
+        # LIMIT, not a random sample: reservoir sampling still reads every row, and
+        # what is being detected is a *format* — whether values carry currency signs
+        # or comma decimals — which does not vary down the file the way a statistic
+        # does. This is why the statistical tools sample randomly and this does not.
+        row = connection.execute(
+            f"SELECT {', '.join(projections)} FROM "
+            f"(SELECT * FROM {quoted} LIMIT {WARNING_SAMPLE_ROWS})"
+        ).fetchdf()
+        values = row.iloc[0].to_dict()
+        total = int(values["total"])
+
+        warnings: list[str] = []
+        numeric_names = sum(1 for name, _ in described if re.fullmatch(r"[-+]?[0-9.,]+", name))
+        if numeric_names / len(described) > 0.5:
+            warnings.append(
+                f"The first row looks like data rather than headers ({numeric_names} of "
+                f"{len(described)} column names are numbers). It has been used as the header, "
+                "so that row is missing from the table."
+            )
+        if not total:
+            warnings.append(
+                "This table loaded with no rows at all. The file probably has rows with a "
+                "different number of columns than the header, or only a header."
+            )
+            return warnings
+        if int(values["blank_rows"]):
+            warnings.append(
+                f"{int(values['blank_rows']):,} row(s) are entirely empty, which usually means "
+                "the file has rows with a different number of columns than the header."
+            )
+
+        for index, (name, kind) in enumerate(described):
+            if "VARCHAR" in kind:
+                present = int(values[f"present_{index}"] or 0)
+                if not present:
+                    continue
+                numeric = int(values[f"numeric_{index}"] or 0)
+                decorated = int(values[f"decorated_{index}"] or 0)
+                missing = int(values[f"missing_{index}"] or 0)
+                coded = int(values[f"coded_{index}"] or 0)
+                if coded / present >= 0.05 or _looks_like_code(name):
+                    # An identifier, not a quantity. Text is the right type here, and
+                    # advising a cast would strip the leading zero off a zip code.
+                    continue
+                if decorated / present >= 0.9:
+                    warnings.append(
+                        f"{name} was read as text because its values carry a currency symbol, "
+                        f"thousands separator, percent sign or comma decimal "
+                        f"({decorated / present:.0%} of a sample). Strip those in SQL before "
+                        "summing it."
+                    )
+                elif numeric and 0.5 <= numeric / present < 1.0:
+                    warnings.append(
+                        f"{name} was read as text although {numeric / present:.0%} of a sample "
+                        "is numeric — a few stray values changed the type. Sums and averages "
+                        "on it will need a cast."
+                    )
+                if missing / present >= 0.2:
+                    warnings.append(
+                        f"{name} holds values that mean 'missing' ({missing / present:.0%} of a "
+                        "sample: NA, null, -, ?). They are text here, not NULL, so counts and "
+                        "averages will include them unless you convert them."
+                    )
+            elif ("DATE" in kind or "TIMESTAMP" in kind) and values.get(f"maxday_{index}"):
+                # Every day at or below the twelfth means day-first and month-first
+                # both parse, and the file cannot say which was meant.
+                if int(values[f"maxday_{index}"]) <= 12 and int(values[f"present_{index}"] or 0):
+                    warnings.append(
+                        f"Every date in {name} falls on or before the 12th, so day-first and "
+                        "month-first readings both fit. Check which one this file meant."
+                    )
         return warnings
 
     @staticmethod

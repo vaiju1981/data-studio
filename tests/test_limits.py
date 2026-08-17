@@ -87,11 +87,15 @@ def test_the_duckdb_budget_is_applied_and_then_frozen() -> None:
         dataset.close()
 
 
-def test_binary_and_mis_encoded_uploads_are_refused_with_the_fix() -> None:
+def test_binary_uploads_are_refused_but_legacy_encodings_are_not() -> None:
+    """Refusing anything but UTF-8 turned away ordinary European and Excel exports."""
     with pytest.raises(ValueError, match="looks binary"):
         CsvSource.from_upload("x.csv", b"a,b\n1,\x00\x00binary\n")
-    with pytest.raises(ValueError, match="not valid UTF-8"):
-        CsvSource.from_upload("x.csv", "a,b\n1,café\n".encode("latin-1"))
+
+    source = CsvSource.from_upload("x.csv", "nom,ville\nRené,Genève\n".encode("latin-1"))
+    assert source.encoding == "cp1252"
+    # Normalised on the way in, so nothing downstream has to know.
+    assert "René" in source.content.decode("utf-8")
 
 
 def test_upload_names_are_sanitised_before_they_reach_a_log_or_a_filename() -> None:
