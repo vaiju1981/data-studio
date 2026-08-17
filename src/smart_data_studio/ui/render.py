@@ -168,10 +168,12 @@ def summary(profiles: list[TableProfile]) -> None:
 def lineage_panel(dataset: Dataset) -> None:
     """Where each table came from, and anything odd about how it parsed."""
     warnings = [(item.table, note) for item in dataset.lineage for note in item.warnings]
-    label = "Source data" + (f" · {len(warnings)} parsing warning(s)" if warnings else "")
-    with st.expander(label, expanded=bool(warnings)):
+    outstanding = [pair for pair in warnings if "converted to a number" not in pair[1]]
+    label = "Source data" + (f" · {len(outstanding)} parsing warning(s)" if outstanding else "")
+    with st.expander(label, expanded=bool(outstanding)):
         for table, note in warnings:
-            st.warning(f"**{table}** — {note}")
+            (st.success if "converted to a number" in note else st.warning)(f"**{table}** — {note}")
+        _repair(dataset)
         st.dataframe(
             pd.DataFrame(
                 [
@@ -195,6 +197,36 @@ def lineage_panel(dataset: Dataset) -> None:
                 hide_index=True,
                 use_container_width=True,
             )
+
+
+def _repair(dataset: Dataset) -> None:
+    """Offer to fix the type the panel just complained about.
+
+    Reporting that a column was read as text and leaving the user to cast it in
+    every query is half an answer.
+    """
+    convertible = [
+        (table, column) for table in dataset.tables for column in dataset.text_columns(table)
+    ]
+    if not convertible:
+        return
+    st.markdown("**Read a text column as a number**")
+    choice = st.selectbox(
+        "Column",
+        convertible,
+        format_func=lambda pair: f"{pair[0]}.{pair[1]}",
+        key="repair-choice",
+        label_visibility="collapsed",
+    )
+    if st.button("Convert to number", key="repair-go"):
+        table, column = choice
+        try:
+            st.session_state.repair_note = dataset.convert_to_number(table, column)
+        except ValueError as error:
+            st.session_state.repair_note = str(error)
+        st.rerun()
+    if st.session_state.get("repair_note"):
+        st.caption(st.session_state.pop("repair_note"))
 
 
 def profile_panel(profiles: list[TableProfile]) -> None:

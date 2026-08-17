@@ -567,6 +567,85 @@ class Dataset:
             total_rows=total_rows,
         )
 
+    def convert_to_number(self, table: str, column: str) -> str:
+        """Rewrite a text column as a number, stripping whatever kept it text.
+
+        The panel can say a column was read as text; without this the only remedy
+        is casting it by hand in every query. Which separator convention applies is
+        decided from the data rather than assumed, because getting it backwards
+        turns 1.234,56 into 1.23456.
+        """
+        self._require_table(table)
+        kinds = dict(self.schema(table))
+        if column not in kinds:
+            raise ValueError(f"{table} has no column {column}.")
+        if "VARCHAR" not in kinds[column].upper():
+            raise ValueError(
+                f"{column} is already {kinds[column]}, so there is nothing to convert."
+            )
+        quoted, source = quote_identifier(table), quote_identifier(column)
+        # Character classes rather than backslash escapes: a backslash does not
+        # survive the trip through a SQL string literal into DuckDB's regex, and
+        # getting this backwards turns 1.234,56 into 1.23456.
+        european = self.connection.execute(
+            f"SELECT count_if(regexp_matches({source}, ',[0-9]{{1,2}}$')) > "
+            f"count_if(regexp_matches({source}, '[.][0-9]{{1,2}}$')) FROM {quoted}"
+        ).fetchone()[0]
+        if european:
+            stripped = f"regexp_replace({source}, '[^0-9.,-]', '', 'g')"
+            cleaned = f"replace(replace({stripped}, '.', ''), ',', '.')"
+            convention = "European (dot thousands, comma decimal)"
+        else:
+            cleaned = f"regexp_replace({source}, '[^0-9.-]', '', 'g')"
+            convention = "plain (comma thousands, dot decimal)"
+
+        would_fail, total = self.connection.execute(
+            f"SELECT count(*) FILTER (WHERE {source} IS NOT NULL AND "
+            f"TRY_CAST({cleaned} AS DOUBLE) IS NULL), count({source}) FROM {quoted}"
+        ).fetchone()
+        if total and would_fail / total > 0.5:
+            # Converting a genuinely textual column empties it. Refuse rather than
+            # let one click turn a region name into a column of nulls.
+            raise ValueError(
+                f"{column} is not a number in disguise: {would_fail:,} of {total:,} values "
+                "would be emptied by the conversion, so it was left as text."
+            )
+
+        others = [name for name, _ in self.schema(table) if name != column]
+        projection = ", ".join(
+            [quote_identifier(name) for name in others]
+            + [f"TRY_CAST({cleaned} AS DOUBLE) AS {source}"]
+        )
+        with logs.timed("column.converted", table=table, column=column):
+            self.connection.execute(
+                f"CREATE OR REPLACE TABLE {quoted} AS SELECT {projection} FROM {quoted}"
+            )
+        failed = self.connection.execute(
+            f"SELECT count(*) FROM {quoted} WHERE {source} IS NULL"
+        ).fetchone()[0]
+        note = f"{column} converted to a number, reading it as {convention}" + (
+            f"; {failed:,} value(s) would not convert and are now empty." if failed else "."
+        )
+        self.lineage = tuple(
+            TableLineage(
+                table=item.table,
+                source=item.source,
+                loaded_at=item.loaded_at,
+                rows=item.rows,
+                columns=item.columns,
+                warnings=(
+                    [w for w in item.warnings if not w.startswith(f"{column} ")] + [note]
+                    if item.table == table
+                    else item.warnings
+                ),
+            )
+            for item in self.lineage
+        )
+        return note
+
+    def text_columns(self, table: str) -> list[str]:
+        return [name for name, kind in self.schema(table) if "VARCHAR" in kind.upper()]
+
     def columns_mentioned_in(self, text: str) -> list[str]:
         """Loaded column names that appear in free text.
 

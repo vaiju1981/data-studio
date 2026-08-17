@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -63,6 +64,20 @@ Two rules that are easy to get wrong here:
   instead. The profile findings say which columns are constant within each key."""
 
 EXHAUSTED_MESSAGE = "I could not finish within the query limit. Try a narrower question."
+# Hedges and refusals are legitimate answers with no query behind them; a number
+# or a superlative is not.
+_CLAIM = re.compile(r"\d|\bhighest\b|\blowest\b|\bmost\b|\bleast\b|\baverage\b", re.I)
+_HEDGE = re.compile(
+    r"cannot|can't|unable|not enough|no data|which (column|table)|could you|"
+    r"do you mean|clarif|not present|does not contain",
+    re.I,
+)
+
+
+def _looks_like_a_data_claim(text: str) -> bool:
+    return bool(_CLAIM.search(text)) and not _HEDGE.search(text)
+
+
 OMITTED_PAYLOAD = json.dumps(
     {"note": "Earlier result omitted to save context. Re-run the query if you need it."}
 )
@@ -139,6 +154,14 @@ class DataAgent:
             MAX_TOOL_ROUNDS,
             self._chat_tools(),
         )
+        # A data answer with nothing behind it used to be captioned after the fact.
+        # Asking for the evidence is better than labelling its absence.
+        if (
+            not self.tools.results[first_new_result:]
+            and not self.tools.analyses[first_new_analysis:]
+        ):
+            text = self._demand_evidence(text)
+
         self._trim_tool_payloads()
         return Answer(
             text=text,
@@ -146,6 +169,27 @@ class DataAgent:
             chart=self.tools.chart,
             analyses=self.tools.analyses[first_new_analysis:],
         )
+
+    def _demand_evidence(self, text: str) -> str:
+        """One more round when an answer about the data ran no query.
+
+        Only when it reads like a claim: a refusal, a clarifying question or "I
+        cannot tell from this data" is a fine answer with no SQL behind it.
+        """
+        if not _looks_like_a_data_claim(text):
+            return text
+        logs.event("answer.unsupported", retrying=True)
+        self.messages.append(
+            {
+                "role": "user",
+                "content": (
+                    "That answer states figures or findings but no query ran. Run the SQL "
+                    "that supports it and answer again from the result, or say plainly that "
+                    "the data cannot answer it."
+                ),
+            }
+        )
+        return self._run_loop(self.messages, MAX_TOOL_ROUNDS, self._chat_tools())
 
     def _chat_tools(self) -> list[Callable[..., str]]:
         return [

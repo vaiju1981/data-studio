@@ -236,3 +236,39 @@ def test_forecast_output_travels_to_the_ui_as_evidence() -> None:
         assert len(analysis.result["forecast"]) == 6
     finally:
         dataset.close()
+
+
+def test_an_unsupported_claim_is_sent_back_for_evidence() -> None:
+    """A number with no query behind it used to be captioned; now it is challenged."""
+    client = FakeClient(
+        [
+            Message(role="assistant", content="Revenue was 4.2 million last quarter."),
+            tool_call("run_sql", sql="SELECT SUM(amount) AS total FROM sales"),
+            Message(role="assistant", content="Total is 45 across the loaded rows."),
+        ]
+    )
+    agent, dataset = make_agent(client)
+    try:
+        answer = agent.ask("what was revenue?")
+        assert answer.results, "the retry produced no query"
+        assert "45" in answer.text
+        asked = [item for item in agent.messages if item["role"] == "user"]
+        assert any("no query ran" in item["content"] for item in asked)
+    finally:
+        dataset.close()
+
+
+def test_a_refusal_is_left_alone() -> None:
+    """Saying the data cannot answer is a good answer, and needs no SQL."""
+    client = FakeClient(
+        [Message(role="assistant", content="This data does not contain customer ages.")]
+    )
+    agent, dataset = make_agent(client)
+    try:
+        answer = agent.ask("how old are my customers?")
+        assert "does not contain" in answer.text
+        assert not any(
+            "no query ran" in item["content"] for item in agent.messages if item["role"] == "user"
+        )
+    finally:
+        dataset.close()

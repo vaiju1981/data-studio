@@ -108,3 +108,60 @@ def test_identifiers_that_must_keep_their_leading_zeros_stay_text() -> None:
         assert dataset.query("SELECT zip FROM z").frame.iloc[0, 0] == "02134"
     finally:
         dataset.close()
+
+
+@pytest.mark.parametrize(
+    ("label", "body", "expected"),
+    [
+        ("us currency", b'id,price\n1,"$1,234.56"\n2,"$987.65"\n', [1234.56, 987.65]),
+        ("european", b"id;betrag\n1;1.234,56\n2;2.345,67\n", [1234.56, 2345.67]),
+        ("percent", b"id,rate\n1,2.5%\n2,10%\n", [2.5, 10.0]),
+    ],
+)
+def test_a_text_column_can_be_read_as_a_number(label, body, expected) -> None:
+    """Reporting that a column parsed as text and leaving the user to cast it in
+    every query is half an answer. Which separator convention applies is read from
+    the data — assuming the wrong one turns 1.234,56 into 1.23456."""
+    dataset = Dataset.load([CsvSource.from_upload("t.csv", body)])
+    try:
+        column = dataset.text_columns("t")[0]
+        note = dataset.convert_to_number("t", column)
+        assert dataset.query(f"SELECT {column} FROM t").frame[column].tolist() == expected, label
+        assert "converted to a number" in note
+    finally:
+        dataset.close()
+
+
+def test_values_that_cannot_convert_are_counted_rather_than_hidden() -> None:
+    dataset = Dataset.load([CsvSource.from_upload("t.csv", b"id,amount\n1,10\n2,n/a\n3,30\n")])
+    try:
+        note = dataset.convert_to_number("t", "amount")
+        assert "1 value(s) would not convert" in note
+        assert dataset.query("SELECT count(amount) AS n FROM t").frame.iloc[0, 0] == 2
+    finally:
+        dataset.close()
+
+
+def test_a_genuinely_textual_column_is_not_emptied_by_a_stray_click() -> None:
+    """Found by clicking it: the control defaulted to a region name and nulled all
+    400 values. Converting is refused when it would destroy the column."""
+    dataset = Dataset.load([CsvSource.from_upload("t.csv", b"region,price\nEast,5\nWest,6\n")])
+    try:
+        with pytest.raises(ValueError, match="not a number in disguise"):
+            dataset.convert_to_number("t", "region")
+        assert dataset.query("SELECT region FROM t").frame.region.tolist() == ["East", "West"]
+    finally:
+        dataset.close()
+
+
+@pytest.mark.parametrize(
+    ("column", "message"),
+    [("price", "already"), ("nope", "no column")],
+)
+def test_conversion_refuses_what_it_cannot_convert(column: str, message: str) -> None:
+    dataset = Dataset.load([CsvSource.from_upload("t.csv", b"region,price\nEast,5\nWest,6\n")])
+    try:
+        with pytest.raises(ValueError, match=message):
+            dataset.convert_to_number("t", column)
+    finally:
+        dataset.close()
