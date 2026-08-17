@@ -26,6 +26,10 @@ def _number(name: str, default: int) -> int:
 
 MODEL_ID = os.environ.get("SDS_MODEL_ID", "gemma4:31b-cloud")
 OLLAMA_HOST = os.environ.get("SDS_OLLAMA_HOST", "http://localhost:11434")
+# A hosted model returns the occasional 500. Cheap to retry, and an investigation
+# makes six to ten calls, so a blip would otherwise discard a minute of work.
+MODEL_RETRIES = _number("SDS_MODEL_RETRIES", 2)
+MODEL_RETRY_SECONDS = _number("SDS_MODEL_RETRY_SECONDS", 2)
 
 # Reading a path off the host is right for a local tool and disqualifying for a
 # shared one, so hosted deployments turn it off.
@@ -117,6 +121,9 @@ MAX_FORECAST_PERIODS = 120
 # Eight tools means longer chains; six rounds left complex questions unanswered.
 MAX_TOOL_ROUNDS = 10
 MAX_EXPLORE_ROUNDS = 8
+# A judgement question is worked as a few sub-questions, each on a short leash.
+MAX_PLAN_STEPS = 5
+MAX_STEP_ROUNDS = 5
 
 # Older tool results are replaced by a placeholder once this many newer ones exist.
 KEEP_TOOL_PAYLOADS = 4

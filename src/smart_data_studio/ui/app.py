@@ -15,6 +15,11 @@ from smart_data_studio.ui import render
 
 MULTI_TURN = "Multi-turn"
 SINGLE_TURN = "Single turn"
+DEPTHS = {
+    "When the question needs it": "auto",
+    "Always investigate": "always",
+    "Never — one pass": "never",
+}
 
 
 def main() -> None:
@@ -58,6 +63,7 @@ def _initialize_state() -> None:
         "agent": None,
         "chat": [],
         "mode": MULTI_TURN,
+        "depth": next(iter(DEPTHS)),
         "metrics": "",
     }
     for key, value in defaults.items():
@@ -88,6 +94,18 @@ def _sidebar() -> None:
     if st.session_state.agent is not None:
         st.divider()
         _metrics_controls()
+
+    st.divider()
+    st.radio(
+        "Investigate",
+        list(DEPTHS),
+        key="depth",
+        help=(
+            "A question of judgement — strategy, causes, 'how should we' — is broken into "
+            "sub-questions and answered from all of them, including one asked at the grain "
+            "the decision is made at. A lookup is answered in one pass either way."
+        ),
+    )
 
     st.divider()
     st.radio(
@@ -233,9 +251,11 @@ def _answer(question: str) -> None:
         st.markdown(question)
     with st.chat_message("assistant"):
         try:
-            with st.spinner("Analyzing…"):
+            with st.spinner("Working through it…"):
                 answer = st.session_state.agent.ask(
-                    question, multi_turn=st.session_state.mode == MULTI_TURN
+                    question,
+                    multi_turn=st.session_state.mode == MULTI_TURN,
+                    depth=DEPTHS[st.session_state.depth],
                 )
         except Exception as error:
             answer = Answer(text=f"The analysis could not be completed: {error}", results=[])

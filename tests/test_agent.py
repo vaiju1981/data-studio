@@ -1,9 +1,12 @@
 from types import SimpleNamespace
 
+import ollama
+import pytest
 from ollama import Message
 
+from smart_data_studio import agent as agent_module
 from smart_data_studio.agent import EXHAUSTED_MESSAGE, OMITTED_PAYLOAD, DataAgent
-from smart_data_studio.config import KEEP_TOOL_PAYLOADS, MODEL_ID
+from smart_data_studio.config import KEEP_TOOL_PAYLOADS, MODEL_ID, MODEL_RETRIES
 from smart_data_studio.dataset import CsvSource, Dataset
 from smart_data_studio.profile import profile_dataset
 
@@ -11,13 +14,25 @@ SALES = b"region,amount\nNorth,10\nSouth,20\nNorth,15\n"
 
 
 class FakeClient:
-    """Replays scripted assistant messages, cycling so each turn repeats the script."""
+    """Replays scripted assistant messages, cycling so each turn repeats the script.
 
-    def __init__(self, messages: list[Message]):
+    Planning calls answer NONE without touching the script, so a test that scripts
+    the direct path keeps testing the direct path. `deep=True` makes it plan
+    instead, for the tests that want the investigating path.
+    """
+
+    def __init__(self, messages: list[Message], plan: list[str] | None = None):
         self.scripted = list(messages)
+        self.plan = plan
         self.calls: list[dict] = []
+        self.plan_calls = 0
 
     def chat(self, **kwargs):
+        system = (kwargs.get("messages") or [{}])[0].get("content", "")
+        if "Decide how this question should be answered" in system:
+            self.plan_calls += 1
+            reply = "\n".join(self.plan) if self.plan else "NONE"
+            return SimpleNamespace(message=Message(role="assistant", content=reply))
         self.calls.append(kwargs)
         return SimpleNamespace(message=self.scripted[(len(self.calls) - 1) % len(self.scripted)])
 
@@ -270,5 +285,123 @@ def test_a_refusal_is_left_alone() -> None:
         assert not any(
             "no query ran" in item["content"] for item in agent.messages if item["role"] == "user"
         )
+    finally:
+        dataset.close()
+
+
+def test_a_direct_question_skips_the_investigation() -> None:
+    """The planner answers NONE, and the question is worked in one pass."""
+    client = FakeClient(
+        [
+            tool_call("run_sql", sql="SELECT count(*) AS n FROM sales"),
+            Message(role="assistant", content="Three rows."),
+        ]
+    )
+    agent, dataset = make_agent(client)
+    try:
+        answer = agent.ask("how many rows are there?")
+        assert answer.plan == []
+        assert client.plan_calls == 1
+    finally:
+        dataset.close()
+
+
+def test_a_judgement_question_is_worked_as_sub_questions_then_synthesised() -> None:
+    """Each step runs on its own, and every query it ran stays as evidence."""
+    steps = [
+        "What is theo win per visit by geo type?",
+        "What is theo win per player by geo type, which may point the other way?",
+    ]
+    client = FakeClient(
+        [
+            tool_call("run_sql", sql="SELECT region, avg(amount) AS a FROM sales GROUP BY 1"),
+            Message(role="assistant", content="Per-visit favours one reading."),
+        ],
+        plan=steps,
+    )
+    agent, dataset = make_agent(client)
+    try:
+        answer = agent.ask("how should we grow the local segment?")
+        assert answer.plan == steps
+        # One query per step plus the synthesis pass, all kept as evidence.
+        assert len(answer.results) >= len(steps)
+        # The chat keeps the question and conclusion, not the working.
+        assert sum(1 for item in agent.messages if item["role"] == "user") == 1
+    finally:
+        dataset.close()
+
+
+def test_depth_can_be_forced_off() -> None:
+    client = FakeClient([Message(role="assistant", content="ok")], plan=["a step", "another step"])
+    agent, dataset = make_agent(client)
+    try:
+        assert agent.ask("how should we grow?", depth="never").plan == []
+        assert client.plan_calls == 0
+    finally:
+        dataset.close()
+
+
+class FlakyClient(FakeClient):
+    """Fails the first `failures` calls, then behaves."""
+
+    def __init__(self, messages, error: Exception, failures: int = 1):
+        super().__init__(messages)
+        self.error = error
+        self.failures = failures
+        self.attempts = 0
+
+    def chat(self, **kwargs):
+        self.attempts += 1
+        if self.attempts <= self.failures:
+            raise self.error
+        return super().chat(**kwargs)
+
+
+def test_a_blip_from_the_model_host_is_retried(monkeypatch) -> None:
+    """A hosted model returns the occasional 500, and an investigation makes six to
+    ten calls, so one blip would otherwise throw away a minute of work."""
+    monkeypatch.setattr(agent_module.time, "sleep", lambda _: None)
+    client = FlakyClient(
+        [
+            tool_call("run_sql", sql="SELECT region, SUM(amount) AS total FROM sales GROUP BY 1"),
+            Message(role="assistant", content="North leads."),
+        ],
+        ollama.ResponseError("Internal Server Error", 500),
+    )
+    agent, dataset = make_agent(client)
+    try:
+        assert agent.ask("which region leads?", depth="never").text == "North leads."
+        assert client.attempts == 3  # two calls answered, one blip absorbed
+    finally:
+        dataset.close()
+
+
+def test_a_rejected_request_is_not_retried(monkeypatch) -> None:
+    """A 400 means the request itself is wrong — retrying only fails slower."""
+    monkeypatch.setattr(agent_module.time, "sleep", lambda _: None)
+    client = FlakyClient(
+        [Message(role="assistant", content="unused")],
+        ollama.ResponseError("context too long", 400),
+        failures=99,
+    )
+    agent, dataset = make_agent(client)
+    try:
+        with pytest.raises(ollama.ResponseError):
+            agent.ask("which region leads?", depth="never")
+        assert client.attempts == 1
+    finally:
+        dataset.close()
+
+
+def test_retries_give_up_and_surface_the_error(monkeypatch) -> None:
+    monkeypatch.setattr(agent_module.time, "sleep", lambda _: None)
+    client = FlakyClient(
+        [Message(role="assistant", content="unused")], ConnectionError("refused"), failures=99
+    )
+    agent, dataset = make_agent(client)
+    try:
+        with pytest.raises(ConnectionError):
+            agent.ask("which region leads?", depth="never")
+        assert client.attempts == MODEL_RETRIES + 1
     finally:
         dataset.close()

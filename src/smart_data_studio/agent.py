@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+import httpx
 import ollama
 from plotly.graph_objects import Figure
 
@@ -15,13 +17,22 @@ from smart_data_studio import logs
 from smart_data_studio.config import (
     KEEP_TOOL_PAYLOADS,
     MAX_EXPLORE_ROUNDS,
+    MAX_PLAN_STEPS,
+    MAX_STEP_ROUNDS,
     MAX_TOOL_ROUNDS,
     MODEL_ID,
+    MODEL_RETRIES,
+    MODEL_RETRY_SECONDS,
     OLLAMA_HOST,
 )
 from smart_data_studio.dataset import Dataset, QueryResult
 from smart_data_studio.profile import TableProfile
 from smart_data_studio.tools import AnalysisRecord, AnalysisTools
+
+# What ollama raises when the host, rather than the request, is at fault: a status
+# error, a refused connection (re-raised as the builtin), and a timeout, which it
+# lets through from httpx untouched.
+_TRANSIENT = (ollama.ResponseError, ConnectionError, httpx.TimeoutException)
 
 EXPLORE_PROMPT = """Explore this dataset with SQL before drawing any conclusion.
 Run several queries: read real values, check how low-cardinality columns are distributed,
@@ -63,6 +74,28 @@ Two rules that are easy to get wrong here:
   across several rows, each holding a partial total. Aggregate such columns with MAX or SUM
   instead. The profile findings say which columns are constant within each key."""
 
+PLAN_PROMPT = """Decide how this question should be answered.
+
+Reply with the single word NONE when one query settles it — a lookup, a total, a
+ranking, a comparison between two named things.
+
+Otherwise it is a question of judgement: strategy, causes, opportunities, "how
+should we", "why is". List two to five sub-questions, one per line, no numbering
+or commentary. Each must be answerable with SQL against this schema, and together
+they must include:
+- the question asked at the grain the decision is made at. A per-row average and
+  a per-entity average can point opposite ways, and the second is usually the one
+  that matters.
+- at least one that could show the obvious answer to be wrong.
+Nothing else — just NONE, or the lines."""
+
+SYNTHESIS_PROMPT = """Answer the original question from these findings.
+
+Lead with what the evidence supports and say how confident it makes you. Where two
+angles disagree, say so and say which grain the decision should be judged at —
+that disagreement is usually the finding. Do not introduce numbers that are not in
+the findings, and do not soften a result that undercuts the obvious answer."""
+
 EXHAUSTED_MESSAGE = "I could not finish within the query limit. Try a narrower question."
 # Hedges and refusals are legitimate answers with no query behind them; a number
 # or a superlative is not.
@@ -89,6 +122,7 @@ class Answer:
     results: list[QueryResult]
     chart: Figure | None = None
     analyses: list[AnalysisRecord] = field(default_factory=list)
+    plan: list[str] = field(default_factory=list)
 
 
 class DataAgent:
@@ -138,9 +172,14 @@ class DataAgent:
         self.messages[0] = {"role": "system", "content": self._system_prompt()}
         return self.understanding
 
-    def ask(self, question: str, multi_turn: bool = True) -> Answer:
+    def ask(self, question: str, multi_turn: bool = True, depth: str = "auto") -> Answer:
         logs.bind(question=logs.new_session())
-        logs.event("question.received", multi_turn=multi_turn, characters=len(question))
+        logs.event("question.received", multi_turn=multi_turn, depth=depth)
+        plan = self._plan(question) if depth in {"auto", "always"} else []
+        if depth == "always" and not plan:
+            plan = [question]
+        if plan:
+            return self._investigate(question, plan, multi_turn)
         if not multi_turn:
             # Start from the system prompt alone, so nothing from an earlier answer
             # reaches this one. The UI keeps showing the full history regardless.
@@ -191,6 +230,81 @@ class DataAgent:
         )
         return self._run_loop(self.messages, MAX_TOOL_ROUNDS, self._chat_tools())
 
+    def _plan(self, question: str) -> list[str]:
+        """Sub-questions worth asking, or nothing when one query settles it.
+
+        The trigger and the plan are the same call: asking the model to produce
+        sub-questions and letting it answer NONE is both cheaper and steadier than
+        keyword-matching on how a question happens to be phrased.
+        """
+        try:
+            reply = (
+                self._chat(
+                    messages=[
+                        # Schema only. Deciding whether a question needs investigating
+                        # does not need the profile or the samples, and sending them
+                        # put fifteen seconds on every lookup.
+                        {
+                            "role": "system",
+                            "content": f"Schema:\n{self.dataset.schema_text()}\n\n{PLAN_PROMPT}",
+                        },
+                        {"role": "user", "content": question},
+                    ],
+                ).message.content
+                or ""
+            )
+        except Exception:
+            logs.failure("plan.failed")
+            return []
+        if "NONE" in reply.upper()[:40]:
+            return []
+        steps = [
+            line.strip(" -*0123456789.") for line in reply.splitlines() if len(line.strip()) > 15
+        ][:MAX_PLAN_STEPS]
+        logs.event("plan.made", steps=len(steps))
+        return steps
+
+    def _investigate(self, question: str, plan: list[str], multi_turn: bool) -> Answer:
+        """Work each sub-question on its own, then answer from what they found.
+
+        Each runs in its own conversation so one long investigation does not fill
+        the context, while the tools stay shared so every query and analysis is
+        still collected as evidence.
+        """
+        first_result, first_analysis = len(self.tools.results), len(self.tools.analyses)
+        self.tools.reset_chart(keep_history=multi_turn)
+
+        findings = []
+        for step in plan:
+            with logs.timed("plan.step"):
+                conversation = [
+                    {"role": "system", "content": self._system_prompt()},
+                    {"role": "user", "content": step},
+                ]
+                found = self._run_loop(conversation, MAX_STEP_ROUNDS, self._chat_tools())
+                findings.append(f"### {step}\n{found}")
+
+        transcript = "\n\n".join(findings)
+        closing = [
+            {"role": "system", "content": f"{self._system_prompt()}\n\n{SYNTHESIS_PROMPT}"},
+            {"role": "user", "content": f"Original question: {question}\n\n{transcript}"},
+        ]
+        text = self._run_loop(closing, MAX_TOOL_ROUNDS, self._chat_tools())
+        if multi_turn:
+            # The chat keeps the question and the conclusion, not the working.
+            self.messages += [
+                {"role": "user", "content": question},
+                {"role": "assistant", "content": text},
+            ]
+            self._trim_tool_payloads()
+        return Answer(
+            text=text,
+            results=self._turn_results(first_result),
+            chart=self.tools.chart,
+            analyses=self.tools.analyses[first_analysis:],
+            plan=plan,
+        )
+
     def _chat_tools(self) -> list[Callable[..., str]]:
         return [
             self.tools.run_sql,
@@ -203,12 +317,32 @@ class DataAgent:
             self.tools.relate,
         ]
 
+    def _chat(self, **kwargs: Any) -> Any:
+        """One model call, retried when the host blips.
+
+        A hosted model returns the occasional 500, and an investigation makes six
+        to ten calls where a lookup makes one, so without this a single blip throws
+        away a minute of work. Only a 5xx, a dropped connection or a timeout is
+        retried: a 4xx means the request itself is wrong and fails the same way
+        twice. The final attempt is outside the loop, so its error surfaces
+        normally rather than being swallowed.
+        """
+        for attempt in range(MODEL_RETRIES):
+            try:
+                return self.client.chat(model=MODEL_ID, **kwargs)
+            except _TRANSIENT as error:
+                if isinstance(error, ollama.ResponseError) and error.status_code < 500:
+                    raise
+                logs.event("model.retry", attempt=attempt + 1, reason=str(error)[:120])
+                time.sleep(MODEL_RETRY_SECONDS * (attempt + 1))
+        return self.client.chat(model=MODEL_ID, **kwargs)
+
     def _run_loop(
         self, messages: list[dict[str, Any]], max_rounds: int, tools: list[Callable[..., str]]
     ) -> str:
         for round_number in range(1, max_rounds + 1):
             with logs.timed("model.call", round=round_number, tools=len(tools)):
-                response = self.client.chat(model=MODEL_ID, messages=messages, tools=tools)
+                response = self._chat(messages=messages, tools=tools)
             message = response.message
             messages.append(message.model_dump(exclude_none=True))
             if not message.tool_calls:
@@ -226,7 +360,7 @@ class DataAgent:
         # answer from what it already gathered rather than the user getting nothing
         # after a dozen queries ran.
         try:
-            final = self.client.chat(model=MODEL_ID, messages=messages)
+            final = self._chat(messages=messages)
             text = final.message.content or EXHAUSTED_MESSAGE
         except Exception:
             text = EXHAUSTED_MESSAGE

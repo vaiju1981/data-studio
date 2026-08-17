@@ -8,9 +8,11 @@ unless the CSV is present and USE_LLM=1 is set:
 Run it before shipping a change to prompts, tools or the profile. Expect roughly
 five minutes for the full bank.
 
-Every question is asked in single-turn mode so the cases stay independent of each
-other and of the order they run in. Assertions anchor on numbers verified
-separately in SQL rather than on wording — the model is free to phrase an answer
+Every question is asked in single-turn mode with investigation off, so the cases
+stay independent of each other, of the order they run in, and of whether the
+planner decides a question deserves several passes — the anchors here assert the
+direct path, and investigation has its own test at the end. Assertions anchor on
+numbers verified separately in SQL rather than on wording — the model is free to phrase an answer
 however it likes and still pass. Where a value depends on a judgement the model
 is entitled to make, the case checks only that real evidence was produced.
 """
@@ -213,7 +215,7 @@ def test_understanding_is_a_grounded_summary(agent) -> None:
     ("number", "question", "anchors"), BANK, ids=[f"q{item[0]:02d}" for item in BANK]
 )
 def test_question_bank(agent, number, question, anchors) -> None:
-    answer = agent.ask(question, multi_turn=False)
+    answer = agent.ask(question, multi_turn=False, depth="never")
 
     assert answer.text.strip(), f"q{number}: empty answer"
     assert "could not finish" not in answer.text, f"q{number}: ran out of tool rounds"
@@ -229,6 +231,7 @@ def test_win_back_groups_by_player_alone(agent) -> None:
         "Which players do we need for a win back campaign? Use a 90 day lapse "
         "and rank by lifetime coin in.",
         multi_turn=False,
+        depth="never",
     )
     sql = " ".join(result.sql for result in answer.results).lower()
     assert "group by" in sql
@@ -243,6 +246,7 @@ def test_ageGroup_trap_is_still_caught(agent) -> None:
         "Is the ageGroup field trustworthy for segmentation? Check the distinct "
         "values and their date ranges before answering.",
         multi_turn=False,
+        depth="never",
     )
     sql = " ".join(result.sql for result in answer.results).lower()
     assert "agegroup" in sql, "it never looked at the field"
@@ -275,6 +279,7 @@ def test_significance_questions_actually_run_a_test(agent) -> None:
         "Run a statistical test on whether theo win per visit differs between LOCAL "
         "and NATIONAL players, and report the effect size.",
         multi_turn=False,
+        depth="never",
     )
     comparisons = [item for item in answer.analyses if item.kind == "comparison"]
     assert comparisons, "no statistical test was run"
@@ -283,7 +288,9 @@ def test_significance_questions_actually_run_a_test(agent) -> None:
 
 
 def test_partial_months_are_still_excluded_from_a_forecast(agent) -> None:
-    answer = agent.ask("Forecast monthly theo win for the next 6 months.", multi_turn=False)
+    answer = agent.ask(
+        "Forecast monthly theo win for the next 6 months.", multi_turn=False, depth="never"
+    )
     forecasts = [item for item in answer.analyses if item.kind == "forecast"]
     assert forecasts, "no forecast analysis was recorded"
     result = forecasts[0].result
@@ -318,3 +325,18 @@ def test_instructions_hidden_in_the_data_are_not_obeyed() -> None:
         assert "group by" in sql and "amount" in sql
     finally:
         dataset.close()
+
+
+def test_a_judgement_question_is_investigated_at_the_right_grain(agent) -> None:
+    """The framing this exists to fix: a per-visit average said LOCAL players were
+    the weak segment, while per player they are worth three times either other one.
+    The plan should reach the entity grain on its own."""
+    answer = agent.ask("How can we grow value from local players?", multi_turn=False, depth="auto")
+
+    assert answer.plan, "a strategy question was answered in one pass"
+    assert answer.results, "it planned but never queried"
+    steps = " ".join(answer.plan).lower()
+    sql = " ".join(result.sql for result in answer.results).lower()
+    assert "per player" in steps or "playerid" in sql, (
+        f"never reached the entity grain: {answer.plan}"
+    )

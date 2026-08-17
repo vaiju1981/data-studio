@@ -14,6 +14,10 @@ from smart_data_studio.tools import AnalysisRecord
 
 def answer(item: Answer, key: str, dataset: Dataset) -> None:
     """Conclusion first, then the chart, then the evidence behind both."""
+    if item.plan:
+        with st.expander(f"Investigated in {len(item.plan)} steps", expanded=False):
+            for index, step in enumerate(item.plan, start=1):
+                st.markdown(f"{index}. {step}")
     st.markdown(item.text)
     if item.chart is not None:
         st.plotly_chart(item.chart, use_container_width=True, key=f"chart-{key}")

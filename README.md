@@ -31,12 +31,23 @@ several related files and the model can join across them.
 - **Understand** — before the first question the model explores the data with real
   queries and folds what it learns into the chat context, alongside the column
   profile and sample rows.
-- **Ask** — a tool loop with two tools, `run_sql` and `make_chart`. Charts are
-  built from a validated spec, never from model-written plotting code.
+- **Ask** — a tool loop over eight tools: `run_sql` and `make_chart`, plus
+  `forecast`, `analyze_trend`, `detect_anomalies`, `compare_groups`,
+  `rank_drivers` and `relate`, which run real statistics rather than asking the
+  model to estimate them. Charts are built from a validated spec, never from
+  model-written plotting code.
+- **Investigate** — a question of judgement is planned into sub-questions first,
+  each worked separately before a final pass answers from all of them. Two rules
+  do the work: ask the question at the grain the decision is made at, and include
+  one sub-question that could show the obvious answer to be wrong. Asked how to
+  upsell a tier, the single-pass answer averaged per visit and called the local
+  segment weak; per player it is worth three times either alternative. A lookup
+  is answered in one pass either way.
 
 Two conversation modes: **multi-turn** lets the model see earlier questions and
 results, so follow-ups like "now chart that" work; **single turn** answers each
-question from the data alone. The full history stays on screen either way.
+question from the data alone. The full history stays on screen either way, and
+the sidebar can force investigation on or off.
 
 Large results never reach the prompt verbatim. Past a size budget the model
 receives a digest — column types, exact row count, and statistics computed over
@@ -116,8 +127,8 @@ python tools/lock.py
 Two settings in `src/smart_data_studio/config.py` decide what you run against:
 
 ```python
-OLLAMA_HOST = "http://localhost:11434"   # whichever Ollama endpoint you use
-MODEL_ID    = "your-model-here"          # any tool-calling model it serves
+OLLAMA_HOST = "http://localhost:11434"  # whichever Ollama endpoint you use
+MODEL_ID = "your-model-here"  # any tool-calling model it serves
 ```
 
 Point `OLLAMA_HOST` wherever your Ollama runs — this machine, a server you host,
