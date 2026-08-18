@@ -173,8 +173,13 @@ def lineage_panel(dataset: Dataset) -> None:
     """Where each table came from, and anything odd about how it parsed."""
     warnings = [(item.table, note) for item in dataset.lineage for note in item.warnings]
     outstanding = [pair for pair in warnings if "converted to a number" not in pair[1]]
-    label = "Source data" + (f" · {len(outstanding)} parsing warning(s)" if outstanding else "")
-    with st.expander(label, expanded=bool(outstanding)):
+    notices = len(outstanding) + len(dataset.rejected)
+    label = "Source data" + (f" · {notices} parsing warning(s)" if notices else "")
+    with st.expander(label, expanded=bool(notices)):
+        # A file that was skipped is invisible in the table below, so it is named
+        # here rather than leaving the user to notice one is missing.
+        for rejection in dataset.rejected:
+            st.error(f"Not loaded — {rejection}")
         for table, note in warnings:
             (st.success if "converted to a number" in note else st.warning)(f"**{table}** — {note}")
         _repair(dataset)

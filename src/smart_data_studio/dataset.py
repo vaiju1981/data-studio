@@ -214,10 +214,15 @@ class Dataset:
         connection: duckdb.DuckDBPyConnection,
         tables: tuple[str, ...],
         lineage: tuple[TableLineage, ...] = (),
+        rejected: tuple[str, ...] = (),
     ):
         self.connection = connection
         self.tables = tables
         self.lineage = lineage
+        # Files that could not be read, kept so the panel can name them. Loading
+        # four CSVs and getting nothing because one was malformed is the wrong
+        # trade when the other three are fine.
+        self.rejected = rejected
         self.queries_run = 0
 
     @classmethod
@@ -229,15 +234,28 @@ class Dataset:
         connection = duckdb.connect(database=":memory:")
         table_names: list[str] = []
         lineage: list[TableLineage] = []
+        rejected: list[str] = []
         try:
             cls._apply_budget(connection)
             for source in source_list:
-                cls._check_header(source)
                 table_name = cls._unique_table_name(source.name, table_names)
-                with logs.timed("ingest", table=table_name) as fields:
-                    cls._load_source(connection, table_name, source)
-                    shape = cls._check_size(connection, table_name)
-                    fields.update(shape)
+                try:
+                    cls._check_header(source)
+                    with logs.timed("ingest", table=table_name) as fields:
+                        cls._load_source(connection, table_name, source)
+                        shape = cls._check_size(connection, table_name)
+                        fields.update(shape)
+                except Exception as error:
+                    # One unreadable file should not cost the others. A half-built
+                    # table is dropped so it cannot be queried as though it loaded.
+                    logs.failure("ingest.failed")
+                    connection.execute(f"DROP TABLE IF EXISTS {quote_identifier(table_name)}")
+                    # Most of these errors name the file themselves; prefixing
+                    # unconditionally printed it twice.
+                    name = safe_name(source.name)
+                    reason = str(error)
+                    rejected.append(reason if name in reason else f"{name} — {reason}")
+                    continue
                 table_names.append(table_name)
                 lineage.append(
                     TableLineage(
@@ -248,12 +266,14 @@ class Dataset:
                         **shape,
                     )
                 )
+            if not table_names:
+                raise ValueError("; ".join(rejected))
             connection.execute("SET enable_external_access = false")
             connection.execute("SET lock_configuration = true")
         except Exception:
             connection.close()
             raise
-        return cls(connection, tuple(table_names), tuple(lineage))
+        return cls(connection, tuple(table_names), tuple(lineage), tuple(rejected))
 
     @staticmethod
     def _apply_budget(connection: duckdb.DuckDBPyConnection) -> None:

@@ -16,6 +16,7 @@ from plotly.graph_objects import Figure
 from smart_data_studio import logs
 from smart_data_studio.config import (
     KEEP_TOOL_PAYLOADS,
+    MAX_CONTEXT_SHEDS,
     MAX_EXPLORE_ROUNDS,
     MAX_PLAN_STEPS,
     MAX_STEP_ROUNDS,
@@ -33,6 +34,80 @@ from smart_data_studio.tools import AnalysisRecord, AnalysisTools
 # error, a refused connection (re-raised as the builtin), and a timeout, which it
 # lets through from httpx untouched.
 _TRANSIENT = (ollama.ResponseError, ConnectionError, httpx.TimeoutException)
+
+
+def _over_context(error: Exception) -> bool:
+    """Whether a refusal means the prompt was too big rather than wrong.
+
+    Verified against the host in use, which answers 400 with "The prompt is too
+    long: 450028, model maximum context length: 262144". Hosts word it
+    differently, so this matches loosely rather than parsing the numbers.
+    """
+    text = str(error).lower()
+    return "too long" in text or "context length" in text or "context window" in text
+
+
+def explain_failure(error: Exception) -> str:
+    """What went wrong and what to do about it.
+
+    Everything recoverable has already been retried by the time this is called, so
+    the remaining failures are nearly all configuration: a host that is not
+    running, a model that is not served, a conversation past the window. A raw
+    exception string names none of those.
+    """
+    text = str(error)
+    if isinstance(error, ConnectionError) or "connection" in text.lower():
+        return (
+            f"Could not reach Ollama at {OLLAMA_HOST}. Start it, or point "
+            "`SDS_OLLAMA_HOST` at the endpoint you use."
+        )
+    if isinstance(error, httpx.TimeoutException):
+        return f"{MODEL_ID} did not respond in time. A smaller model answers faster."
+    status = getattr(error, "status_code", None)
+    if status == 404:
+        return (
+            f"`{MODEL_ID}` is not available at {OLLAMA_HOST}. Pull it, or set "
+            "`SDS_MODEL_ID` to a tool-calling model the endpoint serves."
+        )
+    if _over_context(error):
+        return (
+            "The conversation outgrew the model's context window even after "
+            "trimming. Ask this one in single-turn mode, or use a model with a "
+            "larger window."
+        )
+    if status is not None and status >= 500:
+        return f"{OLLAMA_HOST} is failing to serve {MODEL_ID} right now: {text}"
+    return f"The analysis could not be completed: {text}"
+
+
+def _shed_context(messages: list[dict[str, Any]]) -> bool:
+    """Drop the least valuable part of a conversation that no longer fits.
+
+    Tool payloads dominate the context and can be queried again, so they go first.
+    Only then are whole turns dropped, oldest first and never partially: deleting
+    an assistant message while keeping the tool results it called would leave the
+    history malformed. Returns False when there is nothing left to give up.
+    """
+    payloads = [
+        index
+        for index, message in enumerate(messages)
+        if message["role"] == "tool" and message["content"] != OMITTED_PAYLOAD
+    ]
+    if len(payloads) > 1:
+        for index in payloads[:-1]:
+            messages[index]["content"] = OMITTED_PAYLOAD
+        return True
+
+    turns = [index for index, message in enumerate(messages) if message["role"] == "user"]
+    if len(turns) > 1:
+        del messages[turns[0] : turns[1]]
+        return True
+
+    if payloads:
+        messages[payloads[0]]["content"] = OMITTED_PAYLOAD
+        return True
+    return False
+
 
 EXPLORE_PROMPT = """Explore this dataset with SQL before drawing any conclusion.
 Run several queries: read real values, check how low-cardinality columns are distributed,
@@ -179,7 +254,13 @@ class DataAgent:
         if depth == "always" and not plan:
             plan = [question]
         if plan:
-            return self._investigate(question, plan, multi_turn)
+            try:
+                return self._investigate(question, plan, multi_turn)
+            except Exception:
+                # Investigating is the better answer, not the only one. Falling
+                # through to a single pass costs depth; failing here costs the
+                # question.
+                logs.failure("investigation.failed")
         if not multi_turn:
             # Start from the system prompt alone, so nothing from an earlier answer
             # reaches this one. The UI keeps showing the full history regardless.
@@ -281,8 +362,19 @@ class DataAgent:
                     {"role": "system", "content": self._system_prompt()},
                     {"role": "user", "content": step},
                 ]
-                found = self._run_loop(conversation, MAX_STEP_ROUNDS, self._chat_tools())
+                try:
+                    found = self._run_loop(conversation, MAX_STEP_ROUNDS, self._chat_tools())
+                except Exception:
+                    # One sub-question failing is not a reason to lose the other
+                    # four. The synthesis is told what is missing rather than
+                    # answering as though the step had returned nothing of note.
+                    logs.failure("plan.step.failed")
+                    findings.append(f"### {step}\nThis could not be answered.")
+                    continue
                 findings.append(f"### {step}\n{found}")
+
+        if all("could not be answered" in finding for finding in findings):
+            raise RuntimeError("no step of the investigation produced anything")
 
         transcript = "\n\n".join(findings)
         closing = [
@@ -318,7 +410,25 @@ class DataAgent:
         ]
 
     def _chat(self, **kwargs: Any) -> Any:
-        """One model call, retried when the host blips.
+        """One model call, kept alive through the failures that are recoverable.
+
+        A prompt over the context window is the one refusal worth sending again:
+        the request is too big rather than wrong, so the conversation is shed and
+        retried. The trimming persists, because the history is the same list the
+        chat keeps — the next question starts from the smaller one rather than
+        rediscovering the limit.
+        """
+        for _ in range(MAX_CONTEXT_SHEDS):
+            try:
+                return self._chat_once(**kwargs)
+            except ollama.ResponseError as error:
+                if not _over_context(error) or not _shed_context(kwargs.get("messages") or []):
+                    raise
+                logs.event("model.context.shed", reason=str(error)[:120])
+        return self._chat_once(**kwargs)
+
+    def _chat_once(self, **kwargs: Any) -> Any:
+        """Retried when the host blips.
 
         A hosted model returns the occasional 500, and an investigation makes six
         to ten calls where a lookup makes one, so without this a single blip throws

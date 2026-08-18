@@ -405,3 +405,158 @@ def test_retries_give_up_and_surface_the_error(monkeypatch) -> None:
         assert client.attempts == MODEL_RETRIES + 1
     finally:
         dataset.close()
+
+
+# --- recovering rather than failing ---------------------------------------------
+
+
+def history() -> list[dict]:
+    """Two complete turns, each with a tool call and its result."""
+    return [
+        {"role": "system", "content": "prompt"},
+        {"role": "user", "content": "first question"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"function": {"name": "run_sql", "arguments": {"sql": "SELECT 1"}}}],
+        },
+        {"role": "tool", "tool_name": "run_sql", "content": "first payload"},
+        {"role": "assistant", "content": "first answer"},
+        {"role": "user", "content": "second question"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"function": {"name": "run_sql", "arguments": {"sql": "SELECT 1"}}}],
+        },
+        {"role": "tool", "tool_name": "run_sql", "content": "second payload"},
+        {"role": "assistant", "content": "second answer"},
+    ]
+
+
+def test_shedding_drops_stale_payloads_before_anything_else() -> None:
+    messages = history()
+    assert agent_module._shed_context(messages) is True
+    assert len(messages) == len(history())  # nothing removed yet
+    payloads = [item["content"] for item in messages if item["role"] == "tool"]
+    assert payloads == [OMITTED_PAYLOAD, "second payload"]
+
+
+def test_shedding_removes_whole_turns_so_no_tool_result_is_orphaned() -> None:
+    """Deleting an assistant message while keeping the tool results it called
+    leaves a history the model cannot read."""
+    messages = history()
+    agent_module._shed_context(messages)  # payloads first
+    assert agent_module._shed_context(messages) is True
+
+    assert messages[0]["role"] == "system", "the system prompt must survive"
+    assert messages[1]["content"] == "second question", "the newest turn must survive"
+    for index, item in enumerate(messages):
+        if item["role"] == "tool":
+            caller = messages[index - 1]
+            assert caller.get("tool_calls"), "a tool result outlived the call that made it"
+
+
+def test_shedding_gives_up_when_nothing_is_left() -> None:
+    assert agent_module._shed_context([{"role": "system", "content": "prompt"}]) is False
+
+
+class OverContextClient(FakeClient):
+    """Refuses any prompt bigger than `accepts_at` characters, as the host does."""
+
+    def __init__(self, messages, accepts_at: int):
+        super().__init__(messages)
+        self.accepts_at = accepts_at
+        self.sizes: list[int] = []
+
+    def chat(self, **kwargs):
+        sent = kwargs.get("messages") or []
+        size = sum(len(str(item.get("content") or "")) for item in sent)
+        self.sizes.append(size)
+        if size > self.accepts_at:
+            raise ollama.ResponseError(
+                "The prompt is too long: 450028, model maximum context length: 262144", 400
+            )
+        return super().chat(**kwargs)
+
+
+def test_a_conversation_past_the_context_window_is_shed_and_sent_again() -> None:
+    """Verified against the host: an over-long prompt is a 400, so it is never
+    retried as-is — but it is recoverable by making the prompt smaller."""
+    client = OverContextClient([Message(role="assistant", content="Recovered.")], accepts_at=0)
+    agent, dataset = make_agent(client)
+    try:
+        agent.messages = history()
+        client.accepts_at = 60  # smaller than the full history, bigger than one turn
+        answer = agent.ask("and now?", depth="never")
+        assert answer.text == "Recovered."
+        assert client.sizes[0] > client.sizes[-1], "it resent the same oversized prompt"
+        # The trimming persists, so the next question starts from the smaller history.
+        assert len(agent.messages) < len(history()) + 2
+    finally:
+        dataset.close()
+
+
+class StepFailureClient(FakeClient):
+    """Fails the numbered calls, counting only the ones that are not planning."""
+
+    def __init__(self, messages, plan, fail_on: set[int]):
+        super().__init__(messages, plan=plan)
+        self.fail_on = fail_on
+        self.attempts = 0
+
+    def chat(self, **kwargs):
+        system = (kwargs.get("messages") or [{}])[0].get("content", "")
+        if "Decide how this question should be answered" in system:
+            return super().chat(**kwargs)
+        self.attempts += 1
+        if self.attempts in self.fail_on:
+            raise ollama.ResponseError("bad request", 400)
+        return super().chat(**kwargs)
+
+
+def test_one_failed_sub_question_does_not_lose_the_investigation() -> None:
+    client = StepFailureClient(
+        [Message(role="assistant", content="Answered from what worked.")],
+        plan=["first sub-question here", "second sub-question here"],
+        fail_on={1},
+    )
+    agent, dataset = make_agent(client)
+    try:
+        answer = agent.ask("how should we grow?", depth="auto")
+        assert answer.plan == client.plan, "the investigation was abandoned"
+        assert answer.text == "Answered from what worked."
+    finally:
+        dataset.close()
+
+
+def test_a_failed_investigation_falls_back_to_a_single_pass() -> None:
+    """Investigating is the better answer, not the only one."""
+    client = StepFailureClient(
+        [Message(role="assistant", content="Direct answer.")],
+        plan=["first sub-question here", "second sub-question here"],
+        fail_on={1, 2},
+    )
+    agent, dataset = make_agent(client)
+    try:
+        answer = agent.ask("how should we grow?", depth="auto")
+        assert answer.text == "Direct answer."
+        assert answer.plan == [], "it reported an investigation it did not complete"
+    finally:
+        dataset.close()
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (ConnectionError("refused"), "Could not reach Ollama"),
+        (ollama.ResponseError("model not found", 404), "not available at"),
+        (
+            ollama.ResponseError("The prompt is too long: 1, model maximum context length: 2", 400),
+            "context window",
+        ),
+        (ollama.ResponseError("upstream failure", 503), "failing to serve"),
+        (ValueError("something else"), "could not be completed"),
+    ],
+)
+def test_an_unrecoverable_failure_says_what_to_do_about_it(error, expected) -> None:
+    assert expected in agent_module.explain_failure(error)

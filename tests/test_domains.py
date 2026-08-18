@@ -10,6 +10,7 @@ from __future__ import annotations
 import pytest
 
 from smart_data_studio.dataset import CsvSource, Dataset
+from smart_data_studio.sql_guard import UnsafeQuery
 
 
 def warnings_for(name: str, body: bytes) -> tuple[list[str], int, str]:
@@ -165,3 +166,48 @@ def test_conversion_refuses_what_it_cannot_convert(column: str, message: str) ->
             dataset.convert_to_number("t", column)
     finally:
         dataset.close()
+
+
+def test_one_unreadable_file_does_not_cost_the_others() -> None:
+    """Uploading three CSVs and getting nothing because one repeats a column name
+    is the wrong trade when the other two are fine."""
+    dataset = Dataset.load(
+        [
+            CsvSource.from_upload("good.csv", b"id,value\n1,10\n"),
+            CsvSource.from_upload("dupes.csv", b"id,id\n1,2\n"),
+            CsvSource.from_upload("also_good.csv", b"id,name\n1,widget\n"),
+        ]
+    )
+    try:
+        assert dataset.tables == ("good", "also_good")
+        assert dataset.query("SELECT value FROM good").frame.iloc[0, 0] == 10
+        # The one that failed is named, not silently absent from the panel.
+        assert len(dataset.rejected) == 1
+        assert "repeats column name" in dataset.rejected[0]
+        # Named once. The error already carries the filename, so prefixing it
+        # unconditionally printed it twice.
+        assert dataset.rejected[0].count("dupes.csv") == 1
+    finally:
+        dataset.close()
+
+
+def test_a_half_built_table_is_not_left_queryable() -> None:
+    """A file rejected after its table was created must leave nothing behind."""
+    dataset = Dataset.load(
+        [
+            CsvSource.from_upload("good.csv", b"id,value\n1,10\n"),
+            CsvSource.from_upload("dupes.csv", b"id,id\n1,2\n"),
+        ]
+    )
+    try:
+        loaded = dataset.connection.execute("SELECT table_name FROM duckdb_tables()").fetchall()
+        assert [row[0] for row in loaded] == ["good"]
+        with pytest.raises(UnsafeQuery, match="Unknown table"):
+            dataset.query("SELECT * FROM dupes")
+    finally:
+        dataset.close()
+
+
+def test_nothing_loading_is_still_an_error() -> None:
+    with pytest.raises(ValueError, match="repeats column name"):
+        Dataset.load([CsvSource.from_upload("dupes.csv", b"id,id\n1,2\n")])

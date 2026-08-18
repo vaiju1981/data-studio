@@ -7,7 +7,7 @@ from pathlib import Path
 import streamlit as st
 
 from smart_data_studio import logs, sessions
-from smart_data_studio.agent import Answer, DataAgent
+from smart_data_studio.agent import Answer, DataAgent, explain_failure
 from smart_data_studio.config import ALLOW_LOCAL_PATHS, MODEL_ID, OLLAMA_HOST
 from smart_data_studio.dataset import CsvSource, Dataset
 from smart_data_studio.profile import profile_dataset
@@ -224,7 +224,9 @@ def _load(uploads: list[object], paths: str) -> None:
                 st.session_state.understanding = agent.build_understanding()
         except Exception as error:
             st.session_state.understanding = ""
-            st.session_state.insight_error = str(error)
+            # The profile is already computed and shown; only the written summary
+            # is lost, so the reason belongs on screen rather than in the log alone.
+            st.session_state.insight_error = explain_failure(error)
         st.rerun()
     except sessions.TooManySessions as error:
         st.error(str(error))
@@ -258,7 +260,8 @@ def _answer(question: str) -> None:
                     depth=DEPTHS[st.session_state.depth],
                 )
         except Exception as error:
-            answer = Answer(text=f"The analysis could not be completed: {error}", results=[])
+            logs.failure("answer.failed")
+            answer = Answer(text=explain_failure(error), results=[])
         # Every user turn gets an assistant turn, so a failure cannot leave the
         # rendered history and the agent's own history out of step.
         render.answer(answer, str(len(st.session_state.chat)), st.session_state.dataset)

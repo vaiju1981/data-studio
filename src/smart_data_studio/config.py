@@ -30,6 +30,10 @@ OLLAMA_HOST = os.environ.get("SDS_OLLAMA_HOST", "http://localhost:11434")
 # makes six to ten calls, so a blip would otherwise discard a minute of work.
 MODEL_RETRIES = _number("SDS_MODEL_RETRIES", 2)
 MODEL_RETRY_SECONDS = _number("SDS_MODEL_RETRY_SECONDS", 2)
+# A prompt past the context window is refused rather than truncated, so the
+# conversation is shed and sent again. Three rounds clears the largest history the
+# session limits allow.
+MAX_CONTEXT_SHEDS = _number("SDS_MAX_CONTEXT_SHEDS", 3)
 
 # Reading a path off the host is right for a local tool and disqualifying for a
 # shared one, so hosted deployments turn it off.
