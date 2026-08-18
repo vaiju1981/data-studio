@@ -10,7 +10,7 @@ from pathlib import Path
 VERSION = "0.1.0"
 # Bumped whenever the analyst prompt changes, so a logged answer can be traced to
 # the instructions that produced it.
-PROMPT_VERSION = "2026-08-16.1"
+PROMPT_VERSION = "2026-08-18.1"
 
 
 def _flag(name: str, default: bool) -> bool:
@@ -113,6 +113,11 @@ SAMPLE_ROWS = 5
 # cost time, and effect size — the part that matters — is already stable.
 MAX_TEST_SAMPLE = 50_000
 MAX_RELATE_SAMPLE = 100_000
+# Values listed per dimension column. A column with no more than this many is
+# listed in full; a wider one shows its commonest, which is what makes a column
+# the model never queried still visible to it.
+DICTIONARY_VALUES = 12
+
 # A column with more levels than this is an identifier, not a dimension to sweep.
 MAX_DRIVER_LEVELS = 50
 # Below this a group cannot support a test: Cliff's delta from one observation is

@@ -244,6 +244,12 @@ def profile_panel(profiles: list[TableProfile]) -> None:
             st.markdown(f"**{profile.table_name}** · {profile.row_count:,} rows")
             for finding in profile.findings:
                 st.markdown(f"- {finding}")
+            if profile.dictionary:
+                # Shown because the model is sent exactly this. Without it there is
+                # no way to tell a column it never mentioned from one it never saw.
+                st.markdown("**Values the model was given for each dimension**")
+                for line in profile.dictionary:
+                    st.markdown(f"- {line}")
             st.dataframe(profile.stats, use_container_width=True, hide_index=True)
 
 

@@ -160,3 +160,57 @@ def test_a_genuine_spread_is_not_called_a_sentinel() -> None:
         assert "missing-value code" not in findings
     finally:
         dataset.close()
+
+
+def test_dimension_values_are_listed_so_a_column_need_not_be_queried_to_be_seen() -> None:
+    """The schema says ageGroup exists; it does not say what the column holds. A
+    summary of a 57-column file covered geoType and clubLevel and never mentioned
+    ageGroup, city or state — all three were listed all along, but only as names,
+    so the only ones described were the ones exploration happened to query.
+    """
+    rows = ["region,tier,note"]
+    rows += [
+        f"{'North' if n % 2 else 'South'},{'gold' if n % 3 else 'silver'},x{n}" for n in range(60)
+    ]
+    dataset = Dataset.load([CsvSource.from_upload("t.csv", ("\n".join(rows) + "\n").encode())])
+    try:
+        profile = profile_table(dataset, "t")
+        listed = "\n".join(profile.dictionary)
+        assert "region (2 values): North, South" in listed
+        assert "tier (2 values): gold, silver" in listed
+        # note is near-unique — an identifier, whose commonest values say nothing.
+        assert "note" not in listed
+        assert "Values held by the dimension columns" in profile.prompt_text()
+    finally:
+        dataset.close()
+
+
+def test_a_wide_dimension_is_summarised_rather_than_listed_in_full() -> None:
+    rows = ["city"] + [f"city{n % 200}" for n in range(2000)]
+    dataset = Dataset.load([CsvSource.from_upload("t.csv", ("\n".join(rows) + "\n").encode())])
+    try:
+        listed = "\n".join(profile_table(dataset, "t").dictionary)
+        assert "most common:" in listed
+        assert listed.count(",") <= 12, "a wide column was enumerated in full"
+    finally:
+        dataset.close()
+
+
+def test_a_sensitive_column_is_not_given_a_dictionary() -> None:
+    """Sensitive columns are withheld from everything the model sees, and a list of
+    their commonest values would be the most revealing form of all."""
+    import smart_data_studio.dataset as dataset_module
+
+    original = dataset_module.SENSITIVE_COLUMNS
+    dataset_module.SENSITIVE_COLUMNS = ("email",)
+    rows = ["email,region"] + [
+        f"user{n % 3}@x.com,{'North' if n % 2 else 'South'}" for n in range(60)
+    ]
+    dataset = Dataset.load([CsvSource.from_upload("t.csv", ("\n".join(rows) + "\n").encode())])
+    try:
+        listed = "\n".join(profile_table(dataset, "t").dictionary)
+        assert "@x.com" not in listed and "email" not in listed
+        assert "region" in listed
+    finally:
+        dataset_module.SENSITIVE_COLUMNS = original
+        dataset.close()

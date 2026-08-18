@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import pandas as pd
 
 from smart_data_studio.config import (
+    DICTIONARY_VALUES,
+    MAX_CELL_CHARS_TO_MODEL,
     MIN_SENTINEL_ROWS,
     SENTINEL_GAP_RATIO,
     SENTINEL_SHARE,
 )
-from smart_data_studio.dataset import Dataset, quote_identifier
+from smart_data_studio.dataset import Dataset, is_sensitive, quote_identifier
 
 
 @dataclass
@@ -20,6 +22,8 @@ class TableProfile:
     row_count: int
     stats: pd.DataFrame
     findings: list[str]
+    # What the dimension columns actually contain, one line each.
+    dictionary: list[str] = field(default_factory=list)
 
     def prompt_text(self) -> str:
         columns = [
@@ -39,10 +43,16 @@ class TableProfile:
             .to_string(index=False)
         )
         rendered_findings = "\n".join(f"- {finding}" for finding in self.findings)
+        rendered_dictionary = (
+            "\nValues held by the dimension columns:\n"
+            + "\n".join(f"- {line}" for line in self.dictionary)
+            if self.dictionary
+            else ""
+        )
         return (
             f"Table {self.table_name}: {self.row_count:,} rows\n"
             f"Profile (approx_unique is an estimate, not an exact count):\n{rendered_stats}\n"
-            f"Findings:\n{rendered_findings}"
+            f"Findings:\n{rendered_findings}{rendered_dictionary}"
         )
 
 
@@ -68,6 +78,7 @@ def profile_table(dataset: Dataset, table_name: str) -> TableProfile:
         row_count=row_count,
         stats=stats,
         findings=findings,
+        dictionary=_dictionary(dataset, table_name, stats),
     )
 
 
@@ -161,6 +172,63 @@ def _exact_distinct(
         f"SELECT {projections} FROM {quote_identifier(table_name)}"
     ).fetchone()
     return {name: int(count) for name, count in zip(candidates, row, strict=True)}
+
+
+def _dictionary(dataset: Dataset, table_name: str, stats: pd.DataFrame) -> list[str]:
+    """The values each dimension column actually holds, not merely its name.
+
+    The schema tells the model that ageGroup exists; it does not say the column
+    runs from "21-25" to "81+". Without that, a question about segmentation
+    reaches for whatever column the exploration happened to sample, and columns it
+    never queried go unmentioned even though they were listed all along — which is
+    how a summary can cover geoType and clubLevel and never notice ageGroup, city
+    or state.
+
+    approx_top_k gathers every column in a single pass, so this costs one scan
+    rather than one per column.
+    """
+    candidates = []
+    for row in stats.to_dict(orient="records"):
+        name = str(row["column_name"])
+        if "VARCHAR" not in str(row["column_type"]).upper() or is_sensitive(name):
+            continue
+        distinct = _number(row.get("approx_unique"))
+        # Two ends are useless: a constant says nothing, and a value unique to
+        # nearly every row is an identifier, whose commonest values mean nothing.
+        if distinct < 2 or distinct > max(dataset.row_count(table_name) * 0.9, 2):
+            continue
+        candidates.append((name, distinct))
+    if not candidates:
+        return []
+
+    projections = ", ".join(
+        f"approx_top_k({quote_identifier(name)}, {DICTIONARY_VALUES}) AS v{index}"
+        for index, (name, _) in enumerate(candidates)
+    )
+    values = (
+        dataset.connection.execute(f"SELECT {projections} FROM {quote_identifier(table_name)}")
+        .fetchdf()
+        .iloc[0]
+        .to_dict()
+    )
+
+    lines = []
+    for index, (name, distinct) in enumerate(candidates):
+        # Explicit None test: this arrives as a numpy array, and `array or []`
+        # raises rather than falling back.
+        raw = values.get(f"v{index}")
+        found = [str(item) for item in (raw if raw is not None else []) if not pd.isna(item)]
+        if not found:
+            continue
+        shown = [
+            item[:MAX_CELL_CHARS_TO_MODEL] + "…" if len(item) > MAX_CELL_CHARS_TO_MODEL else item
+            for item in found
+        ]
+        if distinct <= DICTIONARY_VALUES:
+            lines.append(f"{name} ({len(shown)} values): {', '.join(sorted(shown))}")
+        else:
+            lines.append(f"{name} (~{int(distinct):,} values), most common: {', '.join(shown)}")
+    return lines
 
 
 def _sentinels(dataset: Dataset, table_name: str, stats: pd.DataFrame) -> dict[str, str]:

@@ -116,6 +116,9 @@ that change what a column means.
 Establish the grain — what one row represents. Where a key repeats across rows, check which
 columns stay constant within it and which vary; a column that varies is a per-row value, not a
 property of the entity, even when its name suggests otherwise.
+The profile lists the values each dimension column holds. Name the segments the data
+actually supports — every one of those columns, not only the ones you queried — since a
+column left unmentioned reads as a column the data does not have.
 Then write at least five Markdown bullets. Every bullet must rest on a number you queried
 or a profile fact, and should say what the columns mean and how the tables relate.
 Do not guess at causes, trends, or business meaning the data does not establish."""
