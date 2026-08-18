@@ -24,6 +24,9 @@ class TableProfile:
     findings: list[str]
     # What the dimension columns actually contain, one line each.
     dictionary: list[str] = field(default_factory=list)
+    # The column a row is a repeat of — playerId in a table of visits. A question
+    # about that entity has to be aggregated to it, not counted by row.
+    entity_key: str | None = None
 
     def prompt_text(self) -> str:
         columns = [
@@ -68,7 +71,7 @@ def profile_table(dataset: Dataset, table_name: str) -> TableProfile:
     # Ahead of the rest: a column whose average is meaningless is worth more than
     # a note that another column is high-cardinality.
     findings = list(_sentinels(dataset, table_name, stats).values()) + findings
-    grain = _entity_grain(dataset, table_name, stats, row_count)
+    grain, entity_key = _entity_grain(dataset, table_name, stats, row_count)
     if grain:
         findings.insert(0, grain)
     if not findings:
@@ -79,12 +82,13 @@ def profile_table(dataset: Dataset, table_name: str) -> TableProfile:
         stats=stats,
         findings=findings,
         dictionary=_dictionary(dataset, table_name, stats),
+        entity_key=entity_key,
     )
 
 
 def _entity_grain(
     dataset: Dataset, table_name: str, stats: pd.DataFrame, row_count: int
-) -> str | None:
+) -> tuple[str | None, str | None]:
     """Report which columns stay constant within the table's entity key.
 
     Grouping by an entity key together with a column that varies inside it splits
@@ -100,18 +104,24 @@ def _entity_grain(
         and 1 < _number(row.get("approx_unique")) < row_count
     ]
     if not candidates:
-        return None
+        return None, None
     _, key = max(candidates)
 
     others = [str(row["column_name"]) for row in records if str(row["column_name"]) != key]
     if not others:
-        return None
+        return None, None
     # approx_count_distinct is exact at the low cardinalities the "> 1" test cares about.
     inner = ", ".join(
         f"approx_count_distinct({quote_identifier(name)}) AS d{index}"
         for index, name in enumerate(others)
     )
-    outer = ", ".join(f"max(d{index}) AS m{index}" for index in range(len(others)))
+    # count_if rides along on the same pass: max says a column varies somewhere,
+    # this says how widely. A tier that moves for 55,629 of 460,442 players is
+    # where "how do we upsell" is actually answerable, and nothing else says so.
+    outer = ", ".join(
+        f"max(d{index}) AS m{index}, count_if(d{index} > 1) AS c{index}"
+        for index in range(len(others))
+    )
     try:
         row = dataset.connection.execute(
             f"SELECT count(*) AS entities, {outer} FROM ("
@@ -119,20 +129,39 @@ def _entity_grain(
             f"FROM {quote_identifier(table_name)} GROUP BY 1)"
         ).fetchone()
     except Exception:
-        return None  # a profiling nicety must never stop the data from loading
+        return None, None  # a profiling nicety must never stop the data from loading
 
     entities = int(row[0])
-    stable = [others[index] for index in range(len(others)) if _number(row[index + 1]) <= 1]
+    # Two values per column now, so the stride is two.
+    stable = [others[index] for index in range(len(others)) if _number(row[1 + index * 2]) <= 1]
+    # Only dimensions: visitId and startTime differ per visit by definition, and
+    # listing them buries the one that carries meaning — a player changing tier.
+    dimensions = _dimension_columns(stats, row_count)
+    moving = sorted(
+        (
+            (int(_number(row[2 + index * 2])), others[index])
+            for index in range(len(others))
+            if _number(row[2 + index * 2]) > 0 and others[index] in dimensions
+        ),
+        reverse=True,
+    )
     if entities >= row_count:
-        return None  # one row per key: it is the grain, not an entity to group within
+        # One row per key: it is the grain already, not an entity to aggregate to.
+        return None, None
 
     listed = ", ".join(stable[:12]) + (", …" if len(stable) > 12 else "") if stable else "none"
+    changes = ", ".join(f"{name} for {count:,}" for count, name in moving[:6])
     return (
         f"{key} repeats: {entities:,} values across {row_count:,} rows "
         f"(~{row_count / entities:.1f} rows each). Constant within it: {listed}. Every other "
         f"column varies, so adding one to GROUP BY {key} splits a single {key} across several "
         f"rows — aggregate those with MAX or SUM instead."
-    )
+        + (
+            f" Changes within a single {key}, so its history can be followed: {changes}."
+            if changes
+            else ""
+        )
+    ), key
 
 
 def _looks_like_key(name: str) -> bool:
@@ -174,6 +203,24 @@ def _exact_distinct(
     return {name: int(count) for name, count in zip(candidates, row, strict=True)}
 
 
+def _dimension_columns(stats: pd.DataFrame, row_count: int) -> dict[str, float]:
+    """Text columns that describe an entity rather than identify or measure it.
+
+    Two ends are useless: a constant says nothing, and a value unique to nearly
+    every row is an identifier, whose commonest values mean nothing.
+    """
+    found = {}
+    for row in stats.to_dict(orient="records"):
+        name = str(row["column_name"])
+        if "VARCHAR" not in str(row["column_type"]).upper() or is_sensitive(name):
+            continue
+        distinct = _number(row.get("approx_unique"))
+        if distinct < 2 or distinct > max(row_count * 0.9, 2):
+            continue
+        found[name] = distinct
+    return found
+
+
 def _dictionary(dataset: Dataset, table_name: str, stats: pd.DataFrame) -> list[str]:
     """The values each dimension column actually holds, not merely its name.
 
@@ -187,17 +234,7 @@ def _dictionary(dataset: Dataset, table_name: str, stats: pd.DataFrame) -> list[
     approx_top_k gathers every column in a single pass, so this costs one scan
     rather than one per column.
     """
-    candidates = []
-    for row in stats.to_dict(orient="records"):
-        name = str(row["column_name"])
-        if "VARCHAR" not in str(row["column_type"]).upper() or is_sensitive(name):
-            continue
-        distinct = _number(row.get("approx_unique"))
-        # Two ends are useless: a constant says nothing, and a value unique to
-        # nearly every row is an identifier, whose commonest values mean nothing.
-        if distinct < 2 or distinct > max(dataset.row_count(table_name) * 0.9, 2):
-            continue
-        candidates.append((name, distinct))
+    candidates = list(_dimension_columns(stats, dataset.row_count(table_name)).items())
     if not candidates:
         return []
 

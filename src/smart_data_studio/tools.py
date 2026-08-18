@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from dataclasses import dataclass
 
+import sqlglot
 from plotly.graph_objects import Figure
+from sqlglot import exp
 
 from smart_data_studio import analysis, timeseries
 from smart_data_studio.charts import ChartSpec, make_figure
@@ -50,6 +53,25 @@ def _dump(payload: dict[str, object]) -> str:
     return json.dumps(_finite(payload), default=str)
 
 
+def _aggregates_by(tree: exp.Expression, key: str) -> bool:
+    """Whether the query resolves to one row per key somewhere along the way.
+
+    Three shapes reach entity grain and they are modelled differently. GROUP BY key
+    and COUNT(DISTINCT key) carry the column inside their own node — the second on
+    a Distinct that holds it. Plain SELECT DISTINCT does not: there the Distinct
+    renders as the bare word and the columns sit on the Select above it.
+    """
+    wanted = key.lower()
+    carries_key = (exp.Group, exp.Distinct)
+    for node in tree.walk():
+        if isinstance(node, carries_key) and wanted in node.sql().lower():
+            return True
+        selects_key = isinstance(node, exp.Select) and node.args.get("distinct")
+        if selects_key and any(wanted in item.sql().lower() for item in node.expressions):
+            return True
+    return False
+
+
 class AnalysisTools:
     """Tools shared across a whole conversation, so a later turn can chart an earlier result."""
 
@@ -61,6 +83,10 @@ class AnalysisTools:
         # rests on a mapping the model brought with it, which is worth recording
         # whether or not the mapping is right.
         self.unresolved: list[str] = []
+        # Set per turn so a query answering a question about entities can be told
+        # when it counted rows instead.
+        self.entity_keys: dict[str, str] = {}
+        self.question = ""
         self.chart: Figure | None = None
         self.chart_spec: ChartSpec | None = None
         self.chart_source: QueryResult | None = None
@@ -92,7 +118,45 @@ class AnalysisTools:
         except Exception as error:
             return _dump({"error": str(error)})
         self.results.append(result)
-        return _dump(self.dataset.tool_payload(result))
+        payload = self.dataset.tool_payload(result)
+        note = self._grain_note(sql)
+        if note:
+            payload = {**payload, "grain_warning": note}
+        return _dump(payload)
+
+    def _grain_note(self, sql: str) -> str | None:
+        """Warn when a question about entities was answered by counting rows.
+
+        A table whose playerId repeats has two grains, and picking the wrong one
+        gives a number that is right for visits and wrong for players. Asked what
+        share of players beat the tier above, one such query answered 4.96% where
+        the answer per player is 30.54% — six times out, and reported as a
+        percentage of players.
+
+        Returned to the model rather than shown to the user, so it gets the chance
+        to run the right query instead of the wrong one being labelled.
+        """
+        if not self.question:
+            return None
+        asked = self.question.lower()
+        try:
+            tree = sqlglot.parse_one(sql, dialect="duckdb")
+        except Exception:
+            return None
+        for table, key in self.entity_keys.items():
+            # playerId -> player. A bare "id" is too generic to match a question on.
+            noun = re.sub(r"(_id|Id|ID)$", "", key).strip("_").lower()
+            if len(noun) < 3 or noun not in asked or table.lower() not in sql.lower():
+                continue
+            if _aggregates_by(tree, key):
+                continue
+            return (
+                f"This counts rows, and a row is one visit rather than one {noun}: {key} "
+                f"repeats. The question asks about {noun}s, so aggregate to {key} first — "
+                f"COUNT(DISTINCT {key}), or a subquery grouped by {key} — otherwise the "
+                f"figure describes rows and will be quoted as though it described {noun}s."
+            )
+        return None
 
     def find_values(self, table: str, column: str, contains: str = "") -> str:
         """List every spelling a text column holds for a name, before filtering on it.

@@ -214,3 +214,23 @@ def test_a_sensitive_column_is_not_given_a_dictionary() -> None:
     finally:
         dataset_module.SENSITIVE_COLUMNS = original
         dataset.close()
+
+
+def test_the_grain_finding_says_which_dimensions_move_within_an_entity() -> None:
+    """ "How do we upsell tiers" is answerable from history only if the data says a
+    tier moves at all. Restricted to dimensions, because a visit id and a timestamp
+    differ per row by definition and listing those buries the one that matters.
+    """
+    rows = ["playerId,tier,visitId"]
+    rows += [f"1,GOLD,{n}" for n in range(5)]
+    rows += [f"2,GOLD,{n + 5}" for n in range(5)]
+    rows += [f"3,{'GOLD' if n < 3 else 'PLATINUM'},{n + 10}" for n in range(6)]
+    dataset = Dataset.load([CsvSource.from_upload("v.csv", ("\n".join(rows) + "\n").encode())])
+    try:
+        profile = profile_table(dataset, "v")
+        assert profile.entity_key == "playerId"
+        grain = profile.findings[0]
+        assert "tier for 1" in grain, grain
+        assert "visitId" not in grain.split("history can be followed")[-1]
+    finally:
+        dataset.close()

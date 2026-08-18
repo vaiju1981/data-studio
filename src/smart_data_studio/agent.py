@@ -228,6 +228,9 @@ class DataAgent:
         # One toolset for the whole conversation, so "now chart that" can reach the
         # result produced by an earlier turn.
         self.tools = AnalysisTools(dataset)
+        self.tools.entity_keys = {
+            profile.table_name: profile.entity_key for profile in profiles if profile.entity_key
+        }
         self.understanding = ""
         self.metrics = ""
         self.messages: list[dict[str, Any]] = [{"role": "system", "content": self._system_prompt()}]
@@ -283,6 +286,7 @@ class DataAgent:
         first_new_result = len(self.tools.results)
         first_new_analysis = len(self.tools.analyses)
         first_new_assumption = len(self.tools.unresolved)
+        self.tools.question = question
         self.tools.reset_chart(keep_history=multi_turn)
         self.messages.append({"role": "user", "content": question})
         text = self._run_loop(
@@ -380,6 +384,7 @@ class DataAgent:
                     {"role": "system", "content": self._system_prompt()},
                     {"role": "user", "content": step},
                 ]
+                self.tools.question = step
                 try:
                     found = self._run_loop(conversation, MAX_STEP_ROUNDS, self._chat_tools())
                 except Exception:
@@ -399,6 +404,7 @@ class DataAgent:
             {"role": "system", "content": f"{self._system_prompt()}\n\n{SYNTHESIS_PROMPT}"},
             {"role": "user", "content": f"Original question: {question}\n\n{transcript}"},
         ]
+        self.tools.question = question
         text = self._run_loop(closing, MAX_TOOL_ROUNDS, self._chat_tools())
         if multi_turn:
             # The chat keeps the question and the conclusion, not the working.

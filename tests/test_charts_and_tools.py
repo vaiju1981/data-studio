@@ -233,3 +233,68 @@ def test_a_name_the_data_does_hold_records_nothing() -> None:
         assert tools.unresolved == []
     finally:
         dataset.close()
+
+
+# --- counting rows when the question asked about entities -----------------------
+
+VISITS = b"playerId,tier,spend\n" + b"".join(
+    [b"1,GOLD,10\n"] * 6 + [b"2,GOLD,90\n"] + [b"3,PLATINUM,5\n"] * 3
+)
+
+
+def visit_tools() -> tuple[AnalysisTools, Dataset]:
+    dataset = Dataset.load([CsvSource.from_upload("visits.csv", VISITS)])
+    tools = AnalysisTools(dataset)
+    tools.entity_keys = {"visits": "playerId"}
+    return tools, dataset
+
+
+def test_a_question_about_entities_answered_by_counting_rows_is_flagged() -> None:
+    """The failure this exists for: asked what share of players beat the tier above,
+    a query counted visit rows and answered 4.96%. Per player it is 30.54% — six
+    times out, and reported as a percentage of players.
+    """
+    tools, dataset = visit_tools()
+    try:
+        tools.question = "What percentage of players spend more than 50?"
+        payload = json.loads(tools.run_sql("SELECT count(*) AS n FROM visits WHERE spend > 50"))
+        assert "grain_warning" in payload
+        assert "one visit rather than one player" in payload["grain_warning"]
+    finally:
+        dataset.close()
+
+
+def test_no_warning_once_the_query_aggregates_to_the_entity() -> None:
+    tools, dataset = visit_tools()
+    try:
+        tools.question = "What percentage of players spend more than 50?"
+        for sql in (
+            "SELECT count(DISTINCT playerId) AS n FROM visits WHERE spend > 50",
+            "SELECT playerId, sum(spend) AS s FROM visits GROUP BY playerId",
+            "SELECT count(*) FROM (SELECT DISTINCT playerId FROM visits)",
+        ):
+            assert "grain_warning" not in json.loads(tools.run_sql(sql)), sql
+    finally:
+        dataset.close()
+
+
+def test_a_question_about_rows_is_left_alone() -> None:
+    """Counting visits is exactly right when visits are what was asked about."""
+    tools, dataset = visit_tools()
+    try:
+        tools.question = "How many visits spent more than 50?"
+        assert "grain_warning" not in json.loads(
+            tools.run_sql("SELECT count(*) AS n FROM visits WHERE spend > 50")
+        )
+    finally:
+        dataset.close()
+
+
+def test_no_warning_when_the_table_has_no_repeating_entity() -> None:
+    tools, dataset = visit_tools()
+    try:
+        tools.entity_keys = {}
+        tools.question = "What percentage of players spend more than 50?"
+        assert "grain_warning" not in json.loads(tools.run_sql("SELECT count(*) AS n FROM visits"))
+    finally:
+        dataset.close()
