@@ -119,6 +119,11 @@ MAX_DRIVER_LEVELS = 50
 # 1.0, which reads as a maximal effect.
 MIN_COMPARISON_ROWS = 10
 MIN_ASSOCIATION_ROWS = 10
+# A repeated extreme is a missing-value code, not a measurement. Set low because
+# the consequence — an average computed over -200s — is silent and severe.
+SENTINEL_SHARE = 0.02
+MIN_SENTINEL_ROWS = 50
+
 # A forecast cannot reach further ahead than the history it was built from.
 MAX_FORECAST_PERIODS = 120
 

@@ -211,3 +211,41 @@ def test_a_half_built_table_is_not_left_queryable() -> None:
 def test_nothing_loading_is_still_an_error() -> None:
     with pytest.raises(ValueError, match="repeats column name"):
         Dataset.load([CsvSource.from_upload("dupes.csv", b"id,id\n1,2\n")])
+
+
+# --- hazards found by loading real published datasets ---------------------------
+# Each fixture below is the smallest reproduction of something that passed through
+# silently wrong on a real file. Sources are named so the shape can be checked.
+
+
+def test_a_headerless_file_of_words_is_caught_not_just_one_of_numbers() -> None:
+    """UCI Adult (archive.ics.uci.edu/dataset/2) ships with no header row, so its
+    first data row became the column names and 32,561 rows loaded as 32,560. Only
+    3 of 15 names were numeric, well under the old numeric-names rule, and nothing
+    was said. The tell is that a promoted data row repeats as data in its own
+    column, which a real header name almost never does.
+    """
+    rows = "".join(f"{30 + i % 9}, State-gov, Bachelors, Male\n" for i in range(40))
+    notes, _, _ = warnings_for("adult.data", ("39, State-gov, Bachelors, Male\n" + rows).encode())
+    assert any("looks like data rather than headers" in note for note in notes)
+
+
+def test_a_real_header_is_not_mistaken_for_data() -> None:
+    """The other half of the rule: a column named region holding North and South
+    must not be read as a promoted data row."""
+    rows = "".join(f"North,{i}\nSouth,{i}\n" for i in range(30))
+    notes, _, _ = warnings_for("s.csv", ("region,amount\n" + rows).encode())
+    assert not any("looks like data rather than headers" in note for note in notes)
+
+
+def test_a_bare_comma_decimal_is_flagged_even_beside_whole_numbers() -> None:
+    """UCI Air Quality (archive.ics.uci.edu/dataset/360) writes 2,6 rather than
+    1.234,56. The grouped-number pattern never matched it, and because 13% of the
+    column is bare integers like "2", neither the decoration share nor the numeric
+    share reached its own threshold — so five real measurement columns loaded as
+    text without a word.
+    """
+    values = ["2,6", "11,9", "13,6", "2"] * 20
+    body = "co\n" + "\n".join(values) + "\n"
+    notes, _, _ = warnings_for("air.csv", body.encode())
+    assert any("comma decimal" in note for note in notes), notes

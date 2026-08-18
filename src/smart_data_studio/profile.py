@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import pandas as pd
 
+from smart_data_studio.config import MIN_SENTINEL_ROWS, SENTINEL_SHARE
 from smart_data_studio.dataset import Dataset, quote_identifier
 
 
@@ -50,9 +51,14 @@ def profile_table(dataset: Dataset, table_name: str) -> TableProfile:
     row_count = dataset.row_count(table_name)
     exact_distinct = _exact_distinct(dataset, table_name, stats, row_count)
     findings = _findings(stats, row_count, exact_distinct)
+    # Ahead of the rest: a column whose average is meaningless is worth more than
+    # a note that another column is high-cardinality.
+    findings = list(_sentinels(dataset, table_name, stats).values()) + findings
     grain = _entity_grain(dataset, table_name, stats, row_count)
     if grain:
         findings.insert(0, grain)
+    if not findings:
+        findings.append("No obvious constant, empty, high-null, or key-like columns were found.")
     return TableProfile(
         table_name=table_name,
         row_count=row_count,
@@ -153,6 +159,83 @@ def _exact_distinct(
     return {name: int(count) for name, count in zip(candidates, row, strict=True)}
 
 
+def _sentinels(dataset: Dataset, table_name: str, stats: pd.DataFrame) -> dict[str, str]:
+    """Extreme values that repeat, which are codes rather than measurements.
+
+    Real datasets bury "missing" inside a numeric column as -200, -999 or 9999.
+    Nothing about the load is wrong — the value parses, the column is numeric, the
+    average is arithmetic — and the answer is silently, confidently wrong. The UCI
+    air quality file reports mean CO of -34.2 this way, against a true 2.15.
+
+    The test is that a value is both extreme and repeated: the gap between it and
+    the rest of the data is wider than the whole range of the rest, and it accounts
+    for a real share of the rows. A measurement is not shaped like that.
+
+    SUMMARIZE has already paid for min and max, so this costs one further scan.
+    """
+    candidates = []
+    for row in stats.to_dict(orient="records"):
+        kind = str(row["column_type"]).upper()
+        if not any(k in kind for k in ("INT", "DOUBLE", "DECIMAL", "FLOAT")):
+            continue
+        try:
+            low, high = float(row["min"]), float(row["max"])
+        except (TypeError, ValueError):
+            continue
+        if low < high:
+            candidates.append((str(row["column_name"]), low, high))
+    if not candidates:
+        return {}
+
+    table = quote_identifier(table_name)
+    projections = []
+    for index, (name, low, high) in enumerate(candidates):
+        column = quote_identifier(name)
+        projections += [
+            f"count({column}) AS present_{index}",
+            f"count_if({column} = {low!r}) AS lon_{index}",
+            f"count_if({column} = {high!r}) AS hin_{index}",
+            f"min({column}) FILTER (WHERE {column} > {low!r}) AS lo2_{index}",
+            f"max({column}) FILTER (WHERE {column} < {high!r}) AS hi2_{index}",
+        ]
+    values = (
+        dataset.connection.execute(f"SELECT {', '.join(projections)} FROM {table}")
+        .fetchdf()
+        .iloc[0]
+        .to_dict()
+    )
+
+    found: dict[str, str] = {}
+    for index, (name, low, high) in enumerate(candidates):
+        present = _number(values.get(f"present_{index}"))
+        if present < MIN_SENTINEL_ROWS:
+            continue
+        inner_low, inner_high = values.get(f"lo2_{index}"), values.get(f"hi2_{index}")
+        if inner_low is None or inner_high is None or pd.isna(inner_low) or pd.isna(inner_high):
+            continue
+        inner_low, inner_high = float(inner_low), float(inner_high)
+        spread = inner_high - inner_low
+        if spread <= 0:
+            continue
+        for edge, inner, count in (
+            (low, inner_low, _number(values.get(f"lon_{index}"))),
+            (high, inner_high, _number(values.get(f"hin_{index}"))),
+        ):
+            if count / present >= SENTINEL_SHARE and abs(inner - edge) > spread:
+                found[name] = (
+                    f"{name} holds {_trim(edge)} in {count / present:.0%} of rows, further from "
+                    f"the rest of the data than the rest of the data spans. That is the shape of "
+                    f"a missing-value code, not a measurement — exclude it before averaging, or "
+                    f"the answer will be confidently wrong."
+                )
+                break
+    return found
+
+
+def _trim(value: float) -> str:
+    return str(int(value)) if value == int(value) else f"{value:g}"
+
+
 def _findings(stats: pd.DataFrame, row_count: int, exact_distinct: dict[str, int]) -> list[str]:
     findings: list[str] = []
     for row in stats.to_dict(orient="records"):
@@ -181,8 +264,6 @@ def _findings(stats: pd.DataFrame, row_count: int, exact_distinct: dict[str, int
                 f"{name} is high-cardinality text with {qualifier}{int(unique):,} distinct values."
             )
 
-    if not findings:
-        findings.append("No obvious constant, empty, high-null, or key-like columns were found.")
     return findings
 
 

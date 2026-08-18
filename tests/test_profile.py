@@ -17,6 +17,11 @@ def build_dataset() -> Dataset:
     return Dataset.load([CsvSource.from_upload("wide.csv", ("\n".join(rows) + "\n").encode())])
 
 
+def load_column(name: str, values: list[float]) -> Dataset:
+    body = f"{name}\n" + "\n".join(str(value) for value in values) + "\n"
+    return Dataset.load([CsvSource.from_upload("t.csv", body.encode())])
+
+
 def test_key_detection_uses_exact_counts_not_the_sketch() -> None:
     dataset = build_dataset()
     try:
@@ -99,5 +104,32 @@ def test_a_column_merely_ending_in_id_gets_no_grain_finding() -> None:
     dataset = Dataset.load([CsvSource.from_upload("payments.csv", rows)])
     try:
         assert "paid repeats" not in " ".join(profile_table(dataset, "payments").findings)
+    finally:
+        dataset.close()
+
+
+def test_a_repeated_extreme_is_reported_as_a_missing_value_code() -> None:
+    """UCI Air Quality stores "missing" as -200 inside its numeric columns. The
+    value parses, the column is numeric, the average is arithmetic — and mean CO
+    comes out at -34.2 against a true 2.15. Nothing about the load is wrong, which
+    is exactly why it has to be said out loud.
+    """
+    real = [1.2, 2.6, 3.1, 2.2, 4.0, 1.6, 11.9, 0.6] * 25
+    dataset = load_column("co", real + [-200.0] * 40)
+    try:
+        findings = " ".join(profile_table(dataset, dataset.tables[0]).findings)
+        assert "-200" in findings and "missing-value code" in findings
+    finally:
+        dataset.close()
+
+
+def test_a_genuine_spread_is_not_called_a_sentinel() -> None:
+    """A low value that repeats is only suspicious when it sits further out than
+    the whole rest of the data. An ordinary distribution with a common minimum
+    must pass silently, or the warning is noise on every table."""
+    dataset = load_column("amount", [0.0] * 40 + [float(n % 50) for n in range(200)])
+    try:
+        findings = " ".join(profile_table(dataset, dataset.tables[0]).findings)
+        assert "missing-value code" not in findings
     finally:
         dataset.close()

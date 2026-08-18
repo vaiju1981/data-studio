@@ -330,10 +330,15 @@ class Dataset:
                     f"count({column}) AS present_{index}",
                     f"count(TRY_CAST({column} AS DOUBLE)) AS numeric_{index}",
                     # Decoration only: a bare digit string must not match, or a zip
-                    # code gets advised into losing its leading zero.
+                    # code gets advised into losing its leading zero. Three shapes
+                    # count — a currency or percent sign, a grouped number like
+                    # 1.234,56, and a bare comma decimal like 2,6, which real
+                    # European exports use constantly and the grouped pattern alone
+                    # never matched.
                     f"count_if(regexp_matches({column}, '[$€£¥%]') OR "
                     f"regexp_matches({column}, "
-                    f"'^[-+]?[0-9]{{1,3}}([.,][0-9]{{3}})+([.,][0-9]+)?$')"
+                    f"'^[-+]?[0-9]{{1,3}}([.,][0-9]{{3}})+([.,][0-9]+)?$') OR "
+                    f"regexp_matches({column}, '^[-+]?[0-9]+,[0-9]+$')"
                     f") AS decorated_{index}",
                     f"count_if(lower(trim({column})) IN "
                     f"('na','n/a','nan','null','none','-','--','?','.','#n/a')) AS missing_{index}",
@@ -348,6 +353,19 @@ class Dataset:
                 ]
         blank = " AND ".join(f"{quote_identifier(name)} IS NULL" for name, _ in described)
         projections.append(f"count_if({blank}) AS blank_rows")
+        # Does each column's own name occur among its values? A real header almost
+        # never repeats as data in its own column, while a data row promoted to a
+        # header repeats constantly — which is what catches a headerless file whose
+        # first row is mostly words, where counting numeric names does not.
+        for index, (name, _) in enumerate(described):
+            literal = name.replace("'", "''")
+            # Trimmed on both sides: a file separated by ", " leaves a leading
+            # space on every value while DuckDB strips it from the header, so an
+            # exact comparison matched nothing on the real file this was built for.
+            projections.append(
+                f"count_if(trim(CAST({quote_identifier(name)} AS VARCHAR)) = trim('{literal}')) "
+                f"AS selfnamed_{index}"
+            )
 
         # LIMIT, not a random sample: reservoir sampling still reads every row, and
         # what is being detected is a *format* — whether values carry currency signs
@@ -362,11 +380,25 @@ class Dataset:
 
         warnings: list[str] = []
         numeric_names = sum(1 for name, _ in described if re.fullmatch(r"[-+]?[0-9.,]+", name))
+        # Compared rather than cast: these counts arrive as floats, and an empty
+        # table makes them NaN, which int() refuses. This runs before the no-rows
+        # guard below, so it has to tolerate that.
+        self_named = sum(
+            1 for index in range(len(described)) if (values.get(f"selfnamed_{index}") or 0) > 0
+        )
         if numeric_names / len(described) > 0.5:
+            evidence = f"{numeric_names} of {len(described)} column names are numbers"
+        elif self_named / len(described) > 0.5:
+            evidence = (
+                f"{self_named} of {len(described)} column names also appear as values in "
+                "their own column"
+            )
+        else:
+            evidence = ""
+        if evidence:
             warnings.append(
-                f"The first row looks like data rather than headers ({numeric_names} of "
-                f"{len(described)} column names are numbers). It has been used as the header, "
-                "so that row is missing from the table."
+                f"The first row looks like data rather than headers ({evidence}). It has been "
+                "used as the header, so that row is missing from the table."
             )
         if not total:
             warnings.append(
@@ -393,7 +425,12 @@ class Dataset:
                     # An identifier, not a quantity. Text is the right type here, and
                     # advising a cast would strip the leading zero off a zip code.
                     continue
-                if decorated / present >= 0.9:
+                # Decorated and plainly-numeric values together: a real column of
+                # comma decimals still holds bare integers like "2", which left the
+                # decorated share under its threshold and the numeric share under
+                # its own, so neither branch fired and the column passed silently.
+                convertible = (decorated + numeric) / present
+                if decorated / present >= 0.2 and convertible >= 0.9:
                     warnings.append(
                         f"{name} was read as text because its values carry a currency symbol, "
                         f"thousands separator, percent sign or comma decimal "
