@@ -560,3 +560,24 @@ def test_a_failed_investigation_falls_back_to_a_single_pass() -> None:
 )
 def test_an_unrecoverable_failure_says_what_to_do_about_it(error, expected) -> None:
     assert expected in agent_module.explain_failure(error)
+
+
+def test_an_assumption_is_reported_with_the_answer_that_relied_on_it() -> None:
+    """Shown for the same reason the SQL is: an answer nobody can check is not
+    finished. It must also belong to its own turn, or every later answer inherits
+    a caveat that had nothing to do with it."""
+    client = FakeClient(
+        [
+            tool_call("find_values", table="sales", column="region", contains="Summerlin"),
+            Message(role="assistant", content="Bridged via postcodes."),
+            Message(role="assistant", content="Plain answer."),
+        ]
+    )
+    agent, dataset = make_agent(client)
+    try:
+        first = agent.ask("how many from Summerlin?", depth="never")
+        assert first.assumptions == ["Summerlin (looked for in region)"]
+        second = agent.ask("and overall?", depth="never")
+        assert second.assumptions == [], "a later answer inherited an earlier caveat"
+    finally:
+        dataset.close()

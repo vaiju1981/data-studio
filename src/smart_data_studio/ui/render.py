@@ -19,6 +19,15 @@ def answer(item: Answer, key: str, dataset: Dataset) -> None:
             for index, step in enumerate(item.plan, start=1):
                 st.markdown(f"{index}. {step}")
     st.markdown(item.text)
+    for assumption in item.assumptions:
+        # Shown for the same reason the SQL is: an answer nobody can check is not
+        # finished. The data held no value for this, so whatever was said about it
+        # came from the model rather than the file.
+        st.warning(
+            f"**{assumption}** — this data holds no such value, so anything the answer says "
+            "about it comes from the model's own knowledge, not from your file. Worth "
+            "confirming before relying on it."
+        )
     if item.chart is not None:
         st.plotly_chart(item.chart, use_container_width=True, key=f"chart-{key}")
     for index, analysis in enumerate(item.analyses, start=1):

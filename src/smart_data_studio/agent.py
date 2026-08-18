@@ -126,6 +126,11 @@ Do not guess at causes, trends, or business meaning the data does not establish.
 ANALYST_PROMPT = """You are the analysis engine inside Smart Data Studio.
 Answer questions only from the loaded data. For every data question, call run_sql before answering.
 Use DuckDB SQL and only the tables in the schema. Never guess a number.
+Where the data has no value for something asked about, still answer if your own knowledge
+bridges it — a neighbourhood mapped to its postcodes, a label mapped to a category — and give
+the figure from SQL as usual. Do not refuse, and do not invent the number: name the bridge
+you used, in the answer, so it can be checked. Every number still comes from a query; it is
+the mapping that came from you, and only saying so makes it correctable.
 Before filtering a text column on a name, call find_values to see every spelling that name
 has. Seeing one spelling in the profile is not evidence it is the only one: NORTH LAS VEGAS
 and N LAS VEGAS are the same city, and matching just the first misses a fifth of the visits
@@ -205,6 +210,9 @@ class Answer:
     chart: Figure | None = None
     analyses: list[AnalysisRecord] = field(default_factory=list)
     plan: list[str] = field(default_factory=list)
+    # Names this data had no value for, so a figure given for one came from the
+    # model's own knowledge rather than the file. Recorded to be checked later.
+    assumptions: list[str] = field(default_factory=list)
 
 
 class DataAgent:
@@ -274,6 +282,7 @@ class DataAgent:
             self.messages = [{"role": "system", "content": self._system_prompt()}]
         first_new_result = len(self.tools.results)
         first_new_analysis = len(self.tools.analyses)
+        first_new_assumption = len(self.tools.unresolved)
         self.tools.reset_chart(keep_history=multi_turn)
         self.messages.append({"role": "user", "content": question})
         text = self._run_loop(
@@ -295,6 +304,7 @@ class DataAgent:
             results=self._turn_results(first_new_result),
             chart=self.tools.chart,
             analyses=self.tools.analyses[first_new_analysis:],
+            assumptions=self.tools.unresolved[first_new_assumption:],
         )
 
     def _demand_evidence(self, text: str) -> str:
@@ -360,6 +370,7 @@ class DataAgent:
         still collected as evidence.
         """
         first_result, first_analysis = len(self.tools.results), len(self.tools.analyses)
+        first_assumption = len(self.tools.unresolved)
         self.tools.reset_chart(keep_history=multi_turn)
 
         findings = []
@@ -402,6 +413,7 @@ class DataAgent:
             chart=self.tools.chart,
             analyses=self.tools.analyses[first_analysis:],
             plan=plan,
+            assumptions=self.tools.unresolved[first_assumption:],
         )
 
     def _chat_tools(self) -> list[Callable[..., str]]:

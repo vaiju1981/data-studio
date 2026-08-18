@@ -57,6 +57,10 @@ class AnalysisTools:
         self.dataset = dataset
         self.results: list[QueryResult] = []
         self.analyses: list[AnalysisRecord] = []
+        # Names the data had no value for. Anything the answer then says about one
+        # rests on a mapping the model brought with it, which is worth recording
+        # whether or not the mapping is right.
+        self.unresolved: list[str] = []
         self.chart: Figure | None = None
         self.chart_spec: ChartSpec | None = None
         self.chart_source: QueryResult | None = None
@@ -157,7 +161,12 @@ class AnalysisTools:
         ]
         payload: dict[str, object] = {"column": column, "matches": found}
         if not found:
-            payload["note"] = f"No value in {column} contains {contains!r}."
+            payload["note"] = (
+                f"No value in {column} matches {contains!r}. Answering about it anyway means "
+                "using a mapping from outside this data — say so plainly in the answer."
+            )
+            if contains.strip():
+                self.unresolved.append(f"{contains.strip()} (looked for in {column})")
         elif more:
             payload["note"] = (
                 f"More than {MAX_VALUE_MATCHES} values match; only the commonest are shown."

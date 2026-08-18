@@ -209,3 +209,27 @@ def test_find_values_will_not_expose_a_sensitive_column() -> None:
     finally:
         dataset_module.SENSITIVE_COLUMNS = original
         dataset.close()
+
+
+def test_a_name_the_data_has_no_value_for_is_recorded_as_an_assumption() -> None:
+    """Answering "how many visits from Summerlin" is useful even though no city is
+    called that — the model bridges it to postcodes. The number still comes from
+    SQL; the mapping came from the model, and only recording that makes it
+    correctable if it is ever wrong.
+    """
+    tools, dataset = city_tools()
+    try:
+        tools.find_values("visits", "city", "Summerlin")
+        assert tools.unresolved == ["Summerlin (looked for in city)"]
+    finally:
+        dataset.close()
+
+
+def test_a_name_the_data_does_hold_records_nothing() -> None:
+    tools, dataset = city_tools()
+    try:
+        tools.find_values("visits", "city", "Henderson")
+        tools.find_values("visits", "city", "")
+        assert tools.unresolved == []
+    finally:
+        dataset.close()
