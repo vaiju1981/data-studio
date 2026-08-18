@@ -123,6 +123,9 @@ MIN_ASSOCIATION_ROWS = 10
 # the consequence — an average computed over -200s — is silent and severe.
 SENTINEL_SHARE = 0.02
 MIN_SENTINEL_ROWS = 50
+# How many typical steps the value must stand away from the rest before it is a
+# code rather than a reading. Twenty leaves a binned column alone.
+SENTINEL_GAP_RATIO = 20
 
 # A forecast cannot reach further ahead than the history it was built from.
 MAX_FORECAST_PERIODS = 120

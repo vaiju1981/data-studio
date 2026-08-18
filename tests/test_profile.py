@@ -123,6 +123,33 @@ def test_a_repeated_extreme_is_reported_as_a_missing_value_code() -> None:
         dataset.close()
 
 
+def test_a_sentinel_is_caught_in_a_wide_column_too() -> None:
+    """The first version of this rule compared the gap to the column's own range,
+    which works only when the range is narrow. Air Quality's NOx spans 2 to 1,479,
+    so -200 sat well inside a range that wide and went unflagged — while its mean
+    read 168.6 against a true 246.9. What marks the value is that it stands far
+    from the *next* value, not from the far end of the data.
+    """
+    real = [float(2 + (n * 7) % 1477) for n in range(400)]
+    dataset = load_column("nox", real + [-200.0] * 80)
+    try:
+        findings = " ".join(profile_table(dataset, dataset.tables[0]).findings)
+        assert "-200" in findings and "missing-value code" in findings
+    finally:
+        dataset.close()
+
+
+def test_a_binned_column_is_not_called_a_sentinel() -> None:
+    """Values that all sit 100 apart make the lowest bin look isolated by any
+    measure that ignores how far apart the others are."""
+    dataset = load_column("bucket", [0.0] * 60 + [float((n % 9 + 1) * 100) for n in range(300)])
+    try:
+        findings = " ".join(profile_table(dataset, dataset.tables[0]).findings)
+        assert "missing-value code" not in findings
+    finally:
+        dataset.close()
+
+
 def test_a_genuine_spread_is_not_called_a_sentinel() -> None:
     """A low value that repeats is only suspicious when it sits further out than
     the whole rest of the data. An ordinary distribution with a common minimum

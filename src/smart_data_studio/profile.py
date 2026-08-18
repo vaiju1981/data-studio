@@ -6,7 +6,11 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from smart_data_studio.config import MIN_SENTINEL_ROWS, SENTINEL_SHARE
+from smart_data_studio.config import (
+    MIN_SENTINEL_ROWS,
+    SENTINEL_GAP_RATIO,
+    SENTINEL_SHARE,
+)
 from smart_data_studio.dataset import Dataset, quote_identifier
 
 
@@ -167,9 +171,16 @@ def _sentinels(dataset: Dataset, table_name: str, stats: pd.DataFrame) -> dict[s
     average is arithmetic — and the answer is silently, confidently wrong. The UCI
     air quality file reports mean CO of -34.2 this way, against a true 2.15.
 
-    The test is that a value is both extreme and repeated: the gap between it and
-    the rest of the data is wider than the whole range of the rest, and it accounts
-    for a real share of the rows. A measurement is not shaped like that.
+    The test is that a value is both repeated and *isolated*: the step from it to
+    the next value is far wider than the typical step between values, and it
+    accounts for a real share of the rows. Comparing the step to the column's whole
+    range instead looks right and is not — it catches -200 in a column spanning 12,
+    and misses the same -200 in a column spanning 1,476, which is the case that
+    turned a true mean of 246.9 into 168.6.
+
+    Typical step is the inner range over the distinct values in it, so a binned
+    column whose values all sit 100 apart is not accused of hiding a code in its
+    lowest bin.
 
     SUMMARIZE has already paid for min and max, so this costs one further scan.
     """
@@ -180,16 +191,17 @@ def _sentinels(dataset: Dataset, table_name: str, stats: pd.DataFrame) -> dict[s
             continue
         try:
             low, high = float(row["min"]), float(row["max"])
+            distinct = float(row["approx_unique"])
         except (TypeError, ValueError):
             continue
-        if low < high:
-            candidates.append((str(row["column_name"]), low, high))
+        if low < high and distinct > 2:
+            candidates.append((str(row["column_name"]), low, high, distinct))
     if not candidates:
         return {}
 
     table = quote_identifier(table_name)
     projections = []
-    for index, (name, low, high) in enumerate(candidates):
+    for index, (name, low, high, _) in enumerate(candidates):
         column = quote_identifier(name)
         projections += [
             f"count({column}) AS present_{index}",
@@ -206,7 +218,7 @@ def _sentinels(dataset: Dataset, table_name: str, stats: pd.DataFrame) -> dict[s
     )
 
     found: dict[str, str] = {}
-    for index, (name, low, high) in enumerate(candidates):
+    for index, (name, low, high, distinct) in enumerate(candidates):
         present = _number(values.get(f"present_{index}"))
         if present < MIN_SENTINEL_ROWS:
             continue
@@ -217,16 +229,19 @@ def _sentinels(dataset: Dataset, table_name: str, stats: pd.DataFrame) -> dict[s
         spread = inner_high - inner_low
         if spread <= 0:
             continue
+        typical = spread / max(distinct - 1, 1)
         for edge, inner, count in (
             (low, inner_low, _number(values.get(f"lon_{index}"))),
             (high, inner_high, _number(values.get(f"hin_{index}"))),
         ):
-            if count / present >= SENTINEL_SHARE and abs(inner - edge) > spread:
+            gap = abs(inner - edge)
+            if count / present >= SENTINEL_SHARE and gap > typical * SENTINEL_GAP_RATIO:
                 found[name] = (
-                    f"{name} holds {_trim(edge)} in {count / present:.0%} of rows, further from "
-                    f"the rest of the data than the rest of the data spans. That is the shape of "
-                    f"a missing-value code, not a measurement — exclude it before averaging, or "
-                    f"the answer will be confidently wrong."
+                    f"{name} holds {_trim(edge)} in {count / present:.0%} of rows, standing "
+                    f"{gap / typical:.0f} times further from the next value than values in this "
+                    f"column normally sit apart. That is the shape of a missing-value code, not "
+                    f"a measurement — exclude it before averaging, or the answer will be "
+                    f"confidently wrong."
                 )
                 break
     return found
