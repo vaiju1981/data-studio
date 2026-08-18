@@ -10,7 +10,7 @@ from pathlib import Path
 VERSION = "0.1.0"
 # Bumped whenever the analyst prompt changes, so a logged answer can be traced to
 # the instructions that produced it.
-PROMPT_VERSION = "2026-08-18.1"
+PROMPT_VERSION = "2026-08-18.2"
 
 
 def _flag(name: str, default: bool) -> bool:
@@ -117,6 +117,10 @@ MAX_RELATE_SAMPLE = 100_000
 # listed in full; a wider one shows its commonest, which is what makes a column
 # the model never queried still visible to it.
 DICTIONARY_VALUES = 12
+
+# Values returned when looking up what a column really holds. Enough to show every
+# spelling of a city; short enough not to dump a column into the prompt.
+MAX_VALUE_MATCHES = 25
 
 # A column with more levels than this is an identifier, not a dimension to sweep.
 MAX_DRIVER_LEVELS = 50

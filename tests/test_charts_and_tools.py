@@ -101,3 +101,111 @@ def test_single_series_charts_use_the_brand_accent_not_plotly_default() -> None:
     frame = pd.DataFrame({"region": ["A", "B"], "revenue": [10, 20]})
     figure = make_figure(frame, ChartSpec(kind="bar", x="region", y="revenue"))
     assert figure.data[0].marker.color == PALETTE[0]
+
+
+# --- resolving a name to the values a column actually holds ---------------------
+
+CITIES = b"city,amount\n" + b"".join(
+    [b"NORTH LAS VEGAS,1\n"] * 40
+    + [b"N LAS VEGAS,1\n"] * 12
+    + [b"N. LAS VEGAS,1\n"] * 2
+    + [b"LAS VEGAS,1\n"] * 60
+    + [b"DALLAS,1\n"] * 8
+    + [b"HENDERSON,1\n"] * 5
+)
+
+
+def city_tools() -> tuple[AnalysisTools, Dataset]:
+    dataset = Dataset.load([CsvSource.from_upload("visits.csv", CITIES)])
+    return AnalysisTools(dataset), dataset
+
+
+def test_find_values_finds_the_abbreviated_spellings_of_a_name() -> None:
+    """The failure this exists for: filtering city = 'NORTH LAS VEGAS' on the real
+    file returned 293,836 visits and silently missed 69,910 more written another
+    way — a 19% undercount that looks entirely correct.
+
+    Matching the whole phrase cannot find them, because "N LAS VEGAS" does not
+    contain "north las vegas". Each word is scored separately for that reason.
+    """
+    tools, dataset = city_tools()
+    try:
+        found = json.loads(tools.find_values("visits", "city", "North Las Vegas"))
+        values = [item["value"] for item in found["matches"]]
+        assert "NORTH LAS VEGAS" in values
+        assert "N LAS VEGAS" in values, "the abbreviated spelling was missed"
+        assert "N. LAS VEGAS" in values
+        assert found["matches"][0]["rows"] == 40  # commonest first
+    finally:
+        dataset.close()
+
+
+def test_find_values_does_not_return_a_word_it_merely_shares_a_fragment_with() -> None:
+    """DALLAS contains "las". Burying the real spellings under matches like that
+    defeats the purpose, so only values scoring near the best are kept."""
+    tools, dataset = city_tools()
+    try:
+        found = json.loads(tools.find_values("visits", "city", "Las Vegas"))
+        assert "DALLAS" not in [item["value"] for item in found["matches"]]
+    finally:
+        dataset.close()
+
+
+def test_find_values_says_so_when_nothing_matches() -> None:
+    """A state column of two-letter codes holds no value containing "Nevada". Being
+    told that is what sends the model to the code instead of filtering on nothing."""
+    tools, dataset = city_tools()
+    try:
+        found = json.loads(tools.find_values("visits", "city", "Nevada"))
+        assert found["matches"] == []
+        assert "No value" in found["note"]
+    finally:
+        dataset.close()
+
+
+def test_find_values_lists_the_commonest_when_given_nothing_to_match() -> None:
+    tools, dataset = city_tools()
+    try:
+        found = json.loads(tools.find_values("visits", "city", ""))
+        assert found["matches"][0] == {"value": "LAS VEGAS", "rows": 60}
+    finally:
+        dataset.close()
+
+
+@pytest.mark.parametrize(
+    ("table", "column"), [("visits", "nope"), ("nope", "city"), ("visits", "amount ; DROP")]
+)
+def test_find_values_refuses_what_is_not_in_the_schema(table: str, column: str) -> None:
+    tools, dataset = city_tools()
+    try:
+        assert "error" in json.loads(tools.find_values(table, column, "x"))
+    finally:
+        dataset.close()
+
+
+def test_find_values_treats_the_search_text_as_data_not_sql() -> None:
+    """The words are bound parameters, never concatenated into the statement."""
+    tools, dataset = city_tools()
+    try:
+        found = json.loads(tools.find_values("visits", "city", "'; DROP TABLE visits; --"))
+        assert "error" not in found
+        # The table is still there, which is the only thing this is really asking.
+        assert json.loads(tools.run_sql("SELECT count(*) AS n FROM visits"))["rows"][0]["n"] == 127
+    finally:
+        dataset.close()
+
+
+def test_find_values_will_not_expose_a_sensitive_column() -> None:
+    """Sensitive columns are withheld from everything the model sees, and listing
+    their values on request would be the most direct way around that."""
+    import smart_data_studio.dataset as dataset_module
+
+    original = dataset_module.SENSITIVE_COLUMNS
+    dataset_module.SENSITIVE_COLUMNS = ("city",)
+    tools, dataset = city_tools()
+    try:
+        found = json.loads(tools.find_values("visits", "city", "Las Vegas"))
+        assert "error" in found and "LAS VEGAS" not in json.dumps(found)
+    finally:
+        dataset_module.SENSITIVE_COLUMNS = original
+        dataset.close()

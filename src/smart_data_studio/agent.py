@@ -126,6 +126,10 @@ Do not guess at causes, trends, or business meaning the data does not establish.
 ANALYST_PROMPT = """You are the analysis engine inside Smart Data Studio.
 Answer questions only from the loaded data. For every data question, call run_sql before answering.
 Use DuckDB SQL and only the tables in the schema. Never guess a number.
+Before filtering a text column on a name, call find_values to see every spelling that name
+has. Seeing one spelling in the profile is not evidence it is the only one: NORTH LAS VEGAS
+and N LAS VEGAS are the same city, and matching just the first misses a fifth of the visits
+while returning a number that looks entirely right. Filter on all of them with IN or ILIKE.
 Use make_chart after run_sql when a visualization materially helps. The chart must use exact column
 names from the latest result. Mention truncation whenever the tool says truncated is true.
 Keep the final answer concise, explain the important result, and never hide limitations.
@@ -403,6 +407,7 @@ class DataAgent:
     def _chat_tools(self) -> list[Callable[..., str]]:
         return [
             self.tools.run_sql,
+            self.tools.find_values,
             self.tools.make_chart,
             self.tools.forecast,
             self.tools.analyze_trend,

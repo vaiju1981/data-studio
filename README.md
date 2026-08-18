@@ -31,11 +31,14 @@ several related files and the model can join across them.
 - **Understand** — before the first question the model explores the data with real
   queries and folds what it learns into the chat context, alongside the column
   profile and sample rows.
-- **Ask** — a tool loop over eight tools: `run_sql` and `make_chart`, plus
+- **Ask** — a tool loop over nine tools: `run_sql` and `make_chart`, plus
   `forecast`, `analyze_trend`, `detect_anomalies`, `compare_groups`,
   `rank_drivers` and `relate`, which run real statistics rather than asking the
   model to estimate them. Charts are built from a validated spec, never from
-  model-written plotting code.
+  model-written plotting code. `find_values` resolves a name to the values a
+  column actually holds before anything filters on it — `NORTH LAS VEGAS` and
+  `N LAS VEGAS` are one city, and matching only the first undercounts by a fifth
+  while returning a number that looks right.
 - **Investigate** — a question of judgement is planned into sub-questions first,
   each worked separately before a final pass answers from all of them. Two rules
   do the work: ask the question at the grain the decision is made at, and include

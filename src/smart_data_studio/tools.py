@@ -15,8 +15,9 @@ from smart_data_studio.config import (
     MAX_ANALYSIS_CELLS,
     MAX_ANALYSIS_ROWS,
     MAX_CHART_ROWS,
+    MAX_VALUE_MATCHES,
 )
-from smart_data_studio.dataset import Dataset, QueryResult
+from smart_data_studio.dataset import Dataset, QueryResult, is_sensitive, quote_identifier
 
 
 @dataclass
@@ -88,6 +89,80 @@ class AnalysisTools:
             return _dump({"error": str(error)})
         self.results.append(result)
         return _dump(self.dataset.tool_payload(result))
+
+    def find_values(self, table: str, column: str, contains: str = "") -> str:
+        """List every spelling a text column holds for a name, before filtering on it.
+
+        Call this whenever a question names a place, segment or category and the
+        answer needs a filter on it. Seeing one spelling in the profile is not
+        evidence it is the only one: "NORTH LAS VEGAS" and "N LAS VEGAS" are the
+        same city, and matching only the first misses a fifth of the visits while
+        returning a number that looks entirely right.
+
+        Args:
+          table: The table to look in, exactly as it appears in the schema.
+          column: The text column to search, exactly as it appears in the schema.
+          contains: The name to look for. Each word is matched separately and
+            without regard to case, so values sharing only some words are still
+            returned — which is how an abbreviated spelling is found. Leave empty
+            to list the column's most common values.
+
+        Returns:
+          A JSON object of matching values with their row counts, most common first.
+        """
+        if table not in self.dataset.tables:
+            return _dump({"error": f"Unknown table: {table}"})
+        columns = {name for name, _ in self.dataset.schema(table) if not is_sensitive(name)}
+        if column not in columns:
+            return _dump({"error": f"Unknown column: {column}"})
+        quoted_table, quoted_column = quote_identifier(table), quote_identifier(column)
+        value = f"CAST({quoted_column} AS VARCHAR)"
+        # Scored word by word, not matched as one phrase. A phrase match cannot find
+        # an abbreviation — "N LAS VEGAS" does not contain "north las vegas" — so
+        # searching the whole phrase returns the one spelling already known and
+        # hides the others, which is the entire failure this tool exists to catch.
+        # Single characters are kept: dropping them turned "Gen X" into a search for
+        # "Gen", which scores every Gen Z bucket as highly as the Gen X ones.
+        words = contains.split()
+        score = (
+            " + ".join(f"CASE WHEN {value} ILIKE ? THEN 1 ELSE 0 END" for _ in words)
+            if words
+            else "0"
+        )
+        # Bound parameters throughout, so a value never becomes SQL.
+        parameters = [f"%{word}%" for word in words]
+        having = "HAVING score > 0" if words else ""
+        try:
+            rows = self.dataset.connection.execute(
+                f"SELECT {value} AS value, count(*) AS rows, {score} AS score "
+                f"FROM {quoted_table} WHERE {quoted_column} IS NOT NULL "
+                f"GROUP BY 1, 3 {having} "
+                f"ORDER BY score DESC, rows DESC LIMIT {MAX_VALUE_MATCHES * 4}",
+                parameters,
+            ).fetchall()
+        except Exception as error:
+            return _dump({"error": str(error)})
+
+        # Keep only what scores near the best. Matching any single word drags in
+        # values that merely share a fragment — DALLAS contains "las" — and burying
+        # the real spellings under those defeats the point.
+        if rows and words:
+            # Rounded up, not to nearest: for a two-word name the nearest gives a
+            # floor of 1, which is no filter at all and lets DALLAS back in.
+            floor = max(1, math.ceil(max(row[2] for row in rows) * 0.6))
+            rows = [row for row in rows if row[2] >= floor]
+        more = len(rows) > MAX_VALUE_MATCHES
+        found = [
+            {"value": value, "rows": int(count)} for value, count, _ in rows[:MAX_VALUE_MATCHES]
+        ]
+        payload: dict[str, object] = {"column": column, "matches": found}
+        if not found:
+            payload["note"] = f"No value in {column} contains {contains!r}."
+        elif more:
+            payload["note"] = (
+                f"More than {MAX_VALUE_MATCHES} values match; only the commonest are shown."
+            )
+        return _dump(payload)
 
     def make_chart(
         self,
