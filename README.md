@@ -44,6 +44,11 @@ several related files and the model can join across them.
   segment weak; per player it is worth three times either alternative. A lookup
   is answered in one pass either way.
 
+Local paths you have loaded before are offered as a list, so a file is picked
+rather than retyped, and a remembered file and a newly typed one load together.
+This is the only thing written to disk — paths, never data, in
+`~/.smart-data-studio/recent.json`, cleared by **Delete my data**.
+
 Two conversation modes: **multi-turn** lets the model see earlier questions and
 results, so follow-ups like "now chart that" work; **single turn** answers each
 question from the data alone. The full history stays on screen either way, and

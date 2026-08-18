@@ -6,7 +6,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from smart_data_studio import logs, sessions
+from smart_data_studio import logs, recent, sessions
 from smart_data_studio.agent import Answer, DataAgent, explain_failure
 from smart_data_studio.config import ALLOW_LOCAL_PATHS, MODEL_ID, OLLAMA_HOST
 from smart_data_studio.dataset import CsvSource, Dataset
@@ -79,9 +79,26 @@ def _sidebar() -> None:
         accept_multiple_files=True,
         help="Select one or more related CSV files.",
     )
+    chosen: list[str] = []
     if ALLOW_LOCAL_PATHS:
+        known = recent.recall()
+        # A selection is kept across reruns so the sidebar always shows what the
+        # button will load — the box below keeps its text, and the two disagreeing
+        # meant a second click quietly loaded only what was typed. Pruned to what
+        # still exists, since Streamlit refuses a selection outside its options.
+        st.session_state.chosen_paths = [
+            path for path in st.session_state.get("chosen_paths", []) if path in known
+        ]
+        if known:
+            chosen = st.multiselect(
+                "Files you have loaded before",
+                known,
+                key="chosen_paths",
+                format_func=lambda path: f"{Path(path).parent.name}/{Path(path).name}",
+                help="Pick any number. Anything typed below is loaded along with them.",
+            )
         paths = st.text_area(
-            "Or local CSV paths",
+            "Add a local CSV path" if known else "Or local CSV paths",
             placeholder="/Users/me/data/sales.csv\n/Users/me/data/regions.csv",
             help="One path per line. Paths are read by the machine running this app.",
         )
@@ -89,7 +106,7 @@ def _sidebar() -> None:
         paths = ""
         st.caption("Server paths are disabled on this deployment. Upload the file instead.")
     if st.button("Load and analyze", type="primary", use_container_width=True):
-        _load(uploads, paths)
+        _load(uploads, paths, chosen)
 
     if st.session_state.agent is not None:
         st.divider()
@@ -122,8 +139,9 @@ def _sidebar() -> None:
     if st.session_state.dataset is not None:
         st.divider()
         st.caption(
-            "Nothing is stored. The workspace lives in memory and is discarded when the "
-            "session ends, is replaced, or is deleted here."
+            "Your data lives in memory and is discarded when the session ends, is replaced, "
+            "or is deleted here. Only the list of file paths is kept, on this machine, so "
+            "you need not retype them; deleting clears that too."
         )
         if st.button("Delete my data", use_container_width=True):
             _forget()
@@ -174,6 +192,8 @@ def _forget() -> None:
     rather than a property of the implementation.
     """
     sessions.release(st.session_state.session_id)
+    recent.forget()
+    st.session_state.chosen_paths = []
     for key in ("dataset", "agent"):
         st.session_state[key] = None
     st.session_state.profiles = []
@@ -186,12 +206,14 @@ def _forget() -> None:
     st.rerun()
 
 
-def _load(uploads: list[object], paths: str) -> None:
+def _load(uploads: list[object], paths: str, chosen: list[str] | None = None) -> None:
     try:
+        local = [Path(line.strip()) for line in paths.splitlines() if line.strip()]
+        # Remembered files and a newly typed one load together, so adding a second
+        # table to a set you already use does not mean retyping the first.
+        local = [Path(item) for item in chosen or []] + local
         sources = [CsvSource.from_upload(upload.name, upload.getvalue()) for upload in uploads]
-        sources.extend(
-            CsvSource.from_path(Path(line.strip())) for line in paths.splitlines() if line.strip()
-        )
+        sources.extend(CsvSource.from_path(path) for path in local)
         with st.spinner("Loading and profiling your data…"):
             dataset = Dataset.load(sources)
             try:
@@ -203,6 +225,8 @@ def _load(uploads: list[object], paths: str) -> None:
             except Exception:
                 dataset.close()
                 raise
+
+        recent.remember(local)
 
         # Registering before adopting means a host that is already full refuses
         # here, with the previous workspace still intact.

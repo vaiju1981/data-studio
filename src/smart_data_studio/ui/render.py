@@ -259,10 +259,18 @@ def styles() -> None:
            match the sidebar rather than fighting the text colour. */
         [data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"],
         [data-testid="stSidebar"] [data-testid="stFileUploaderFile"],
+        [data-testid="stSidebar"] [data-testid="stMultiSelect"] > div > div,
         [data-testid="stSidebar"] textarea {
             background: #23302b; border: 1px solid #3d4d46;
         }
-        [data-testid="stSidebar"] textarea::placeholder { color: #a3b3ab; opacity: 1; }
+        [data-testid="stSidebar"] textarea::placeholder,
+        [data-testid="stSidebar"] input::placeholder { color: #a3b3ab; opacity: 1; }
+        /* Selected files render as accent-coloured chips. The inherited cream on
+           that orange is 3.0:1, under the 4.5:1 small text needs; the ink colour
+           on the same orange is 4.8:1, so the accent is kept and the text darkens. */
+        [data-testid="stSidebar"] [data-testid="stMultiSelectTagsContainer"] span {
+            color: #17211d;
+        }
         [data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] button {
             background: #f6f1e7; color: #17211d; border: none;
         }
