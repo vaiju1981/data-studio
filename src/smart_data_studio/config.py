@@ -130,6 +130,13 @@ DICTIONARY_VALUES = 12
 # spelling of a city; short enough not to dump a column into the prompt.
 MAX_VALUE_MATCHES = 25
 
+# Bounds on what the model may propose about how tables relate. A model that
+# proposes forty joins between two tables costs forty verification queries for no
+# more insight than four.
+MAX_KEY_CANDIDATES = 4
+MAX_JOIN_CANDIDATES = 4
+MAX_KEY_COLUMNS = 4
+
 # A column with more levels than this is an identifier, not a dimension to sweep.
 MAX_DRIVER_LEVELS = 50
 # Below this a group cannot support a test: Cliff's delta from one observation is

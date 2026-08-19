@@ -11,7 +11,7 @@ import sqlglot
 from plotly.graph_objects import Figure
 from sqlglot import exp
 
-from smart_data_studio import analysis, timeseries
+from smart_data_studio import analysis, logs, relationships, timeseries
 from smart_data_studio.charts import ChartSpec, make_figure
 from smart_data_studio.config import (
     ANALYSIS_SAMPLE_SEED,
@@ -110,6 +110,9 @@ class AnalysisTools:
         # Set per turn so a query answering a question about entities can be told
         # when it counted rows instead.
         self.entity_keys: dict[str, str] = {}
+        # Measured join facts, kept for the dataset's lifetime: the same join is
+        # checked once however many questions reach for it.
+        self._join_facts: dict = {}
         # table -> column -> the values it holds, so a filter can be checked
         # against the value the question named. Keyed by table because two files
         # may each have a status column meaning different things, and merging
@@ -142,6 +145,14 @@ class AnalysisTools:
         Returns:
           A JSON result containing columns, rows, total row count, and truncation status.
         """
+        # Before the query runs, not after. The incomplete asset join builds 12.5
+        # million rows on the way to a number 439 times too large; there is no
+        # reason to pay for that before saying so. A single-table query returns
+        # from preflight untouched.
+        refusal = relationships.preflight(self.dataset, sql, self._join_facts)
+        if refusal:
+            logs.event("join.refused")
+            return _dump({"error": refusal})
         try:
             result = self.dataset.query(sql)
         except Exception as error:
