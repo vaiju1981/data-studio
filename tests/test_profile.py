@@ -296,3 +296,27 @@ def test_two_tables_state_their_keys_and_shared_columns() -> None:
         assert "assetId repeats" in text, text
     finally:
         dataset.close()
+
+
+def test_a_column_that_cannot_be_summarised_costs_only_its_own_statistics() -> None:
+    """A real 962MB asset file carries NaN in a DOUBLE column, and stddev over NaN
+    raises OutOfRange in DuckDB. That took the whole table's profile down with it,
+    so a file that loaded and queried perfectly well could not be profiled — and a
+    file that cannot be profiled cannot be used.
+    """
+    body = b"id,ok,broken\n1,10.5,1.0\n2,20.5,nan\n3,30.5,3.0\n"
+    dataset = Dataset.load([CsvSource.from_upload("t.csv", body)])
+    try:
+        # The column really does defeat SUMMARIZE, or this test proves nothing.
+        import duckdb
+
+        with pytest.raises(duckdb.OutOfRangeException):
+            dataset.connection.execute("SUMMARIZE t").fetchdf()
+
+        profile = profile_table(dataset, "t")
+        assert "ok" in profile.stats["column_name"].tolist(), "a good column lost its statistics"
+        findings = " ".join(profile.findings)
+        assert "broken" in findings and "NaN" in findings
+        assert dataset.query("SELECT count(*) AS n FROM t").frame.iloc[0, 0] == 3
+    finally:
+        dataset.close()

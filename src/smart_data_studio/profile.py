@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
-from smart_data_studio import relationships
+from smart_data_studio import logs, relationships
 from smart_data_studio.config import (
     DICTIONARY_VALUES,
     MAX_CELL_CHARS_TO_MODEL,
@@ -101,8 +101,37 @@ def profile_dataset(dataset: Dataset) -> list[TableProfile]:
     return [profile_table(dataset, table) for table in dataset.tables]
 
 
+def _summarize(dataset: Dataset, table_name: str) -> tuple[pd.DataFrame, list[str]]:
+    """SUMMARIZE, falling back to column by column when one column defeats it.
+
+    A real asset file carries NaN in a DOUBLE column, and stddev over NaN raises
+    OutOfRange. That took the whole table's profile with it, so a 962MB file that
+    loaded and queried perfectly well could not be profiled at all — and the app
+    is unusable for a file it cannot profile. One bad column now costs its own
+    statistics and nothing else.
+    """
+    quoted = quote_identifier(table_name)
+    try:
+        return dataset.connection.execute(f"SUMMARIZE {quoted}").fetchdf(), []
+    except Exception:
+        logs.failure("summarize.per_column")
+
+    frames, refused = [], []
+    for name, _ in dataset.schema(table_name):
+        try:
+            frames.append(
+                dataset.connection.execute(
+                    f"SUMMARIZE (SELECT {quote_identifier(name)} FROM {quoted})"
+                ).fetchdf()
+            )
+        except Exception:
+            refused.append(name)
+    stats = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    return stats, refused
+
+
 def profile_table(dataset: Dataset, table_name: str) -> TableProfile:
-    stats = dataset.connection.execute(f"SUMMARIZE {quote_identifier(table_name)}").fetchdf()
+    stats, unsummarised = _summarize(dataset, table_name)
     row_count = dataset.row_count(table_name)
     exact_distinct = _exact_distinct(dataset, table_name, stats, row_count)
     findings = _findings(stats, row_count, exact_distinct)
@@ -121,6 +150,13 @@ def profile_table(dataset: Dataset, table_name: str) -> TableProfile:
     grain, entity_key = _entity_grain(dataset, table_name, stats, row_count)
     if grain:
         findings.insert(0, grain)
+    if unsummarised:
+        # Said rather than silently missing: a column absent from the statistics
+        # would otherwise look like a column the file does not have.
+        findings.append(
+            f"No statistics could be computed for {', '.join(unsummarised)} — the values "
+            "include NaN, which DuckDB cannot summarise. The column is still queryable."
+        )
     if not findings:
         findings.append("No obvious constant, empty, high-null, or key-like columns were found.")
     return TableProfile(
