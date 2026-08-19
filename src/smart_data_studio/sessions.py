@@ -39,6 +39,24 @@ _entries: dict[str, _Entry] = {}
 _lock = threading.Lock()
 
 
+def check_capacity(session_id: str) -> None:
+    """Refuse a full host before the caller pays to load anything.
+
+    register() is the real gate, but it runs after the file is parsed and
+    profiled — so a host with no room still spent a minute and several gigabytes
+    finding that out. This asks the same question first and cheaply. A session
+    replacing its own workspace always has room, since its slot is reused.
+    """
+    with _lock:
+        _evict_idle_locked()
+        if session_id in _entries or len(_entries) < MAX_ACTIVE_SESSIONS:
+            return
+        raise TooManySessions(
+            f"{MAX_ACTIVE_SESSIONS} workspaces are already open on this host. "
+            "Try again shortly — idle ones are released automatically."
+        )
+
+
 def register(session_id: str, dataset: Dataset) -> None:
     """Adopt a workspace, evicting idle ones first and refusing if still full."""
     with _lock:

@@ -53,6 +53,11 @@ def _dump(payload: dict[str, object]) -> str:
     return json.dumps(_finite(payload), default=str)
 
 
+def _tables_in(tree: exp.Expression) -> set[str]:
+    """Every table the query names, so a column is read against the right one."""
+    return {table.name for table in tree.find_all(exp.Table) if table.name}
+
+
 def _filtered_literals(tree: exp.Expression) -> dict[str, set[str]]:
     """Which string values each column is restricted to, from = and IN alone.
 
@@ -105,9 +110,11 @@ class AnalysisTools:
         # Set per turn so a query answering a question about entities can be told
         # when it counted rows instead.
         self.entity_keys: dict[str, str] = {}
-        # column -> the values it holds, so a filter can be checked against the
-        # value the question actually named.
-        self.dimension_values: dict[str, list[str]] = {}
+        # table -> column -> the values it holds, so a filter can be checked
+        # against the value the question named. Keyed by table because two files
+        # may each have a status column meaning different things, and merging
+        # them checks a filter against the wrong vocabulary.
+        self.dimension_values: dict[str, dict[str, list[str]]] = {}
         self.question = ""
         self.chart: Figure | None = None
         self.chart_spec: ChartSpec | None = None
@@ -167,8 +174,16 @@ class AnalysisTools:
         except Exception:
             return None
         filtered = _filtered_literals(tree)
+        touched = {name.lower() for name in _tables_in(tree)}
         for column, used in filtered.items():
-            known = self.dimension_values.get(column)
+            known = next(
+                (
+                    values[column]
+                    for table, values in self.dimension_values.items()
+                    if table.lower() in touched and column in values
+                ),
+                None,
+            )
             if not known:
                 continue
             asked = [
@@ -464,9 +479,14 @@ class AnalysisTools:
 
     def _on_frame(self, kind: str, subject: str, analyse, may_sample: bool = True) -> str:
         """Run a whole-result analysis, on every row rather than the page shown."""
-        if not self.results:
+        # visible_from, not the whole list: single-turn mode rebuilds the chat from
+        # the system prompt but the tools live for the session, so the last result
+        # may belong to a turn this one is supposed to know nothing about. Charts
+        # already respect this boundary; analyses did not.
+        reachable = self.results[self.visible_from :]
+        if not reachable:
             return json.dumps({"error": "Run a SQL query before analysing it."})
-        source = self.results[-1]
+        source = reachable[-1]
         if not may_sample and source.total_rows > self._affordable(source):
             return json.dumps(
                 {

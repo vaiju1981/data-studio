@@ -232,7 +232,7 @@ class DataAgent:
             profile.table_name: profile.entity_key for profile in profiles if profile.entity_key
         }
         self.tools.dimension_values = {
-            column: values for profile in profiles for column, values in profile.values.items()
+            profile.table_name: profile.values for profile in profiles if profile.values
         }
         self.understanding = ""
         self.metrics = ""

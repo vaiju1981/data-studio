@@ -234,3 +234,31 @@ def test_the_grain_finding_says_which_dimensions_move_within_an_entity() -> None
         assert "visitId" not in grain.split("history can be followed")[-1]
     finally:
         dataset.close()
+
+
+def test_a_sensitive_column_never_reaches_the_prompt_through_its_statistics() -> None:
+    """SUMMARIZE covers every column, so its min and max carry real cell values —
+    the first and last email, the smallest and largest account number. The schema,
+    the samples and the dictionary all excluded sensitive columns; this was the way
+    round them.
+    """
+    import smart_data_studio.dataset as dataset_module
+    import smart_data_studio.profile as profile_module
+
+    original = dataset_module.SENSITIVE_COLUMNS, profile_module.SENSITIVE_COLUMNS
+    dataset_module.SENSITIVE_COLUMNS = profile_module.SENSITIVE_COLUMNS = ("email",)
+    rows = ["email,region"] + [
+        f"user{n}@example.com,{'North' if n % 2 else 'South'}" for n in range(40)
+    ]
+    dataset = Dataset.load([CsvSource.from_upload("t.csv", ("\n".join(rows) + "\n").encode())])
+    try:
+        profile = profile_table(dataset, "t")
+        prompt = profile.prompt_text()
+        assert "@example.com" not in prompt, "a real address reached the model"
+        assert "email" not in prompt
+        assert "region" in prompt, "the rest of the profile still has to be there"
+        # The owner's own panel is a different audience and keeps the full table.
+        assert "email" in profile.stats["column_name"].tolist()
+    finally:
+        dataset_module.SENSITIVE_COLUMNS, profile_module.SENSITIVE_COLUMNS = original
+        dataset.close()

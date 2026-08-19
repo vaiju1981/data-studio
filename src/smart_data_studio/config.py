@@ -84,7 +84,15 @@ LOG_FORMAT = os.environ.get("SDS_LOG_FORMAT", "json")
 
 
 def temp_directory() -> str:
-    return DUCKDB_TEMP_DIR or str(Path(os.environ.get("TMPDIR", "/tmp")) / "smart-data-studio")
+    """Where DuckDB spills, always inside a directory this app owns.
+
+    The name is appended even to a configured path. Shutdown removes this
+    directory recursively, and returning the configured path unchanged meant
+    SDS_DUCKDB_TEMP_DIR=/data deleted /data — everything in it, not only the spill
+    files we put there.
+    """
+    root = DUCKDB_TEMP_DIR or os.environ.get("TMPDIR", "/tmp")
+    return str(Path(root) / "smart-data-studio")
 
 
 # Three separate ceilings. They were one value before, which silently truncated

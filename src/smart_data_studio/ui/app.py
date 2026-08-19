@@ -217,6 +217,9 @@ def _load(uploads: list[object], paths: str, chosen: list[str] | None = None) ->
         local = [Path(item) for item in chosen or []] + local
         sources = [CsvSource.from_upload(upload.name, upload.getvalue()) for upload in uploads]
         sources.extend(CsvSource.from_path(path) for path in local)
+        # Asked before the load, not after it: refusing a 2.7GB file once it is
+        # already parsed and profiled wastes the minute and the memory both.
+        sessions.check_capacity(st.session_state.session_id)
         with st.spinner("Loading and profiling your data…"):
             dataset = Dataset.load(sources)
             try:

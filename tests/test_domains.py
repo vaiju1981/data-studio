@@ -249,3 +249,21 @@ def test_a_bare_comma_decimal_is_flagged_even_beside_whole_numbers() -> None:
     body = "co\n" + "\n".join(values) + "\n"
     notes, _, _ = warnings_for("air.csv", body.encode())
     assert any("comma decimal" in note for note in notes), notes
+
+
+@pytest.mark.parametrize("delimiter", [",", ";", "\t", "|"])
+def test_duplicate_headers_are_caught_whatever_separates_them(delimiter: str) -> None:
+    """The check split on commas alone, so a semicolon or tab file parsed as one
+    enormous field and the collision went unnoticed — the very thing this check
+    exists to catch, silently disabled for every file DuckDB happily reads."""
+    body = f"id{delimiter}id{delimiter}value\n1{delimiter}2{delimiter}3\n".encode()
+    with pytest.raises(ValueError, match="repeats column name"):
+        Dataset.load([CsvSource.from_upload("d.csv", body)])
+
+
+def test_a_wide_separated_header_is_not_read_as_one_over_long_name() -> None:
+    """As one field it exceeded the length limit and was reported as data rather
+    than headers."""
+    names = ";".join(f"column_number_{n}" for n in range(30))
+    notes, _, _ = warnings_for("w.csv", f"{names}\n{';'.join('1' for _ in range(30))}\n".encode())
+    assert not any("longer than" in note or "looks like data" in note for note in notes), notes

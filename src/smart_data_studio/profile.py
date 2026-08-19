@@ -10,6 +10,7 @@ from smart_data_studio.config import (
     DICTIONARY_VALUES,
     MAX_CELL_CHARS_TO_MODEL,
     MIN_SENTINEL_ROWS,
+    SENSITIVE_COLUMNS,
     SENTINEL_GAP_RATIO,
     SENTINEL_SHARE,
 )
@@ -42,12 +43,20 @@ class TableProfile:
             "null_percentage",
         ]
         available = [column for column in columns if column in self.stats.columns]
+        # SUMMARIZE covers every column, so its min and max carry real cell values —
+        # the first and last email, the smallest and largest account number. The
+        # schema, the samples and the dictionary all exclude sensitive columns
+        # already; this was the way round them, and it is the model-facing text
+        # that has to be filtered rather than the panel the owner reads.
+        visible = self.stats[~self.stats["column_name"].map(is_sensitive)]
         rendered_stats = (
-            self.stats[available]
+            visible[available]
             .map(lambda value: "—" if pd.isna(value) else value)
             .to_string(index=False)
         )
-        rendered_findings = "\n".join(f"- {finding}" for finding in self.findings)
+        rendered_findings = "\n".join(
+            f"- {finding}" for finding in self.findings if not _names_sensitive(finding)
+        )
         rendered_dictionary = (
             "\nValues held by the dimension columns:\n"
             + "\n".join(f"- {line}" for line in self.dictionary)
@@ -59,6 +68,11 @@ class TableProfile:
             f"Profile (approx_unique is an estimate, not an exact count):\n{rendered_stats}\n"
             f"Findings:\n{rendered_findings}{rendered_dictionary}"
         )
+
+
+def _names_sensitive(text: str) -> bool:
+    """Whether a finding is about a column the model is not allowed to see."""
+    return any(part in text.lower() for part in SENSITIVE_COLUMNS)
 
 
 def profile_dataset(dataset: Dataset) -> list[TableProfile]:

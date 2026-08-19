@@ -112,7 +112,17 @@ class CsvSource:
         else:
             with self.path.open("r", encoding="utf-8", errors="replace") as handle:
                 first = handle.readline()
-        return next(csv.reader([first.rstrip("\r")]), [])
+        first = first.rstrip("\r")
+        # Split on whichever separator actually divides this line. Assuming a comma
+        # made a semicolon or tab file parse as one enormous field, which silently
+        # disabled the duplicate-name check and could read a wide header as a single
+        # over-long name — reported as "the first row is probably data".
+        best: list[str] = []
+        for delimiter in (",", ";", "\t", "|"):
+            fields = next(csv.reader([first], delimiter=delimiter), [])
+            if len(fields) > len(best):
+                best = fields
+        return best
 
     @classmethod
     def from_upload(cls, name: str, content: bytes) -> CsvSource:

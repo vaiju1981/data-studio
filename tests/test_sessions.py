@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import importlib
+from pathlib import Path
 
 import duckdb
 import pytest
 
-from smart_data_studio import sessions
+from smart_data_studio import config, sessions
 from smart_data_studio.dataset import CsvSource, Dataset
 
 
@@ -69,3 +70,26 @@ def test_shutdown_closes_everything_and_clears_the_spill_directory(tmp_path, mon
     sessions.shutdown()
     assert sessions.active() == 0
     assert not (tmp_path / "spill").exists()
+
+
+def test_a_full_host_is_refused_before_anything_is_loaded() -> None:
+    """register() is the real gate but runs after the file is parsed and profiled,
+    so a host with no room still spent a minute and several gigabytes finding out."""
+    datasets = [make_dataset() for _ in range(sessions.MAX_ACTIVE_SESSIONS)]
+    try:
+        for index, dataset in enumerate(datasets):
+            sessions.register(f"s{index}", dataset)
+        with pytest.raises(sessions.TooManySessions):
+            sessions.check_capacity("newcomer")
+        # A session replacing its own workspace always has room.
+        sessions.check_capacity("s0")
+    finally:
+        sessions.shutdown()
+
+
+def test_the_spill_directory_is_always_one_we_own(monkeypatch, tmp_path) -> None:
+    """Shutdown removes it recursively. Returning a configured path unchanged meant
+    SDS_DUCKDB_TEMP_DIR=/data deleted /data and everything in it."""
+    monkeypatch.setattr(config, "DUCKDB_TEMP_DIR", str(tmp_path))
+    assert Path(config.temp_directory()).parent == tmp_path
+    assert Path(config.temp_directory()).name == "smart-data-studio"

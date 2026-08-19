@@ -310,7 +310,7 @@ GEO = b"geoType,amount\n" + b"".join(
 def geo_tools() -> tuple[AnalysisTools, Dataset]:
     dataset = Dataset.load([CsvSource.from_upload("visits.csv", GEO)])
     tools = AnalysisTools(dataset)
-    tools.dimension_values = {"geoType": ["LOCAL", "NATIONAL", "REGIONAL"]}
+    tools.dimension_values = {"visits": {"geoType": ["LOCAL", "NATIONAL", "REGIONAL"]}}
     return tools, dataset
 
 
@@ -370,5 +370,48 @@ def test_a_value_inside_a_longer_word_does_not_count_as_asking_for_it() -> None:
         assert "filter_warning" not in json.loads(
             tools.run_sql("SELECT sum(amount) AS s FROM visits WHERE geoType = 'NATIONAL'")
         )
+    finally:
+        dataset.close()
+
+
+def test_two_tables_sharing_a_column_name_keep_separate_vocabularies() -> None:
+    """Merging them checks a filter against the wrong table's values: a status of
+    OPEN in one file and PAID in another are not alternatives to each other."""
+    orders = Dataset.load(
+        [
+            CsvSource.from_upload("orders.csv", b"status,amount\nOPEN,1\nSHIPPED,2\n"),
+            CsvSource.from_upload("invoices.csv", b"status,amount\nPAID,3\nDUE,4\n"),
+        ]
+    )
+    try:
+        tools = AnalysisTools(orders)
+        tools.dimension_values = {
+            "orders": {"status": ["OPEN", "SHIPPED"]},
+            "invoices": {"status": ["PAID", "DUE"]},
+        }
+        tools.question = "How much is OPEN?"
+        # Filtering invoices, whose vocabulary has no OPEN, must not be measured
+        # against the orders vocabulary that does.
+        assert "filter_warning" not in json.loads(
+            tools.run_sql("SELECT sum(amount) AS s FROM invoices WHERE status = 'PAID'")
+        )
+        # The same question against orders is a genuine substitution.
+        payload = json.loads(
+            tools.run_sql("SELECT sum(amount) AS s FROM orders WHERE status = 'SHIPPED'")
+        )
+        assert "OPEN" in payload["filter_warning"]
+    finally:
+        orders.close()
+
+
+def test_an_analysis_cannot_reach_a_result_the_turn_forgot() -> None:
+    """Single-turn rebuilds the chat but the tools live for the session, so the
+    newest result may belong to a turn this one is meant to know nothing about."""
+    dataset = Dataset.load([CsvSource.from_upload("t.csv", b"g,v\nA,1\nB,2\nA,3\nB,4\n")])
+    try:
+        tools = AnalysisTools(dataset)
+        tools.run_sql("SELECT g, v FROM t")
+        tools.reset_chart(keep_history=False)
+        assert "Run a SQL query" in json.loads(tools.compare_groups("g", "v"))["error"]
     finally:
         dataset.close()
