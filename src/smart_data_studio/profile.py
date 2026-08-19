@@ -6,9 +6,11 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
+from smart_data_studio import relationships
 from smart_data_studio.config import (
     DICTIONARY_VALUES,
     MAX_CELL_CHARS_TO_MODEL,
+    MAX_SHARED_COLUMNS,
     MIN_SENTINEL_ROWS,
     SENSITIVE_COLUMNS,
     SENTINEL_GAP_RATIO,
@@ -27,6 +29,12 @@ class TableProfile:
     dictionary: list[str] = field(default_factory=list)
     # The same values keyed by column, for guards rather than for reading.
     values: dict[str, list[str]] = field(default_factory=dict)
+    # How a row is identified, measured. Empty for a single loaded table, which
+    # keeps that path byte-for-byte as it was.
+    keys: list = field(default_factory=list)
+    # Columns another loaded table also has, and how far each is from identifying
+    # a row. These are exactly the columns a join reaches for.
+    shared: list[str] = field(default_factory=list)
     # The column a row is a repeat of — playerId in a table of visits. A question
     # about that entity has to be aggregated to it, not counted by row.
     entity_key: str | None = None
@@ -57,6 +65,20 @@ class TableProfile:
         rendered_findings = "\n".join(
             f"- {finding}" for finding in self.findings if not _names_sensitive(finding)
         )
+        # Stated before anything joins, so the right key is used the first time
+        # rather than a wrong one being refused and rewritten.
+        rendered_keys = (
+            "\nHow a row is identified: " + "; ".join(facts.describe() for facts in self.keys) + "."
+            if self.keys
+            else ""
+        )
+        rendered_shared = (
+            "\nColumns another table also has, and what each does here: "
+            + "; ".join(self.shared)
+            + ". Joining on one that repeats multiplies rows."
+            if self.shared
+            else ""
+        )
         rendered_dictionary = (
             "\nValues held by the dimension columns:\n"
             + "\n".join(f"- {line}" for line in self.dictionary)
@@ -66,7 +88,7 @@ class TableProfile:
         return (
             f"Table {self.table_name}: {self.row_count:,} rows\n"
             f"Profile (approx_unique is an estimate, not an exact count):\n{rendered_stats}\n"
-            f"Findings:\n{rendered_findings}{rendered_dictionary}"
+            f"Findings:\n{rendered_findings}{rendered_keys}{rendered_shared}{rendered_dictionary}"
         )
 
 
@@ -88,6 +110,14 @@ def profile_table(dataset: Dataset, table_name: str) -> TableProfile:
     # a note that another column is high-cardinality.
     findings = list(_sentinels(dataset, table_name, stats).values()) + findings
     dictionary, values = _dictionary(dataset, table_name, stats)
+    # Only with something to join to. §10 of the multi-CSV plan: one CSV adds no
+    # profile query and no line of output.
+    keys = (
+        relationships.discover_keys(dataset, table_name, _distinct_by_column(stats))
+        if len(dataset.tables) > 1
+        else []
+    )
+    shared = _shared_columns(dataset, table_name, row_count) if len(dataset.tables) > 1 else []
     grain, entity_key = _entity_grain(dataset, table_name, stats, row_count)
     if grain:
         findings.insert(0, grain)
@@ -100,6 +130,8 @@ def profile_table(dataset: Dataset, table_name: str) -> TableProfile:
         findings=findings,
         dictionary=dictionary,
         values=values,
+        keys=keys,
+        shared=shared,
         entity_key=entity_key,
     )
 
@@ -219,6 +251,62 @@ def _exact_distinct(
         f"SELECT {projections} FROM {quote_identifier(table_name)}"
     ).fetchone()
     return {name: int(count) for name, count in zip(candidates, row, strict=True)}
+
+
+def _shared_columns(dataset: Dataset, table_name: str, row_count: int) -> list[str]:
+    """How far each column shared with another table is from identifying a row.
+
+    A join reaches for the column both files have, and the whole 439x failure was
+    joining on one of those without checking whether it repeats. Saying so before
+    anything joins is what turns a refusal into a right answer first time.
+    """
+    measures = relationships.measure_columns(dataset, table_name)
+    mine = {
+        name
+        for name, _ in dataset.schema(table_name)
+        if not is_sensitive(name) and name not in measures
+    }
+    elsewhere = {
+        name for other in dataset.tables if other != table_name for name, _ in dataset.schema(other)
+    }
+    together = sorted(mine & elsewhere)
+    if not together or not row_count:
+        return []
+    counts = dataset.connection.execute(
+        "SELECT "
+        + ", ".join(f"count(DISTINCT {quote_identifier(name)})" for name in together)
+        + f" FROM {quote_identifier(table_name)}"
+    ).fetchone()
+
+    measured = sorted(
+        ((name, int(distinct)) for name, distinct in zip(together, counts, strict=True)),
+        key=lambda item: -item[1],
+    )
+    # Bounded and prioritised. Two of these files share twenty-five column names,
+    # and listing them all buries the few a join would actually use. The most
+    # various come first because those are the plausible keys; constants are kept
+    # regardless, since joining two tables on one pairs every row with every row.
+    constants = [item for item in measured if item[1] <= 1]
+    plausible = [item for item in measured if item[1] > 1][:MAX_SHARED_COLUMNS]
+
+    described = []
+    for name, distinct in plausible:
+        if distinct >= row_count:
+            described.append(f"{name} identifies a row on its own")
+        else:
+            described.append(f"{name} repeats: {distinct:,} values across {row_count:,} rows")
+    for name, _ in constants[:2]:
+        described.append(f"{name} is the same for every row, so joining on it pairs everything")
+    return described
+
+
+def _distinct_by_column(stats: pd.DataFrame) -> dict[str, float]:
+    """Approximate distinct counts, which is enough to rank a key search."""
+    return {
+        str(row["column_name"]): _number(row.get("approx_unique"))
+        for row in stats.to_dict(orient="records")
+        if not is_sensitive(str(row["column_name"]))
+    }
 
 
 def _dimension_columns(stats: pd.DataFrame, row_count: int) -> dict[str, float]:

@@ -262,3 +262,37 @@ def test_a_sensitive_column_never_reaches_the_prompt_through_its_statistics() ->
     finally:
         dataset_module.SENSITIVE_COLUMNS, profile_module.SENSITIVE_COLUMNS = original
         dataset.close()
+
+
+def test_one_loaded_table_gains_no_key_search_and_no_extra_lines() -> None:
+    """§10 of the multi-CSV plan: one CSV adds no profile query and no output. The
+    key search and the shared-column report are multi-table features."""
+    dataset = Dataset.load([CsvSource.from_upload("t.csv", b"a,b\n1,x\n2,y\n")])
+    try:
+        profile = profile_table(dataset, "t")
+        assert profile.keys == [] and profile.shared == []
+        text = profile.prompt_text()
+        assert "How a row is identified" not in text
+        assert "another table also has" not in text
+    finally:
+        dataset.close()
+
+
+def test_two_tables_state_their_keys_and_shared_columns() -> None:
+    """Said before anything joins, so the right key is used first time rather than
+    a wrong one being refused and rewritten."""
+    dataset = Dataset.load(
+        [
+            CsvSource.from_upload("sessions.csv", b"assetId,day,coinIn\n1,x,10\n1,y,20\n2,x,5\n"),
+            CsvSource.from_upload(
+                "assets.csv", b"assetId,day,maker\n1,x,IGT\n1,y,IGT\n2,x,BALLY\n"
+            ),
+        ]
+    )
+    try:
+        text = profile_table(dataset, "assets").prompt_text()
+        assert "How a row is identified" in text
+        assert "another table also has" in text
+        assert "assetId repeats" in text, text
+    finally:
+        dataset.close()

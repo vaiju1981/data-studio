@@ -411,3 +411,52 @@ def test_a_derived_relation_is_credited_only_when_its_grain_is_visible(
     """
     verdict = relationships.preflight(data, sql, {})
     assert bool(verdict) is refused, f"{label}: {verdict}"
+
+
+# --- keys measured, and stated before anything joins ----------------------------
+
+
+def test_a_single_column_key_is_found_and_reported(data) -> None:
+    facts = relationships.discover_keys(data, "assets", {"assetId": 2, "day": 2, "manufacturer": 2})
+    assert facts and all(f.unique for f in facts)
+
+
+def test_a_composite_key_is_found_when_no_single_column_identifies_a_row() -> None:
+    """The shape of the real asset file: one row per machine per day, and no single
+    column comes close. This is the sentence that stops a join on assetId alone."""
+    rows = ["assetId,day,note"]
+    rows += [f"{asset},2024-01-{day:02d},x" for asset in (1, 2, 3) for day in range(1, 8)]
+    dataset = Dataset.load([CsvSource.from_upload("a.csv", ("\n".join(rows) + "\n").encode())])
+    try:
+        facts = relationships.discover_keys(dataset, "a", {"assetId": 3, "day": 7, "note": 1})
+        assert facts, "no key offered for a table that plainly has one"
+        best = facts[0]
+        assert best.unique and set(best.ref.columns) == {"assetId", "day"}
+        assert "one row per" in best.describe()
+    finally:
+        dataset.close()
+
+
+def test_a_measure_is_never_offered_as_a_key() -> None:
+    """Money carries plenty of distinct values and identifies nothing. Ranked on
+    count alone, a real asset table offered (grossWin, ticketOut) as its key."""
+    rows = ["assetId,day,grossWin"]
+    rows += [f"{a},2024-01-{d:02d},{a * 100 + d}.5" for a in (1, 2) for d in range(1, 6)]
+    dataset = Dataset.load([CsvSource.from_upload("a.csv", ("\n".join(rows) + "\n").encode())])
+    try:
+        assert "grossWin" in relationships.measure_columns(dataset, "a")
+        facts = relationships.discover_keys(dataset, "a", {"grossWin": 10, "assetId": 2, "day": 5})
+        assert all("grossWin" not in f.ref.columns for f in facts), [f.ref for f in facts]
+    finally:
+        dataset.close()
+
+
+def test_key_facts_count_nulls_apart_from_duplicates() -> None:
+    dataset = Dataset.load([CsvSource.from_upload("a.csv", b"k,v\n1,a\n2,b\n,c\n")])
+    try:
+        facts = relationships.verify_key(dataset, relationships.Ref("a", ("k",)))
+        assert facts.rows == 3 and facts.complete == 2
+        assert facts.unique and facts.has_nulls
+        assert "though 1 rows have none" in facts.describe()
+    finally:
+        dataset.close()

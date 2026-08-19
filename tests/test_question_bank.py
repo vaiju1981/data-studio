@@ -237,7 +237,11 @@ def test_win_back_groups_by_player_alone(agent) -> None:
     )
     sql = " ".join(result.sql for result in answer.results).lower()
     assert "group by" in sql
-    assert "lastvisit" not in sql.split("group by")[-1].split("order by")[0]
+    # The grouping keys alone. Slicing as far as ORDER BY swept in HAVING too, and
+    # failed on `HAVING lastVisitDate < ...` — an alias the query computed itself,
+    # which is correct and is not the bug. The bug was lastVisit as a GROUP BY key.
+    grouped = re.split(r"\bhaving\b|\border by\b|\blimit\b", sql.split("group by")[-1])[0]
+    assert "lastvisit" not in grouped, grouped
     # The lapse window must be measured from the data, not from today.
     assert "current_date" not in sql
 

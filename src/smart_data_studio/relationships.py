@@ -21,6 +21,7 @@ from smart_data_studio.config import (
     MAX_JOIN_CANDIDATES,
     MAX_KEY_CANDIDATES,
     MAX_KEY_COLUMNS,
+    MAX_KEY_SEARCH_COLUMNS,
 )
 from smart_data_studio.dataset import Dataset, is_sensitive, quote_identifier
 
@@ -146,6 +147,110 @@ def validate(dataset: Dataset, raw: list[dict]) -> Proposals:
         except (AttributeError, TypeError) as error:
             found.rejected.append(f"malformed proposal: {type(error).__name__}: {error}")
     return found
+
+
+@dataclass(frozen=True)
+class KeyFacts:
+    """What a candidate key does on the rows actually loaded."""
+
+    ref: Ref
+    rows: int
+    complete: int  # rows with no NULL in any key column
+    distinct: int
+
+    @property
+    def unique(self) -> bool:
+        return bool(self.complete) and self.distinct == self.complete
+
+    @property
+    def has_nulls(self) -> bool:
+        return self.complete < self.rows
+
+    def describe(self) -> str:
+        columns = ", ".join(self.ref.columns)
+        if not self.unique:
+            return (
+                f"({columns}) comes closest to identifying a row, at {self.distinct:,} "
+                f"values across {self.complete:,} rows — near enough to join on, and "
+                f"the nearest thing this table has to a key"
+            )
+        nulls = f", though {self.rows - self.complete:,} rows have none" if self.has_nulls else ""
+        return f"one row per ({columns}){nulls}"
+
+
+def verify_key(dataset: Dataset, ref: Ref) -> KeyFacts:
+    """Measure whether these columns identify a row, counting nulls apart."""
+    key, non_null = _key_sql(ref)
+    quoted = quote_identifier(ref.table)
+    complete, distinct = dataset.connection.execute(
+        f"SELECT count(*), count(DISTINCT {key}) FROM {quoted} WHERE {non_null}"
+    ).fetchone()
+    return KeyFacts(
+        ref=ref, rows=dataset.row_count(ref.table), complete=int(complete), distinct=int(distinct)
+    )
+
+
+def measure_columns(dataset: Dataset, table: str) -> set[str]:
+    """Columns that are quantities rather than identifiers.
+
+    Money and percentages carry plenty of distinct values and identify nothing.
+    Ranked on distinct count alone an asset table offered (grossWin, ticketOut) as
+    its key, and listed grossWin ahead of assetId as a join column — the same
+    mistake twice, so the test lives in one place.
+    """
+    return {
+        name
+        for name, kind in dataset.schema(table)
+        if any(part in kind.upper() for part in ("DOUBLE", "FLOAT", "DECIMAL", "REAL"))
+    }
+
+
+def discover_keys(
+    dataset: Dataset, table: str, distinct_by_column: dict[str, float]
+) -> list[KeyFacts]:
+    """The narrowest column sets that identify a row, singles before pairs.
+
+    Bounded rather than exhaustive: single columns first, and pairs only among the
+    few with the most distinct values, since a key's parts are necessarily among
+    the more various columns. Minimality falls out of the order — once a single
+    column is a key, no pair containing it is offered, because a unique pair whose
+    subset is already unique is not a composite key.
+
+    This is what lets the profile say "one row per (assetId, day)" before anything
+    joins on assetId alone, which is the difference between preventing the 439x
+    error and correcting it afterwards.
+    """
+    rows = dataset.row_count(table)
+    if rows < 2:
+        return []
+    measures = measure_columns(dataset, table)
+    ranked = sorted(
+        ((name, count) for name, count in distinct_by_column.items() if name not in measures),
+        key=lambda item: -item[1],
+    )
+    if not ranked:
+        return []
+    names = [name for name, _ in ranked[:MAX_KEY_SEARCH_COLUMNS]]
+    singles = [verify_key(dataset, Ref(table, (name,))) for name in names]
+    exact = [facts for facts in singles if facts.unique]
+    if exact:
+        return exact[:MAX_KEY_CANDIDATES]
+
+    # No single column identifies a row, so try pairs of the most various ones.
+    pairs: list[KeyFacts] = []
+    for index, first in enumerate(names):
+        for second in names[index + 1 :]:
+            pairs.append(verify_key(dataset, Ref(table, (first, second))))
+    unique = [facts for facts in pairs if facts.unique]
+    if unique:
+        return unique[:MAX_KEY_CANDIDATES]
+
+    # Nothing identifies a row exactly. The nearest set is still the thing worth
+    # saying: (assetId, day) at 11,420 values across 11,421 rows is what a join
+    # should use, and one duplicated row does not make assetId alone — 25 values
+    # across 11,421 — any less wrong.
+    best = max(pairs, key=lambda facts: facts.distinct, default=None)
+    return [best] if best is not None and best.distinct > singles[0].distinct else []
 
 
 @dataclass(frozen=True)

@@ -136,6 +136,13 @@ MAX_VALUE_MATCHES = 25
 MAX_KEY_CANDIDATES = 4
 MAX_JOIN_CANDIDATES = 4
 MAX_KEY_COLUMNS = 4
+# How many of a table's most various columns are searched for a key. Pairs are
+# quadratic, and a key's parts are necessarily among the columns with the most
+# distinct values, so a small window finds (assetId, day) without a sweep.
+MAX_KEY_SEARCH_COLUMNS = 6
+# Shared column names reported per table. Two real files shared twenty-five, and
+# listing them all buries the few a join would use.
+MAX_SHARED_COLUMNS = 5
 
 # A column with more levels than this is an identifier, not a dimension to sweep.
 MAX_DRIVER_LEVELS = 50
