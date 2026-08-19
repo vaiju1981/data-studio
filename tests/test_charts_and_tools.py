@@ -298,3 +298,77 @@ def test_no_warning_when_the_table_has_no_repeating_entity() -> None:
         assert "grain_warning" not in json.loads(tools.run_sql("SELECT count(*) AS n FROM visits"))
     finally:
         dataset.close()
+
+
+# --- answering about a value nobody asked about ---------------------------------
+
+GEO = b"geoType,amount\n" + b"".join(
+    [b"LOCAL,10\n"] * 30 + [b"NATIONAL,20\n"] * 20 + [b"REGIONAL,30\n"] * 15
+)
+
+
+def geo_tools() -> tuple[AnalysisTools, Dataset]:
+    dataset = Dataset.load([CsvSource.from_upload("visits.csv", GEO)])
+    tools = AnalysisTools(dataset)
+    tools.dimension_values = {"geoType": ["LOCAL", "NATIONAL", "REGIONAL"]}
+    return tools, dataset
+
+
+def test_filtering_on_a_value_the_question_did_not_name_is_flagged() -> None:
+    """Asked about NATIONAL players, an answer once described REGIONAL ones. Both
+    values are real and the SQL is valid, so nothing fails — the answer is simply
+    about somebody else, and reads exactly as though it were not.
+    """
+    tools, dataset = geo_tools()
+    try:
+        tools.question = "How much do NATIONAL players spend?"
+        payload = json.loads(
+            tools.run_sql("SELECT sum(amount) AS s FROM visits WHERE geoType = 'REGIONAL'")
+        )
+        assert "NATIONAL" in payload["filter_warning"]
+        assert "REGIONAL" in payload["filter_warning"], "the substituted value is not named"
+    finally:
+        dataset.close()
+
+
+@pytest.mark.parametrize(
+    ("question", "sql"),
+    [
+        # Asked for and filtered on the same value.
+        (
+            "How much do NATIONAL players spend?",
+            "SELECT sum(amount) FROM visits WHERE geoType = 'NATIONAL'",
+        ),
+        # A comparison names two values and uses both.
+        (
+            "Compare NATIONAL and REGIONAL spend",
+            "SELECT geoType, sum(amount) FROM visits "
+            "WHERE geoType IN ('NATIONAL', 'REGIONAL') GROUP BY 1",
+        ),
+        # Naming a value while grouping is asking for a comparison, not a filter,
+        # so there is nothing for it to be wrong about.
+        ("Is NATIONAL the biggest segment?", "SELECT geoType, sum(amount) FROM visits GROUP BY 1"),
+        # A filter the question never spoke to is the model's own scoping.
+        ("What is total spend?", "SELECT sum(amount) FROM visits WHERE geoType = 'LOCAL'"),
+    ],
+)
+def test_a_filter_that_matches_the_question_is_left_alone(question: str, sql: str) -> None:
+    tools, dataset = geo_tools()
+    try:
+        tools.question = question
+        assert "filter_warning" not in json.loads(tools.run_sql(sql)), question
+    finally:
+        dataset.close()
+
+
+def test_a_value_inside_a_longer_word_does_not_count_as_asking_for_it() -> None:
+    """ "LOCAL" sits inside "locality", and treating that as a request for the value
+    would warn on questions that never named one."""
+    tools, dataset = geo_tools()
+    try:
+        tools.question = "How do locality tiers compare?"
+        assert "filter_warning" not in json.loads(
+            tools.run_sql("SELECT sum(amount) AS s FROM visits WHERE geoType = 'NATIONAL'")
+        )
+    finally:
+        dataset.close()

@@ -24,6 +24,8 @@ class TableProfile:
     findings: list[str]
     # What the dimension columns actually contain, one line each.
     dictionary: list[str] = field(default_factory=list)
+    # The same values keyed by column, for guards rather than for reading.
+    values: dict[str, list[str]] = field(default_factory=dict)
     # The column a row is a repeat of — playerId in a table of visits. A question
     # about that entity has to be aggregated to it, not counted by row.
     entity_key: str | None = None
@@ -71,6 +73,7 @@ def profile_table(dataset: Dataset, table_name: str) -> TableProfile:
     # Ahead of the rest: a column whose average is meaningless is worth more than
     # a note that another column is high-cardinality.
     findings = list(_sentinels(dataset, table_name, stats).values()) + findings
+    dictionary, values = _dictionary(dataset, table_name, stats)
     grain, entity_key = _entity_grain(dataset, table_name, stats, row_count)
     if grain:
         findings.insert(0, grain)
@@ -81,7 +84,8 @@ def profile_table(dataset: Dataset, table_name: str) -> TableProfile:
         row_count=row_count,
         stats=stats,
         findings=findings,
-        dictionary=_dictionary(dataset, table_name, stats),
+        dictionary=dictionary,
+        values=values,
         entity_key=entity_key,
     )
 
@@ -221,7 +225,9 @@ def _dimension_columns(stats: pd.DataFrame, row_count: int) -> dict[str, float]:
     return found
 
 
-def _dictionary(dataset: Dataset, table_name: str, stats: pd.DataFrame) -> list[str]:
+def _dictionary(
+    dataset: Dataset, table_name: str, stats: pd.DataFrame
+) -> tuple[list[str], dict[str, list[str]]]:
     """The values each dimension column actually holds, not merely its name.
 
     The schema tells the model that ageGroup exists; it does not say the column
@@ -236,7 +242,7 @@ def _dictionary(dataset: Dataset, table_name: str, stats: pd.DataFrame) -> list[
     """
     candidates = list(_dimension_columns(stats, dataset.row_count(table_name)).items())
     if not candidates:
-        return []
+        return [], {}
 
     projections = ", ".join(
         f"approx_top_k({quote_identifier(name)}, {DICTIONARY_VALUES}) AS v{index}"
@@ -249,7 +255,10 @@ def _dictionary(dataset: Dataset, table_name: str, stats: pd.DataFrame) -> list[
         .to_dict()
     )
 
-    lines = []
+    lines: list[str] = []
+    # The same values kept structurally, so a guard can ask whether a value named
+    # in a question is the one the query actually filtered on.
+    held: dict[str, list[str]] = {}
     for index, (name, distinct) in enumerate(candidates):
         # Explicit None test: this arrives as a numpy array, and `array or []`
         # raises rather than falling back.
@@ -261,11 +270,12 @@ def _dictionary(dataset: Dataset, table_name: str, stats: pd.DataFrame) -> list[
             item[:MAX_CELL_CHARS_TO_MODEL] + "…" if len(item) > MAX_CELL_CHARS_TO_MODEL else item
             for item in found
         ]
+        held[name] = shown
         if distinct <= DICTIONARY_VALUES:
             lines.append(f"{name} ({len(shown)} values): {', '.join(sorted(shown))}")
         else:
             lines.append(f"{name} (~{int(distinct):,} values), most common: {', '.join(shown)}")
-    return lines
+    return lines, held
 
 
 def _sentinels(dataset: Dataset, table_name: str, stats: pd.DataFrame) -> dict[str, str]:

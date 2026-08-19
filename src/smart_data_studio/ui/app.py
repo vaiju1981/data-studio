@@ -159,10 +159,13 @@ def _metrics_controls() -> None:
         "Definitions",
         key="metrics",
         height=140,
+        # Deliberately generic: the example is the first thing a new user reads, and
+        # naming one industry's measures makes a tool for any CSV look like a tool
+        # for that industry.
         placeholder=(
-            "avgBet = 0 if handlePulls or coinIn is 0, else coinIn / handlePulls\n"
-            "theo_last_90 = sum of theoWin over the last 90 days\n"
-            "high bet = avgBet above the median, minimum 100 handle pulls"
+            "unit price = 0 if quantity is 0, else revenue / quantity\n"
+            "revenue_last_90 = sum of revenue over the last 90 days\n"
+            "high value = unit price above the median, minimum 100 units"
         ),
         help=(
             "One definition per line, in plain English. Press ⌘/Ctrl+Enter or click away to "

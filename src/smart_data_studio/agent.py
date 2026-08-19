@@ -231,6 +231,9 @@ class DataAgent:
         self.tools.entity_keys = {
             profile.table_name: profile.entity_key for profile in profiles if profile.entity_key
         }
+        self.tools.dimension_values = {
+            column: values for profile in profiles for column, values in profile.values.items()
+        }
         self.understanding = ""
         self.metrics = ""
         self.messages: list[dict[str, Any]] = [{"role": "system", "content": self._system_prompt()}]

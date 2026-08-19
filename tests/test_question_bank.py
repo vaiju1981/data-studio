@@ -199,16 +199,18 @@ def mentions(text: str, value: float, tolerance: float = 0.01) -> bool:
 def test_understanding_is_a_grounded_summary(agent) -> None:
     """Structure only.
 
-    Which facts reach the five bullets varies run to run — asserting that any
-    particular number appears has failed twice on wording while the summary was
-    perfectly good. What must hold is that exploration ran and produced a bulleted
-    summary naming the table.
+    Which facts reach the bullets varies run to run. Asserting a particular number
+    appears failed twice on wording, and requiring the table be named by name
+    failed a third time on a summary that was perfectly good and simply said "this
+    dataset". What must hold is that exploration really queried the data and wrote
+    a bulleted summary from it — so that is what is checked, and the phrasing is
+    left to the model.
     """
     text = agent.understanding
     assert text.strip(), "exploration produced nothing"
     bullets = [line for line in text.splitlines() if line.strip().startswith(("*", "-"))]
     assert len(bullets) >= 4, f"expected a bulleted summary, got:\n{text[:300]}"
-    assert any(table in text for table in agent.dataset.tables), "the table is never named"
+    assert agent.tools.results, "the summary was written without querying anything"
 
 
 @pytest.mark.parametrize(

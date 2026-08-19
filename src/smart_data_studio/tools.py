@@ -53,6 +53,25 @@ def _dump(payload: dict[str, object]) -> str:
     return json.dumps(_finite(payload), default=str)
 
 
+def _filtered_literals(tree: exp.Expression) -> dict[str, set[str]]:
+    """Which string values each column is restricted to, from = and IN alone.
+
+    Inequalities and LIKE are left out: they describe a range or a pattern rather
+    than a chosen value, and cannot be compared against a name in the question.
+    """
+    found: dict[str, set[str]] = {}
+    for node in tree.walk():
+        if isinstance(node, exp.EQ):
+            column, literal = node.left, node.right
+            if isinstance(column, exp.Column) and isinstance(literal, exp.Literal):
+                found.setdefault(column.name, set()).add(str(literal.this))
+        elif isinstance(node, exp.In) and isinstance(node.this, exp.Column):
+            for item in node.expressions:
+                if isinstance(item, exp.Literal):
+                    found.setdefault(node.this.name, set()).add(str(item.this))
+    return found
+
+
 def _aggregates_by(tree: exp.Expression, key: str) -> bool:
     """Whether the query resolves to one row per key somewhere along the way.
 
@@ -86,6 +105,9 @@ class AnalysisTools:
         # Set per turn so a query answering a question about entities can be told
         # when it counted rows instead.
         self.entity_keys: dict[str, str] = {}
+        # column -> the values it holds, so a filter can be checked against the
+        # value the question actually named.
+        self.dimension_values: dict[str, list[str]] = {}
         self.question = ""
         self.chart: Figure | None = None
         self.chart_spec: ChartSpec | None = None
@@ -119,10 +141,50 @@ class AnalysisTools:
             return _dump({"error": str(error)})
         self.results.append(result)
         payload = self.dataset.tool_payload(result)
-        note = self._grain_note(sql)
-        if note:
-            payload = {**payload, "grain_warning": note}
+        for name, note in (
+            ("grain_warning", self._grain_note(sql)),
+            ("filter_warning", self._substitution_note(sql)),
+        ):
+            if note:
+                payload = {**payload, name: note}
         return _dump(payload)
+
+    def _substitution_note(self, sql: str) -> str | None:
+        """Warn when the query filtered on a value the question did not ask for.
+
+        Asked about NATIONAL players, an answer once described REGIONAL ones. Both
+        are real values and the SQL is valid, so nothing fails — the answer is
+        simply about somebody else, and reads exactly as though it were not.
+
+        Only fires where the query does filter that column: a question naming a
+        value while grouping by the column is asking for a comparison, not a
+        filter, and has nothing to be wrong about.
+        """
+        if not self.question or not self.dimension_values:
+            return None
+        try:
+            tree = sqlglot.parse_one(sql, dialect="duckdb")
+        except Exception:
+            return None
+        filtered = _filtered_literals(tree)
+        for column, used in filtered.items():
+            known = self.dimension_values.get(column)
+            if not known:
+                continue
+            asked = [
+                value
+                for value in known
+                if re.search(rf"(?<!\w){re.escape(value)}(?!\w)", self.question, re.IGNORECASE)
+            ]
+            lowered = {value.lower() for value in used}
+            missing = [value for value in asked if value.lower() not in lowered]
+            if asked and missing:
+                return (
+                    f"The question names {', '.join(repr(v) for v in missing)} in {column}, but "
+                    f"this query filtered {column} on {', '.join(sorted(used))}. Answer about "
+                    f"what was asked, or say plainly which values the figure covers."
+                )
+        return None
 
     def _grain_note(self, sql: str) -> str | None:
         """Warn when a question about entities was answered by counting rows.
