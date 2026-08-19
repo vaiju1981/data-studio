@@ -24,6 +24,7 @@ import re
 from pathlib import Path
 
 import pytest
+from anchors import mentions
 
 from smart_data_studio.agent import DataAgent
 from smart_data_studio.dataset import CsvSource, Dataset
@@ -181,19 +182,6 @@ def agent():
         yield built
     finally:
         dataset.close()
-
-
-def mentions(text: str, value: float, tolerance: float = 0.01) -> bool:
-    """Is this number in the answer, however it happens to be formatted?
-
-    Matches 126.31, 126,310,000 and 126.31M alike, so a change in phrasing does
-    not fail the run while a change in the arithmetic does.
-    """
-    found = [float(token) for token in re.findall(r"-?\d+(?:\.\d+)?", text.replace(",", ""))]
-    scales = (value, value / 1e3, value / 1e6, value / 1e9)
-    return any(
-        abs(number - scale) <= abs(scale) * tolerance for number in found for scale in scales
-    )
 
 
 def test_understanding_is_a_grounded_summary(agent) -> None:

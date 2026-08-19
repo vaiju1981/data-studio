@@ -24,6 +24,7 @@ import os
 from pathlib import Path
 
 import pytest
+from anchors import mentions
 
 from smart_data_studio.agent import DataAgent
 from smart_data_studio.dataset import CsvSource, Dataset
@@ -95,22 +96,6 @@ def agent():
         yield built
     finally:
         dataset.close()
-
-
-def mentions(text: str, value: float, tolerance: float = 0.01) -> bool:
-    """Whether a number close to this appears, however the model formatted it."""
-    import re
-
-    for found in re.findall(r"-?[\d,]*\.?\d+", text.replace("$", "")):
-        try:
-            number = float(found.replace(",", ""))
-        except ValueError:
-            continue
-        if value == 0 and number == 0:
-            return True
-        if value and abs(number - value) <= abs(value) * tolerance:
-            return True
-    return False
 
 
 def joins_present(answer) -> list[str]:
