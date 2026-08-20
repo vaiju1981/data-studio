@@ -120,6 +120,63 @@ PLAYER_BANK: list[tuple[int, str, list[float]]] = [
 ]
 
 
+# All three at once — the shape nothing tested until now. Loading is 88s and
+# profiling 50s for 4.8GB, so this fixture is worth its own tier rather than being
+# spread across the others. Every question here needs all three: the club level and
+# geography are on visits, the money and the player are on sessions, and the
+# machine's make, cabinet and lease status are on the daily asset table.
+TRIO_BANK: list[tuple[int, str, list[float]]] = [
+    # Every question here names a column that exists on one file only, because the
+    # first draft did not and the model answered from two tables — correctly.
+    # sessions carries manufacturer, cabinetType and isLeased of its own, so asking
+    # about those never reaches the asset file at all.
+    #
+    # The visit join is spelled out too: clubLevel is per visit and changes over
+    # time, so "GOLD players" and "GOLD on the day of the session" are different
+    # questions with different answers. The model picked the second unprompted,
+    # which is the better reading, so it is the one asked for.
+    (
+        201,
+        "Match each session to the machine's asset record for that same day and to "
+        "the player's visit on that same day. Which game version and club level "
+        "combination has the highest total session coin in?",
+        [45_211_987],
+    ),
+    (
+        202,
+        "Match each session to the machine's asset record for that same day and to "
+        "the player's visit on that same day. For sessions where the visit's club "
+        "level is GOLD, what is the average peakUtil of the machine?",
+        [20.39],
+    ),
+    (
+        203,
+        "Match each session to the machine's asset record for that same day and to "
+        "the player's visit on that same day. For machines with paytableId 0, how "
+        "many sessions came from each geo type?",
+        [1_796_880],
+    ),
+]
+
+
+@pytest.fixture(scope="module")
+def trio():
+    """All three files. 4.8GB, so loaded once and shared by the tier."""
+    dataset = Dataset.load(
+        [
+            CsvSource.from_path(VISITS),
+            CsvSource.from_path(SESSIONS),
+            CsvSource.from_path(ASSETS),
+        ]
+    )
+    try:
+        built = DataAgent(dataset, profile_dataset(dataset))
+        built.build_understanding()
+        yield built
+    finally:
+        dataset.close()
+
+
 @pytest.fixture(scope="module")
 def agent():
     dataset = Dataset.load([CsvSource.from_path(SESSIONS), CsvSource.from_path(ASSETS)])
@@ -264,3 +321,48 @@ def test_a_measure_on_both_tables_is_taken_from_the_one_named(players) -> None:
         answer = players.ask(question, multi_turn=False, depth="never")
         assert mentions(answer.text, anchor), f"{question}: {answer.text[:220]}"
         assert not mentions(answer.text, wrong), f"{question} took the other table"
+
+
+@pytest.mark.parametrize(
+    ("number", "question", "anchors"), TRIO_BANK, ids=[f"t{item[0]}" for item in TRIO_BANK]
+)
+def test_trio_bank(trio, number, question, anchors) -> None:
+    """Three files at once, which nothing exercised before this tier.
+
+    Each question needs all three: the club level and geography live on visits,
+    the money and the player on sessions, and the machine's make, cabinet and
+    lease status on the daily asset table. Getting one wrong is a wrong number
+    rather than an error, which is the whole reason for anchoring.
+    """
+    answer = trio.ask(question, multi_turn=False, depth="never")
+
+    assert answer.text.strip(), f"t{number}: empty answer"
+    assert "could not finish" not in answer.text, f"t{number}: ran out of tool rounds"
+    assert answer.results, f"t{number}: answered without querying anything"
+    for anchor in anchors:
+        assert mentions(answer.text, anchor), (
+            f"t{number}: expected ~{anchor:,} in:\n{answer.text[:400]}"
+        )
+
+
+def test_the_three_file_chain_is_joined_on_complete_keys(trio) -> None:
+    """sessions to assets needs (assetId, day), and both mistakes give a number
+    rather than an error.
+
+    The question names peakUtil deliberately: it exists only on the asset file, so
+    the chain cannot be short-circuited. An earlier draft asked about leased
+    machines and manufacturers, which sessions carries itself — the model answered
+    from two tables and was right to.
+    """
+    answer = trio.ask(
+        "Match each session to the machine's asset record for that same day and to "
+        "the player's visit on that same day. For sessions where the visit's club "
+        "level is GOLD, what is the average peakUtil of the machine?",
+        multi_turn=False,
+        depth="never",
+    )
+    assert mentions(answer.text, 20.39), answer.text[:300]
+    for result in answer.results:
+        flat = " ".join(result.sql.split()).lower()
+        if "assetdaily" in flat and " join " in flat:
+            assert "day" in flat, f"joined the asset table without day:\n{flat[:220]}"
