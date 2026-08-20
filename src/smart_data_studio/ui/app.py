@@ -44,6 +44,7 @@ def main() -> None:
 
     render.summary(st.session_state.profiles)
     render.lineage_panel(st.session_state.dataset)
+    render.relationship_panel(st.session_state.agent)
     render.profile_panel(st.session_state.profiles)
     _conversation()
 
@@ -252,6 +253,8 @@ def _load(uploads: list[object], paths: str, chosen: list[str] | None = None) ->
         try:
             with st.spinner("Exploring your data…"):
                 st.session_state.understanding = agent.build_understanding()
+                # After exploring, so the proposal sees what exploring established.
+                agent.propose_relationships()
         except Exception as error:
             st.session_state.understanding = ""
             # The profile is already computed and shown; only the written summary

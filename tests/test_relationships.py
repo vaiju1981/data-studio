@@ -230,7 +230,7 @@ def test_the_incomplete_join_is_refused_before_it_runs(data) -> None:
     refusal = guard(
         data, "SELECT SUM(s.coinIn) FROM sessions s JOIN assets a ON s.assetId=a.assetId"
     )
-    assert refusal and "repeats rows of sessions" in refusal
+    assert refusal and "repeats rows of s (sessions)" in refusal
     assert "add the rest of its key" in refusal
 
 
@@ -284,10 +284,6 @@ def test_a_derived_relation_that_fixed_its_own_grain_is_allowed(data) -> None:
 @pytest.mark.parametrize(
     ("shape", "sql"),
     [
-        (
-            "self-join",
-            "SELECT SUM(x.coinIn) FROM sessions x JOIN sessions y ON x.assetId=y.assetId",
-        ),
         ("range", "SELECT SUM(s.coinIn) FROM sessions s JOIN assets a ON s.assetId>=a.assetId"),
         (
             "expression",
@@ -313,7 +309,7 @@ def test_aliases_and_casing_resolve_to_the_right_tables(data) -> None:
     refusal = guard(
         data, "SELECT SUM(X.CoinIn) FROM SESSIONS AS X JOIN Assets AS Y ON X.AssetId = Y.AssetId"
     )
-    assert refusal and "repeats rows of sessions" in refusal
+    assert refusal and "repeats rows of x (sessions)" in refusal
 
 
 def test_using_is_understood(data) -> None:
@@ -655,3 +651,62 @@ def test_only_the_aggregates_repetition_actually_breaks_are_refused(
         assert bool(note) is noted, f"{label}: {note}"
     finally:
         dataset.close()
+
+
+# --- M4: shapes whose grain can now be proved -----------------------------------
+
+
+@pytest.mark.parametrize(
+    ("label", "sql", "refused"),
+    [
+        (
+            "a self-join that multiplies is refused for that, not for being a self-join",
+            "SELECT sum(x.coinIn) FROM sessions x JOIN sessions y ON x.assetId = y.assetId",
+            True,
+        ),
+        (
+            "a self-join on a key that does not repeat is allowed",
+            "SELECT sum(x.coinIn) FROM sessions x "
+            "JOIN sessions y ON x.assetId = y.assetId AND x.day = y.day",
+            False,
+        ),
+        (
+            "a right join is measured like any other",
+            "SELECT sum(s.coinIn) FROM sessions s RIGHT JOIN assets a ON s.assetId = a.assetId",
+            True,
+        ),
+        (
+            "a full join likewise",
+            "SELECT sum(s.coinIn) FROM sessions s FULL JOIN assets a ON s.assetId = a.assetId",
+            True,
+        ),
+        (
+            "and they are allowed when the key is complete",
+            "SELECT sum(s.coinIn) FROM sessions s "
+            "RIGHT JOIN assets a ON s.assetId = a.assetId AND s.day = a.day",
+            False,
+        ),
+    ],
+)
+def test_shapes_whose_grain_can_be_proved_are_measured_rather_than_refused(
+    data, label, sql, refused
+) -> None:
+    """A self-join was refused outright for being one, which is a real cost —
+    period-over-period comparisons are written that way. Multiplication is a
+    property of the join key, and it is measurable however many times a table
+    appears, once each side is tracked by its alias rather than its name.
+
+    RIGHT and FULL change which unmatched rows survive, not which rows repeat, and
+    repetition is the whole question here.
+    """
+    verdict = guard(data, sql)
+    assert bool(verdict) is refused, f"{label}: {verdict}"
+
+
+def test_a_self_join_names_the_side_that_repeats(data) -> None:
+    """Both sides are the same table, so the alias is the only thing that tells
+    them apart — and it is what the query itself wrote."""
+    refusal = guard(
+        data, "SELECT sum(x.coinIn) FROM sessions x JOIN sessions y ON x.assetId = y.assetId"
+    )
+    assert "x (sessions)" in refusal, refusal

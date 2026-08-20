@@ -298,6 +298,10 @@ class Verified:
         """Some row on either side finds no partner, whatever the cardinality."""
         return bool(self.left.unmatched or self.right.unmatched)
 
+    def multiplies_side(self, side: str) -> bool:
+        """Whether rows of the left or right side repeat. See multiplies()."""
+        return (self.left if side == "left" else self.right).max_partners > 1
+
     def multiplies(self, table: str) -> bool:
         """Whether rows of this table actually repeat in the output.
 
@@ -453,6 +457,24 @@ def _sources(tree: exp.Expression, tables: set[str]) -> dict[str, Source]:
     return found
 
 
+def _column_alias(column: exp.Column, sources: dict[str, Source], dataset: Dataset) -> str | None:
+    """Which relation in this query a column reads from, by alias.
+
+    Alias rather than table: a self-join names one table twice, and asking which
+    *table* a column came from cannot tell the two sides apart.
+    """
+    qualifier = (column.table or "").lower()
+    if qualifier:
+        return qualifier if qualifier in sources else None
+    owners = [
+        alias
+        for alias, source in sources.items()
+        if source.table
+        and any(name.lower() == column.name.lower() for name, _ in dataset.schema(source.table))
+    ]
+    return owners[0] if len(owners) == 1 else None
+
+
 def _column_owner(column: exp.Column, sources: dict[str, Source], dataset: Dataset) -> str | None:
     """Which loaded table a column reads from, following its alias when it has one."""
     qualifier = (column.table or "").lower()
@@ -570,7 +592,7 @@ def preflight(
     weighted: str | None = None
     for node in aggregates:
         for column in node.find_all(exp.Column):
-            owner = _column_owner(column, sources, dataset)
+            owner = _column_alias(column, sources, dataset)
             if owner not in multiplying:
                 continue
             if isinstance(node, (exp.Sum, exp.Count)):
@@ -588,18 +610,15 @@ def preflight(
 
 def _unsupported(tree: exp.Expression, joins: list, sources: dict[str, Source]) -> str | None:
     """The shapes whose output grain the first version cannot prove."""
-    base = [source.table for source in sources.values() if source.table]
-    if len(base) != len(set(base)):
-        return "a table is joined to itself"
     # A window function is deliberately not refused. It adds columns and never
     # multiplies rows, so it cannot cause fan-out; what it cannot do is *prove* a
     # grain, and the grain logic simply never credits one. Refusing outright
     # blocked ordinary analysis — a LAG inside a CTE cost a bank question its
     # rounds — for a risk windows do not carry.
     for join in joins:
-        side = (join.args.get("side") or "").upper()
-        if side in {"RIGHT", "FULL"}:
-            return f"{side.lower()} join"
+        # RIGHT and FULL change which unmatched rows survive, not which rows
+        # repeat, and repetition is the whole question here. A self-join is
+        # measurable too, now that each side is tracked by its alias.
         if (join.args.get("kind") or "").upper() == "CROSS":
             return "cross join"
         if join.args.get("using"):
@@ -698,9 +717,9 @@ def _join_multiplication(
             cache[key] = measured
 
     found: dict[str, str] = {}
-    for table in (left_source.table, right_source.table):
-        if measured.multiplies(table):
-            found[table] = _explain(measured, table)
+    for alias, side in ((left_alias, "left"), (right_alias, "right")):
+        if measured.multiplies_side(side):
+            found[alias] = _explain(measured, side, alias)
     return found
 
 
@@ -716,14 +735,21 @@ def _derived_is_unique(source: Source, columns: list[str]) -> bool:
     return bool(source.unique_on) and {c.lower() for c in columns} <= source.unique_on
 
 
-def _explain(measured: Verified, table: str) -> str:
+def _name(alias: str, ref: Ref) -> str:
+    """The alias the query used, and the table behind it when they differ."""
+    return alias if alias == ref.table else f"{alias} ({ref.table})"
+
+
+def _explain(measured: Verified, side: str, alias: str) -> str:
     """What repeats, by how much, and the key that would stop it."""
-    other = measured.right if table == measured.left.ref.table else measured.left
-    mine = measured.left if table == measured.left.ref.table else measured.right
+    mine, other = (
+        (measured.left, measured.right) if side == "left" else (measured.right, measured.left)
+    )
+    alias = _name(alias, mine.ref)
     return (
-        f"This join repeats rows of {table}: one of its rows matches up to "
+        f"This join repeats rows of {alias}: one of its rows matches up to "
         f"{mine.max_partners:,} rows of {other.ref.table}, producing "
-        f"{measured.joined_rows:,} rows from {mine.rows:,}. Totalling a {table} column "
+        f"{measured.joined_rows:,} rows from {mine.rows:,}. Totalling a {alias} column "
         f"over that counts it once per match. {other.ref.table} is not unique on "
         f"{', '.join(other.ref.columns)} — add the rest of its key to the join, or "
         f"aggregate {other.ref.table} to one row per key first."

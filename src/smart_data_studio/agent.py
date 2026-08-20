@@ -109,6 +109,17 @@ def _shed_context(messages: list[dict[str, Any]]) -> bool:
     return False
 
 
+RELATE_PROMPT = """Say which columns join these tables.
+
+Reply with a JSON array and nothing else. Each item:
+{"kind": "join", "left": {"table": "...", "columns": ["..."]},
+ "right": {"table": "...", "columns": ["..."]}, "reason": "one short line"}
+
+Give the *complete* key. A table of one row per machine per day is joined on both
+the machine and the day; joining on the machine alone multiplies every row by every
+day it existed. Prefer few, correct joins over many plausible ones, and reply with
+[] when the tables are unrelated."""
+
 EXPLORE_PROMPT = """Explore this dataset with SQL before drawing any conclusion.
 Run several queries: read real values, check how low-cardinality columns are distributed,
 find the range of dates and numbers, and look for negatives, zeros or placeholder values
@@ -194,6 +205,18 @@ _HEDGE = re.compile(
 )
 
 
+def _first_json_list(text: str) -> list[dict]:
+    """The JSON array in a reply, whatever prose or fencing surrounds it."""
+    start, end = text.find("["), text.rfind("]")
+    if start < 0 or end <= start:
+        return []
+    try:
+        found = json.loads(text[start : end + 1])
+    except ValueError:
+        return []
+    return [item for item in found if isinstance(item, dict)] if isinstance(found, list) else []
+
+
 def _looks_like_a_data_claim(text: str) -> bool:
     return bool(_CLAIM.search(text)) and not _HEDGE.search(text)
 
@@ -247,6 +270,7 @@ class DataAgent:
         }
         self.understanding = ""
         self.metrics = ""
+        self.relationships = relationships.Proposals()
         self.messages: list[dict[str, Any]] = [{"role": "system", "content": self._system_prompt()}]
 
     def set_metrics(self, metrics: str) -> bool:
@@ -435,6 +459,48 @@ class DataAgent:
             plan=plan,
             assumptions=self.tools.unresolved[first_assumption:],
         )
+
+    def propose_relationships(self) -> relationships.Proposals:
+        """Ask the model which columns relate these tables, then measure each.
+
+        The model reads names, profiles and samples and is good at this — better
+        than any overlap heuristic, which mistook an 85.7% numeric coincidence for
+        a relationship. What it cannot do is know whether a join multiplies, so
+        every proposal it survives validation is measured before it is described.
+
+        Skipped for one table, which has nothing to relate to.
+        """
+        if len(self.dataset.tables) < 2:
+            return relationships.Proposals()
+        try:
+            reply = (
+                self._chat(
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": f"Schema:\n{self.dataset.schema_text()}\n\n{RELATE_PROMPT}",
+                        },
+                        {"role": "user", "content": "Which columns relate these tables?"},
+                    ]
+                ).message.content
+                or ""
+            )
+        except Exception:
+            logs.failure("propose.failed")
+            return relationships.Proposals()
+
+        raw = _first_json_list(reply)
+        found = relationships.validate(self.dataset, raw)
+        logs.event("propose.made", joins=len(found.joins), rejected=len(found.rejected))
+        for candidate in found.joins:
+            try:
+                self.tools._join_facts[(candidate.left, candidate.right)] = relationships.verify(
+                    self.dataset, candidate
+                )
+            except Exception:
+                logs.failure("propose.verify_failed")
+        self.relationships = found
+        return found
 
     def _chat_tools(self) -> list[Callable[..., str]]:
         return [

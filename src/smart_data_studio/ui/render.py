@@ -247,6 +247,67 @@ def _repair(dataset: Dataset) -> None:
         st.caption(st.session_state.pop("repair_note"))
 
 
+def relationship_panel(agent) -> None:
+    """Candidates, what measuring them showed, and whether you agree.
+
+    Structural and semantic are kept apart on purpose. A 100% match on a unique
+    key still only proves what the join does to these rows — two unrelated id
+    columns can coincide, and one pair here overlapped 85.7% by accident. So the
+    wording is "structurally compatible", never "related", and confirming is
+    yours to do.
+    """
+    found = getattr(agent, "relationships", None)
+    if not found or not (found.joins or found.rejected):
+        return
+    with st.expander(f"How the tables relate · {len(found.joins)} candidate(s)", expanded=False):
+        st.caption(
+            "Proposed by the model, then measured here. Measuring shows what a join "
+            "does to these rows; it cannot show that the columns mean the same thing."
+        )
+        for index, candidate in enumerate(found.joins):
+            facts = agent.tools._join_facts.get((candidate.left, candidate.right))
+            with st.container(border=True):
+                st.markdown(f"**{candidate}**")
+                if candidate.reason:
+                    st.caption(candidate.reason)
+                if facts is None:
+                    st.caption("Not measured.")
+                else:
+                    multiplies = [
+                        side.ref.table
+                        for side, name in ((facts.left, "left"), (facts.right, "right"))
+                        if facts.multiplies_side(name)
+                    ]
+                    st.markdown(
+                        f"- {facts.cardinality}, producing {facts.joined_rows:,} rows"
+                        + (f" — repeats {', '.join(multiplies)}" if multiplies else "")
+                    )
+                    if facts.partial:
+                        st.markdown(
+                            f"- {facts.left.unmatched:,} left and {facts.right.unmatched:,} "
+                            "right rows match nothing"
+                        )
+                _confirmation(index, candidate)
+        for reason in found.rejected:
+            st.caption(f"Not usable — {reason}")
+
+
+def _confirmation(index: int, candidate) -> None:
+    """Yours to say. A rejected candidate stops being offered as a join path."""
+    key = f"relationship-{index}"
+    status = st.session_state.get("relationship_status", {}).get(str(candidate))
+    if status:
+        st.caption(f"You marked this **{status}**.")
+        return
+    left, right = st.columns(2)
+    if left.button("Makes sense", key=f"{key}-yes", use_container_width=True):
+        st.session_state.setdefault("relationship_status", {})[str(candidate)] = "meaningful"
+        st.rerun()
+    if right.button("Not meaningful", key=f"{key}-no", use_container_width=True):
+        st.session_state.setdefault("relationship_status", {})[str(candidate)] = "rejected"
+        st.rerun()
+
+
 def profile_panel(profiles: list[TableProfile]) -> None:
     with st.expander("Data profile", expanded=False):
         for profile in profiles:
