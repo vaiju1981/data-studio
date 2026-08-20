@@ -271,9 +271,14 @@ def discover_keys(
         for name, kind in dataset.schema(table)
         if any(part in kind.upper() for part in ("DOUBLE", "FLOAT", "DECIMAL", "REAL"))
     }
+    # Identifier-named columns first, then by distinct count. Ranking on count
+    # alone offered jackpots ahead of assetId, because a measure carries plenty of
+    # values and identifies nothing — but excluding every integer instead hid
+    # composite keys made of them, so the name decides the order rather than
+    # membership.
     ranked = sorted(
         ((name, count) for name, count in distinct_by_column.items() if name not in measures),
-        key=lambda item: -item[1],
+        key=lambda item: (not _looks_like_identifier(item[0]), -item[1]),
     )
     if not ranked:
         return []
@@ -282,16 +287,30 @@ def discover_keys(
     # candidate on its own meant up to twenty-one passes over the same table.
     singles = _measure_keys(dataset, table, [(name,) for name in names])
     exact = [facts for facts in singles if facts.unique]
-    if exact:
-        return exact[:MAX_KEY_CANDIDATES]
+    # An identifier that is unique is a key. A measure that is unique is a
+    # coincidence of the data — jackpots was offered as the key of an asset table
+    # because its values happened not to repeat — so a composite of identifiers is
+    # looked for first, and the coincidence kept only as a fallback.
+    named = [facts for facts in exact if _looks_like_identifier(facts.ref.columns[0])]
+    if named:
+        return named[:MAX_KEY_CANDIDATES]
 
+    # Minimality, as the plan requires: a pair containing an already-unique column
+    # is unique for that reason alone and says nothing. Without this the search
+    # offered (assetId, jackpots) — unique only because jackpots was.
+    already = {facts.ref.columns[0] for facts in exact}
+    open_names = [name for name in names if name not in already]
     combinations = [
-        (first, second) for index, first in enumerate(names) for second in names[index + 1 :]
+        (first, second)
+        for index, first in enumerate(open_names)
+        for second in open_names[index + 1 :]
     ]
     pairs = _measure_keys(dataset, table, combinations)
     unique = [facts for facts in pairs if facts.unique]
     if unique:
         return unique[:MAX_KEY_CANDIDATES]
+    if exact:
+        return exact[:MAX_KEY_CANDIDATES]  # nothing better than the coincidence
 
     # Nothing identifies a row exactly. The nearest set is still the thing worth
     # saying: (assetId, day) at 11,420 values across 11,421 rows is what a join
@@ -523,6 +542,13 @@ def _sources(tree: exp.Expression, tables: set[str]) -> dict[str, Source]:
     return found
 
 
+def _is_distinct(node: exp.Expression) -> bool:
+    """Whether this aggregate reads distinct values, which repetition cannot alter."""
+    if node.args.get("distinct"):
+        return True
+    return isinstance(node.this, exp.Distinct)
+
+
 def _column_alias(column: exp.Column, sources: dict[str, Source], dataset: Dataset) -> str | None:
     """Which relation in this query a column reads from, by alias.
 
@@ -660,10 +686,23 @@ def preflight(
     for node in aggregates:
         if isinstance(node, (exp.Min, exp.Max)):
             continue  # unaffected by how often a row appears
+        if _is_distinct(node):
+            # Counting or summing distinct values cannot be changed by repeating
+            # rows — that is what DISTINCT is for, and refusing it turned the
+            # standard way of writing a safe count into an error.
+            continue
         owners = [_column_alias(column, sources, dataset) for column in node.find_all(exp.Column)]
         hit = next((owner for owner in owners if owner in multiplying), None)
-        if hit is None and any(owners):
-            continue  # every column traced, none of them to a repeated relation
+        # A column reaching us through a derived relation is not traced, it is
+        # merely renamed: sum(w.v) over a subquery that joins inside itself was
+        # allowed because w resolved, while what w selects was never examined.
+        traced = [
+            owner
+            for owner in owners
+            if owner and (source := sources.get(owner)) and source.table is not None
+        ]
+        if hit is None and traced and len(traced) == len(owners):
+            continue  # every column traced to a base relation, none repeated
         if hit is None:
             # Nothing to trace: COUNT(*), SUM(1), or a column projected out of a
             # subquery under an alias. All of them read the joined output, which is
@@ -855,10 +894,15 @@ def _cached_key(join: exp.Join, sources: dict[str, Source], dataset: Dataset):
     """The cache key for this join, or None when it is not a simple base pair."""
     condition = join.args.get("on")
     if condition is None:
-        return None
-    pairs, simple = _join_refs(condition, sources, dataset)
-    if not simple or len(pairs) != 2:
-        return None
+        using = [item.name for item in join.args.get("using") or []]
+        left, right = _using_sides(join, sources, using) if using else (None, None)
+        if not using or left is None or right is None:
+            return None
+        pairs = {left: using, right: using}
+    else:
+        pairs, simple = _join_refs(condition, sources, dataset)
+        if not simple or len(pairs) != 2:
+            return None
     refs = []
     for alias, columns in pairs.items():
         source = sources.get(alias)

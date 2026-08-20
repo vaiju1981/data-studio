@@ -883,15 +883,49 @@ def test_an_aggregate_that_cannot_be_traced_is_not_thereby_safe(
     assert bool(verdict) is refused, f"{finding}: {verdict}"
 
 
-def test_dropped_rows_are_reported_even_when_something_also_repeats(pair) -> None:
-    """The note used to be reachable only when nothing multiplied, so a query that
-    both repeated rows and dropped them mentioned only the repetition."""
+@pytest.fixture
+def lopsided():
+    """One asset-day with no session, one session with no asset."""
+    dataset = Dataset.load(
+        [
+            CsvSource.from_upload("sessions.csv", b"assetId,day,coinIn\n1,x,10\n9,z,50\n"),
+            CsvSource.from_upload("assets.csv", b"assetId,day,fee\n1,x,100\n7,q,700\n"),
+        ]
+    )
+    try:
+        yield dataset
+    finally:
+        dataset.close()
+
+
+@pytest.mark.parametrize(
+    ("label", "sql"),
+    [
+        (
+            "an ordinary ON clause",
+            "SELECT sum(s.coinIn) FROM sessions s "
+            "JOIN assets a ON s.assetId = a.assetId AND s.day = a.day",
+        ),
+        (
+            "a USING clause, which names no columns to parse",
+            "SELECT sum(coinIn) FROM sessions JOIN assets USING (assetId, day)",
+        ),
+    ],
+)
+def test_an_inner_join_that_drops_rows_says_which_and_how_many(lopsided, label, sql) -> None:
+    """Nothing multiplies, so nothing is double counted — the total is simply
+    short, and a short total looks exactly as reasonable as a correct one.
+
+    The previous version of this test asserted `note is None or isinstance(note,
+    str)`, which no regression could ever fail. It also happened to use rows that
+    all matched, so there was nothing to report either way.
+    """
     cache: dict = {}
-    sql = "SELECT min(s.coinIn) FROM sessions s JOIN assets a ON s.assetId = a.assetId"
-    relationships.preflight(pair, sql, cache)
-    refusal, note = relationships.preflight(pair, sql, cache)
-    assert refusal is None, "MIN is unaffected by repetition and must still run"
-    assert note is None or isinstance(note, str)
+    relationships.preflight(lopsided, sql, cache)  # measure
+    refusal, note = relationships.preflight(lopsided, sql, cache)
+    assert refusal is None, f"{label}: a complete join must still run"
+    assert note and "leaves rows out" in note, f"{label}: {note}"
+    assert "1 rows of sessions" in note and "1 of assets" in note, note
 
 
 def test_an_integer_can_be_part_of_a_composite_key() -> None:
@@ -903,6 +937,66 @@ def test_an_integer_can_be_part_of_a_composite_key() -> None:
     try:
         found = relationships.discover_keys(dataset, "a", {"assetId": 3, "day": 7, "fee": 1})
         assert found, "no key offered for a table keyed on two integers"
+        assert set(found[0].ref.columns) == {"assetId", "day"}, found[0].ref
+    finally:
+        dataset.close()
+
+
+@pytest.mark.parametrize(
+    ("label", "sql", "refused"),
+    [
+        (
+            "an alias that only renames a column from a joined subquery",
+            "SELECT sum(w.v) FROM (SELECT a.fee AS v FROM sessions s "
+            "JOIN assets a ON s.assetId = a.assetId) w",
+            True,
+        ),
+        (
+            "the same subquery joined on its whole key",
+            "SELECT sum(w.v) FROM (SELECT s.coinIn AS v FROM sessions s "
+            "JOIN assets a ON s.assetId = a.assetId AND s.day = a.day) w",
+            False,
+        ),
+        (
+            "COUNT DISTINCT, which repetition cannot change",
+            "SELECT count(DISTINCT s.assetId) FROM sessions s "
+            "JOIN assets a ON s.assetId = a.assetId",
+            False,
+        ),
+        (
+            "SUM DISTINCT likewise",
+            "SELECT sum(DISTINCT a.fee) FROM sessions s JOIN assets a ON s.assetId = a.assetId",
+            False,
+        ),
+        (
+            "a plain COUNT of the same column is not",
+            "SELECT count(s.assetId) FROM sessions s JOIN assets a ON s.assetId = a.assetId",
+            True,
+        ),
+    ],
+)
+def test_renaming_a_column_does_not_launder_it(pair, label, sql, refused) -> None:
+    """`sum(w.v)` resolved `w`, so the column counted as traced — but `w` is a
+    subquery that joins inside itself, and what it selects was never examined. An
+    alias renames a column; it does not vouch for it.
+
+    DISTINCT is the other half: repetition cannot change a distinct count, and
+    refusing it turned the standard way of writing a safe count into an error.
+    """
+    verdict, _ = relationships.preflight(pair, sql, {})
+    assert bool(verdict) is refused, f"{label}: {verdict}"
+
+
+def test_an_identifier_outranks_a_measure_with_more_values() -> None:
+    """Ranking on distinct count alone offered jackpots ahead of assetId; excluding
+    every integer instead hid composite keys made of integers. The name decides the
+    order rather than membership."""
+    rows = ["assetId,day,jackpots"]
+    rows += [f"{a},2024010{d},{a * 1000 + d}" for a in (1, 2, 3) for d in range(1, 8)]
+    dataset = Dataset.load([CsvSource.from_upload("a.csv", ("\n".join(rows) + "\n").encode())])
+    try:
+        found = relationships.discover_keys(dataset, "a", {"assetId": 3, "day": 7, "jackpots": 21})
+        assert found, "no key offered"
         assert set(found[0].ref.columns) == {"assetId", "day"}, found[0].ref
     finally:
         dataset.close()
