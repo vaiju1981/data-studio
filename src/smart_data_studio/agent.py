@@ -506,6 +506,9 @@ class DataAgent:
             except Exception:
                 logs.failure("propose.verify_failed")
         self.relationships = found
+        # Rebuild the prompt: exploring already wrote messages[0], so a proposal
+        # made afterwards would otherwise never reach the conversation it is for.
+        self.messages[0] = {"role": "system", "content": self._system_prompt()}
         return found
 
     def set_relationship_verdict(self, candidate: str, verdict: str) -> None:

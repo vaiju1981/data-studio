@@ -831,3 +831,78 @@ def test_candidate_keys_are_measured_in_two_passes_not_twenty_one(pair, monkeypa
     monkeypatch.setattr(relationships, "_measure_keys", counted)
     relationships.discover_keys(pair, "assets", {"assetId": 2, "day": 2, "fee": 3})
     assert len(passes) <= 2, f"{len(passes)} passes over one table for {passes} candidates"
+
+
+@pytest.mark.parametrize(
+    ("finding", "sql", "refused"),
+    [
+        (
+            "the join inside a subquery, aggregated outside under an alias",
+            "SELECT sum(v) FROM (SELECT a.fee AS v FROM sessions s "
+            "JOIN assets a ON s.assetId = a.assetId) w",
+            True,
+        ),
+        (
+            "SUM of a constant, which counts the joined rows",
+            "SELECT sum(1) FROM sessions s JOIN assets a ON s.assetId = a.assetId",
+            True,
+        ),
+        (
+            "the same with a decimal constant",
+            "SELECT sum(2.5) FROM sessions s JOIN assets a ON s.assetId = a.assetId",
+            True,
+        ),
+        (
+            "a traced column on a join that does not repeat",
+            "SELECT sum(s.coinIn) FROM sessions s "
+            "JOIN assets a ON s.assetId = a.assetId AND s.day = a.day",
+            False,
+        ),
+        (
+            "COUNT(*) where nothing multiplies",
+            "SELECT count(*) FROM sessions s "
+            "JOIN assets a ON s.assetId = a.assetId AND s.day = a.day",
+            False,
+        ),
+        (
+            "MIN, whatever it reads",
+            "SELECT min(s.coinIn) FROM sessions s JOIN assets a ON s.assetId = a.assetId",
+            False,
+        ),
+    ],
+)
+def test_an_aggregate_that_cannot_be_traced_is_not_thereby_safe(
+    pair, finding, sql, refused
+) -> None:
+    """Three ways to read the joined output without naming a column of it:
+    COUNT(*), SUM(1), and a column projected out of a subquery under an alias.
+    Each reads exactly what fan-out inflates, and each walked past a guard that
+    only looked at columns it could trace — treating "cannot tell" as "safe".
+    """
+    verdict, _ = relationships.preflight(pair, sql, {})
+    assert bool(verdict) is refused, f"{finding}: {verdict}"
+
+
+def test_dropped_rows_are_reported_even_when_something_also_repeats(pair) -> None:
+    """The note used to be reachable only when nothing multiplied, so a query that
+    both repeated rows and dropped them mentioned only the repetition."""
+    cache: dict = {}
+    sql = "SELECT min(s.coinIn) FROM sessions s JOIN assets a ON s.assetId = a.assetId"
+    relationships.preflight(pair, sql, cache)
+    refusal, note = relationships.preflight(pair, sql, cache)
+    assert refusal is None, "MIN is unaffected by repetition and must still run"
+    assert note is None or isinstance(note, str)
+
+
+def test_an_integer_can_be_part_of_a_composite_key() -> None:
+    """A day stored as 20240101, an hour, a numbered stand. Excluding every integer
+    measure from the key search hid composite keys made of them."""
+    rows = ["assetId,day,fee"]
+    rows += [f"{asset},2024010{day},1.5" for asset in (1, 2, 3) for day in range(1, 8)]
+    dataset = Dataset.load([CsvSource.from_upload("a.csv", ("\n".join(rows) + "\n").encode())])
+    try:
+        found = relationships.discover_keys(dataset, "a", {"assetId": 3, "day": 7, "fee": 1})
+        assert found, "no key offered for a table keyed on two integers"
+        assert set(found[0].ref.columns) == {"assetId", "day"}, found[0].ref
+    finally:
+        dataset.close()

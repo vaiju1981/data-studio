@@ -197,6 +197,7 @@ def _forget() -> None:
     """
     sessions.release(st.session_state.session_id)
     recent.forget()
+    st.session_state.relationship_status = {}
     st.session_state.chosen_paths = []
     for key in ("dataset", "agent"):
         st.session_state[key] = None
@@ -250,6 +251,8 @@ def _load(uploads: list[object], paths: str, chosen: list[str] | None = None) ->
         for stale in [key for key in st.session_state if str(key).startswith("export-")]:
             del st.session_state[stale]
         st.session_state.insight_error = ""
+        # Verdicts describe the workspace that is going away, not the new one.
+        st.session_state.relationship_status = {}
         try:
             with st.spinner("Exploring your data…"):
                 st.session_state.understanding = agent.build_understanding()

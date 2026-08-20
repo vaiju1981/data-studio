@@ -263,7 +263,14 @@ def discover_keys(
     rows = dataset.row_count(table)
     if rows < 2:
         return []
-    measures = measure_columns(dataset, table)
+    # Floats only. An integer is a perfectly good key component — a day stored as
+    # 20240101, an hour, a numbered stand — and excluding every integer measure
+    # from the search hid composite keys made of them.
+    measures = {
+        name
+        for name, kind in dataset.schema(table)
+        if any(part in kind.upper() for part in ("DOUBLE", "FLOAT", "DECIMAL", "REAL"))
+    }
     ranked = sorted(
         ((name, count) for name, count in distinct_by_column.items() if name not in measures),
         key=lambda item: -item[1],
@@ -645,40 +652,42 @@ def preflight(
             ), None
         multiplying.update(note)
 
+    dropped = _dropped_note(dataset, joins, sources, cache)
     if not multiplying:
-        return None, _dropped_note(dataset, joins, sources, cache)
+        return None, dropped
 
     weighted: str | None = None
     for node in aggregates:
-        # COUNT(*) and COUNT(1) have no column to attribute, and count the output
-        # rows — which is exactly what fan-out inflates. Reading only columns meant
-        # the commonest aggregate of all walked straight past the guard.
-        if isinstance(node, exp.Count) and not list(node.find_all(exp.Column)):
+        if isinstance(node, (exp.Min, exp.Max)):
+            continue  # unaffected by how often a row appears
+        owners = [_column_alias(column, sources, dataset) for column in node.find_all(exp.Column)]
+        hit = next((owner for owner in owners if owner in multiplying), None)
+        if hit is None and any(owners):
+            continue  # every column traced, none of them to a repeated relation
+        if hit is None:
+            # Nothing to trace: COUNT(*), SUM(1), or a column projected out of a
+            # subquery under an alias. All of them read the joined output, which is
+            # the thing fan-out inflates — and treating "cannot tell" as "safe" is
+            # how each of them walked past.
             first = next(iter(multiplying.values()))
             return (
-                f"{first} This counts rows of the join itself, so it is that "
-                f"multiplied figure. Count a key with COUNT(DISTINCT ...), or fix the "
-                f"grain first."
+                f"{first} This aggregate reads the joined output rather than a column "
+                f"that can be traced to one side, so it carries that multiplication. "
+                f"Aggregate a named column, or fix the grain first."
             ), None
-        for column in node.find_all(exp.Column):
-            owner = _column_alias(column, sources, dataset)
-            if owner not in multiplying:
-                continue
-            if isinstance(node, (exp.Min, exp.Max)):
-                continue  # unaffected by how often a row appears
-            if isinstance(node, exp.Avg):
-                weighted = (
-                    f"{owner}.{column.name} is averaged over a join that repeats "
-                    f"{owner} rows, so each value counts once per matching row. That is a "
-                    f"weighted average — right if the weighting was intended, and not the "
-                    f"same as the average over {owner} alone."
-                )
-                continue
-            # Everything else is refused, including aggregates this cannot name.
-            # Listing the harmful ones instead let total() through as though it
-            # were as safe as MIN, when it is a SUM by another spelling.
-            return multiplying[owner], None
-    return None, weighted
+        if isinstance(node, exp.Avg):
+            weighted = (
+                f"{hit} is averaged over a join that repeats its rows, so each value "
+                f"counts once per matching row. That is a weighted average — right if "
+                f"the weighting was intended, and not the same as the average over "
+                f"{hit} alone."
+            )
+            continue
+        # Everything else is refused, including aggregates this cannot name.
+        return multiplying[hit], None
+
+    # Both can be true: nothing was refused, rows repeat *and* rows were dropped.
+    return None, "  ".join(note for note in (weighted, dropped) if note) or None
 
 
 def _unsupported(tree: exp.Expression, joins: list, sources: dict[str, Source]) -> str | None:
