@@ -33,11 +33,12 @@ from smart_data_studio.profile import profile_dataset
 DATA = Path("~/ga_cache/training_data").expanduser()
 SESSIONS = DATA / "STATION_sessions_REDROCK.csv"
 ASSETS = DATA / "STATION_assetDaily_REDROCK.csv"
+VISITS = DATA / "STATION_playerVisits_REDROCK.csv"
 
 pytestmark = [
     pytest.mark.skipif(
-        not (SESSIONS.is_file() and ASSETS.is_file()),
-        reason=f"the session and asset files are not both present in {DATA}",
+        not (SESSIONS.is_file() and ASSETS.is_file() and VISITS.is_file()),
+        reason=f"the three REDROCK files are not all present in {DATA}",
     ),
     pytest.mark.skipif(
         os.environ.get("USE_LLM") != "1",
@@ -84,9 +85,56 @@ BANK: list[tuple[int, str, list[float]]] = [
 ]
 
 
+# The second pair, and the one that pushed this bank past a single shape: player
+# behaviour rather than machine detail. 7,857,098 visits and 2,291,518 sessions
+# over 460,442 and 77,460 players — so most players have no session at all, and
+# joining the two on playerId alone multiplies one player's 419 visits by their
+# 9 sessions. They also share coinIn, netWin, jackpots and day.
+PLAYER_BANK: list[tuple[int, str, list[float]]] = [
+    # Tier 1 — one side answers it, and noticing that is the point.
+    (101, "How many players had at least one gaming session?", [77_460]),
+    (102, "How many distinct game titles were played?", [775]),
+    # Tier 2 — both sides, without a join that could multiply.
+    (
+        103,
+        "How many players visited but never had a gaming session?",
+        [382_982],
+    ),
+    (
+        104,
+        "Of the players who have sessions, what is the club level mix? "
+        "Club level is on the visits table.",
+        [48_750],
+    ),
+    # Tier 3 — the question that prompted this pair being added at all.
+    (
+        105,
+        "Top games played by the top 100 players in the last 3 months, "
+        "ranking players by their visit coin in.",
+        [24_414_809],
+    ),
+    # Tier 4 — coinIn is on both and means different things: 6.99bn of visit coin
+    # in against 861M of session coin in.
+    (106, "What is the total coin in recorded on the sessions table?", [860_962_789]),
+    (107, "What is the total coin in recorded on the visits table?", [6_988_046_242]),
+]
+
+
 @pytest.fixture(scope="module")
 def agent():
     dataset = Dataset.load([CsvSource.from_path(SESSIONS), CsvSource.from_path(ASSETS)])
+    try:
+        built = DataAgent(dataset, profile_dataset(dataset))
+        built.build_understanding()
+        yield built
+    finally:
+        dataset.close()
+
+
+@pytest.fixture(scope="module")
+def players():
+    """Visits and sessions: 3.8GB, so it is loaded once for the whole module."""
+    dataset = Dataset.load([CsvSource.from_path(VISITS), CsvSource.from_path(SESSIONS)])
     try:
         built = DataAgent(dataset, profile_dataset(dataset))
         built.build_understanding()
@@ -169,3 +217,50 @@ def test_the_bank_needs_no_guard_refusals(agent) -> None:
             if message.get("role") == "tool" and "double count" in str(message.get("content", ""))
         )
     assert refusals == 0, f"{refusals} joins had to be refused and rewritten"
+
+
+@pytest.mark.parametrize(
+    ("number", "question", "anchors"),
+    PLAYER_BANK,
+    ids=[f"p{item[0]}" for item in PLAYER_BANK],
+)
+def test_player_bank(players, number, question, anchors) -> None:
+    answer = players.ask(question, multi_turn=False, depth="never")
+
+    assert answer.text.strip(), f"p{number}: empty answer"
+    assert "could not finish" not in answer.text, f"p{number}: ran out of tool rounds"
+    assert answer.results, f"p{number}: answered without querying anything"
+    for anchor in anchors:
+        assert mentions(answer.text, anchor), (
+            f"p{number}: expected ~{anchor:,} in:\n{answer.text[:400]}"
+        )
+
+
+def test_visits_and_sessions_are_not_joined_on_the_player_alone(players) -> None:
+    """One player has 419 visits and 9 sessions, so joining the two on playerId
+    multiplies them into 3,771 rows. The right shape is a subquery — which is what
+    the model wrote unprompted for the question this pair was added for.
+    """
+    answer = players.ask(
+        "Top games played by the top 100 players in the last 3 months, "
+        "ranking players by their visit coin in.",
+        multi_turn=False,
+        depth="never",
+    )
+    assert mentions(answer.text, 24_414_809), answer.text[:300]
+    for result in answer.results:
+        flat = " ".join(result.sql.split()).lower()
+        if "join" in flat and "playervisits" in flat and "sessions" in flat:
+            assert "playerid = " not in flat or "day" in flat, flat[:220]
+
+
+def test_a_measure_on_both_tables_is_taken_from_the_one_named(players) -> None:
+    """coinIn totals 6.99bn on visits and 861M on sessions. Naming the table is
+    the whole question."""
+    for question, anchor, wrong in (
+        ("What is the total coin in recorded on the sessions table?", 860_962_789, 6_988_046_242),
+        ("What is the total coin in recorded on the visits table?", 6_988_046_242, 860_962_789),
+    ):
+        answer = players.ask(question, multi_turn=False, depth="never")
+        assert mentions(answer.text, anchor), f"{question}: {answer.text[:220]}"
+        assert not mentions(answer.text, wrong), f"{question} took the other table"
