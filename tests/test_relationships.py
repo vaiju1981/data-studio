@@ -1000,3 +1000,35 @@ def test_an_identifier_outranks_a_measure_with_more_values() -> None:
         assert set(found[0].ref.columns) == {"assetId", "day"}, found[0].ref
     finally:
         dataset.close()
+
+
+def test_a_measure_that_happens_to_be_unique_is_not_called_a_key() -> None:
+    """Naming it "one row per (jackpots)" reads as a key and invites a join on it,
+    when all it says is that these values happen not to repeat in the rows loaded
+    today. Saying nothing was worse — the column is still reported, described as
+    what it is.
+    """
+    rows = ["region,jackpots"] + [f"{'N' if n % 2 else 'S'},{n * 7}" for n in range(12)]
+    dataset = Dataset.load([CsvSource.from_upload("t.csv", ("\n".join(rows) + "\n").encode())])
+    try:
+        found = relationships.discover_keys(dataset, "t", {"jackpots": 12, "region": 2})
+        assert found, "the column should still be reported"
+        described = found[0].describe()
+        assert "no column identifies a row" in described, described
+        assert "one row per" not in described
+        assert "measures rather than identifies" in described
+    finally:
+        dataset.close()
+
+
+def test_a_real_identifier_key_is_still_stated_plainly() -> None:
+    """The other half: the honest wording for a coincidence must not swallow the
+    plain statement a genuine key deserves."""
+    rows = ["assetId,day,jackpots"]
+    rows += [f"{a},2024010{d},{a * 7 + d}" for a in (1, 2, 3) for d in range(1, 8)]
+    dataset = Dataset.load([CsvSource.from_upload("a.csv", ("\n".join(rows) + "\n").encode())])
+    try:
+        found = relationships.discover_keys(dataset, "a", {"assetId": 3, "day": 7, "jackpots": 21})
+        assert found[0].describe() == "one row per (assetId, day)"
+    finally:
+        dataset.close()

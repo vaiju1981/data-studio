@@ -12,7 +12,7 @@ commonly hold the same column name meaning different things.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import sqlglot
 from sqlglot import exp
@@ -157,6 +157,10 @@ class KeyFacts:
     rows: int
     complete: int  # rows with no NULL in any key column
     distinct: int
+    # Unique, but made of measures rather than identifiers — set only on the
+    # fallback path, which is the one place that knows the difference. A unique
+    # text column like sku or email is a real key and is not marked.
+    coincidental: bool = False
 
     @property
     def unique(self) -> bool:
@@ -175,6 +179,15 @@ class KeyFacts:
                 f"the nearest thing this table has to a key"
             )
         nulls = f", though {self.rows - self.complete:,} rows have none" if self.has_nulls else ""
+        if self.coincidental:
+            # Calling this "one row per (jackpots)" reads as a key and invites a
+            # join on it, when all it says is that these values happen not to
+            # repeat in the rows loaded today.
+            return (
+                f"no column identifies a row; ({columns}) happens to be unique here, "
+                f"but it measures rather than identifies, so it is a property of this "
+                f"data rather than a key to join on"
+            )
         return f"one row per ({columns}){nulls}"
 
 
@@ -310,7 +323,13 @@ def discover_keys(
     if unique:
         return unique[:MAX_KEY_CANDIDATES]
     if exact:
-        return exact[:MAX_KEY_CANDIDATES]  # nothing better than the coincidence
+        # Kept, because saying nothing was worse — but marked, so describe() calls
+        # it what it is rather than dressing a measure up as a key.
+        quantities = measure_columns(dataset, table)
+        return [
+            replace(facts, coincidental=all(name in quantities for name in facts.ref.columns))
+            for facts in exact[:MAX_KEY_CANDIDATES]
+        ]
 
     # Nothing identifies a row exactly. The nearest set is still the thing worth
     # saying: (assetId, day) at 11,420 values across 11,421 rows is what a join
