@@ -178,6 +178,41 @@ class KeyFacts:
         return f"one row per ({columns}){nulls}"
 
 
+def _measure_keys(
+    dataset: Dataset, table: str, candidates: list[tuple[str, ...]]
+) -> list[KeyFacts]:
+    """Measure several candidate keys of one table in a single pass."""
+    if not candidates:
+        return []
+    rows = dataset.row_count(table)
+    projections = []
+    for index, columns in enumerate(candidates):
+        key, non_null = _key_sql(Ref(table, columns))
+        projections += [
+            f"count(*) FILTER (WHERE {non_null}) AS complete_{index}",
+            f"count(DISTINCT CASE WHEN {non_null} THEN {key} END) AS distinct_{index}",
+        ]
+    with dataset._deadline():
+        row = dataset.connection.execute(
+            f"SELECT {', '.join(projections)} FROM {quote_identifier(table)}"
+        ).fetchone()
+    return [
+        KeyFacts(
+            ref=Ref(table, columns),
+            rows=rows,
+            complete=int(row[index * 2]),
+            distinct=int(row[index * 2 + 1]),
+        )
+        for index, columns in enumerate(candidates)
+    ]
+
+
+def _looks_like_identifier(name: str) -> bool:
+    """id, playerId, movie_id — an integer with a name like this is not a measure."""
+    lowered = name.lower()
+    return lowered == "id" or lowered.endswith(("id", "_id", "key", "code", "number", "no"))
+
+
 def verify_key(dataset: Dataset, ref: Ref) -> KeyFacts:
     """Measure whether these columns identify a row, counting nulls apart."""
     key, non_null = _key_sql(ref)
@@ -199,11 +234,15 @@ def measure_columns(dataset: Dataset, table: str) -> set[str]:
     its key, and listed grossWin ahead of assetId as a join column — the same
     mistake twice, so the test lives in one place.
     """
-    return {
-        name
-        for name, kind in dataset.schema(table)
-        if any(part in kind.upper() for part in ("DOUBLE", "FLOAT", "DECIMAL", "REAL"))
-    }
+    found = set()
+    for name, kind in dataset.schema(table):
+        upper = kind.upper()
+        if any(part in upper for part in ("DOUBLE", "FLOAT", "DECIMAL", "REAL")):
+            found.add(name)  # a float is never an identifier
+        elif any(part in upper for part in ("INT", "HUGEINT")) and not _looks_like_identifier(name):
+            # An integer can be either: movieId identifies, jackpots measures.
+            found.add(name)
+    return found
 
 
 def discover_keys(
@@ -232,16 +271,17 @@ def discover_keys(
     if not ranked:
         return []
     names = [name for name, _ in ranked[:MAX_KEY_SEARCH_COLUMNS]]
-    singles = [verify_key(dataset, Ref(table, (name,))) for name in names]
+    # One scan for all the singles, then one for all the pairs. Measuring each
+    # candidate on its own meant up to twenty-one passes over the same table.
+    singles = _measure_keys(dataset, table, [(name,) for name in names])
     exact = [facts for facts in singles if facts.unique]
     if exact:
         return exact[:MAX_KEY_CANDIDATES]
 
-    # No single column identifies a row, so try pairs of the most various ones.
-    pairs: list[KeyFacts] = []
-    for index, first in enumerate(names):
-        for second in names[index + 1 :]:
-            pairs.append(verify_key(dataset, Ref(table, (first, second))))
+    combinations = [
+        (first, second) for index, first in enumerate(names) for second in names[index + 1 :]
+    ]
+    pairs = _measure_keys(dataset, table, combinations)
     unique = [facts for facts in pairs if facts.unique]
     if unique:
         return unique[:MAX_KEY_CANDIDATES]
@@ -404,6 +444,25 @@ def verify(dataset: Dataset, candidate: JoinCandidate) -> Verified:
 
 # --- M3: refusing a join before it runs -----------------------------------------
 
+# DuckDB names some aggregates that sqlglot parses as ordinary functions, so the
+# class test alone let total() past — and a query whose only aggregate is unlisted
+# skipped the guard entirely.
+ANONYMOUS_AGGREGATES = frozenset(
+    {"total", "list", "histogram", "arg_max", "arg_min", "product", "geomean", "entropy"}
+)
+
+
+def aggregates_in(tree: exp.Expression) -> list[exp.Expression]:
+    """Every aggregate, by class where sqlglot knows one and by name where not."""
+
+    def is_aggregate(node: exp.Expression) -> bool:
+        if isinstance(node, exp.AggFunc):
+            return True
+        return isinstance(node, exp.Anonymous) and str(node.this).lower() in ANONYMOUS_AGGREGATES
+
+    return [node for node in tree.walk() if is_aggregate(node)]
+
+
 AGGREGATES = (exp.Sum, exp.Avg, exp.Count, exp.Min, exp.Max)
 
 
@@ -557,7 +616,7 @@ def preflight(
         # references instead made a CTE over one table look like a self-join.
         return None, None
 
-    aggregates = [node for node in tree.walk() if isinstance(node, AGGREGATES)]
+    aggregates = aggregates_in(tree)
     if not aggregates:
         # Nothing is being totalled, so fan-out changes the row count but no figure.
         return None, None
@@ -587,16 +646,26 @@ def preflight(
         multiplying.update(note)
 
     if not multiplying:
-        return None, None
+        return None, _dropped_note(dataset, joins, sources, cache)
 
     weighted: str | None = None
     for node in aggregates:
+        # COUNT(*) and COUNT(1) have no column to attribute, and count the output
+        # rows — which is exactly what fan-out inflates. Reading only columns meant
+        # the commonest aggregate of all walked straight past the guard.
+        if isinstance(node, exp.Count) and not list(node.find_all(exp.Column)):
+            first = next(iter(multiplying.values()))
+            return (
+                f"{first} This counts rows of the join itself, so it is that "
+                f"multiplied figure. Count a key with COUNT(DISTINCT ...), or fix the "
+                f"grain first."
+            ), None
         for column in node.find_all(exp.Column):
             owner = _column_alias(column, sources, dataset)
             if owner not in multiplying:
                 continue
-            if isinstance(node, (exp.Sum, exp.Count)):
-                return multiplying[owner], None
+            if isinstance(node, (exp.Min, exp.Max)):
+                continue  # unaffected by how often a row appears
             if isinstance(node, exp.Avg):
                 weighted = (
                     f"{owner}.{column.name} is averaged over a join that repeats "
@@ -604,7 +673,11 @@ def preflight(
                     f"weighted average — right if the weighting was intended, and not the "
                     f"same as the average over {owner} alone."
                 )
-            # MIN and MAX are unaffected by how often a row appears.
+                continue
+            # Everything else is refused, including aggregates this cannot name.
+            # Listing the harmful ones instead let total() through as though it
+            # were as safe as MIN, when it is a SUM by another spelling.
+            return multiplying[owner], None
     return None, weighted
 
 
@@ -697,9 +770,30 @@ def _join_multiplication(
         if source.table is None and not _derived_is_unique(source, columns):
             return None
     if left_source.table is None or right_source.table is None:
-        # A derived side proved unique cannot multiply the other; the base side
-        # keeps whatever grain it had, which the aggregate provenance covers.
-        return {}
+        # A derived side proved unique cannot multiply the other — but the other
+        # can multiply *it*: a derived row is repeated once per base row sharing
+        # its key, so a measure computed in the subquery is summed once per match.
+        if left_source.table is None:
+            derived, base, base_columns = left_alias, right_source, right_columns
+        else:
+            derived, base, base_columns = right_alias, left_source, left_columns
+        if base.table is None:
+            return None  # two derived relations: not something to reason about yet
+        try:
+            facts = verify_key(dataset, Ref(base.table, tuple(base_columns)))
+        except Exception:
+            return None
+        if facts.unique:
+            return {}
+        return {
+            derived: (
+                f"This join repeats rows of {derived}: {base.table} is not unique on "
+                f"{', '.join(base_columns)} — {facts.distinct:,} values across "
+                f"{facts.complete:,} rows — so each {derived} row is counted once per "
+                f"match. Aggregate {base.table} to one row per key first, or take the "
+                f"measure from {base.table} instead."
+            )
+        }
 
     candidate = JoinCandidate(
         Ref(left_source.table, tuple(left_columns)),
@@ -723,6 +817,48 @@ def _join_multiplication(
     return found
 
 
+def _dropped_note(
+    dataset: Dataset, joins: list, sources: dict[str, Source], cache: dict | None
+) -> str | None:
+    """Say when an inner join silently leaves rows out.
+
+    Nothing multiplies, so nothing is double counted — but an inner join that
+    drops 9,185 of one side's rows produces a total that is quietly short, and a
+    short total looks exactly as reasonable as a correct one.
+    """
+    for join in joins:
+        if (join.args.get("side") or "").upper() in {"LEFT", "RIGHT", "FULL"}:
+            continue
+        key = _cached_key(join, sources, dataset)
+        measured = cache.get(key) if cache and key else None
+        if measured is None or not measured.partial:
+            continue
+        return (
+            f"This inner join leaves rows out: {measured.left.unmatched:,} rows of "
+            f"{measured.left.ref.table} and {measured.right.unmatched:,} of "
+            f"{measured.right.ref.table} match nothing, so any total covers only what "
+            f"matched. Use a LEFT join if the unmatched rows should still count."
+        )
+    return None
+
+
+def _cached_key(join: exp.Join, sources: dict[str, Source], dataset: Dataset):
+    """The cache key for this join, or None when it is not a simple base pair."""
+    condition = join.args.get("on")
+    if condition is None:
+        return None
+    pairs, simple = _join_refs(condition, sources, dataset)
+    if not simple or len(pairs) != 2:
+        return None
+    refs = []
+    for alias, columns in pairs.items():
+        source = sources.get(alias)
+        if source is None or source.table is None:
+            return None
+        refs.append(Ref(source.table, tuple(columns)))
+    return (refs[0], refs[1])
+
+
 def _using_sides(join: exp.Join, sources: dict[str, Source], using: list[str]):
     """The two aliases a USING clause relates, in query order."""
     names = [alias for alias in sources]
@@ -732,7 +868,13 @@ def _using_sides(join: exp.Join, sources: dict[str, Source], using: list[str]):
 
 
 def _derived_is_unique(source: Source, columns: list[str]) -> bool:
-    return bool(source.unique_on) and {c.lower() for c in columns} <= source.unique_on
+    """Whether joining on these columns meets one row of this derived relation.
+
+    The subset runs this way round. A subquery grouped by (assetId, day) is one
+    row per pair, and joining on assetId alone still meets many of them — the
+    reversed test called that unique and waved the join through.
+    """
+    return bool(source.unique_on) and source.unique_on <= {c.lower() for c in columns}
 
 
 def _name(alias: str, ref: Ref) -> str:

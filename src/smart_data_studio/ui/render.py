@@ -293,19 +293,23 @@ def relationship_panel(agent) -> None:
 
 
 def _confirmation(index: int, candidate) -> None:
-    """Yours to say. A rejected candidate stops being offered as a join path."""
+    """Yours to say, and it has to change something or the button is a lie."""
     key = f"relationship-{index}"
     status = st.session_state.get("relationship_status", {}).get(str(candidate))
     if status:
         st.caption(f"You marked this **{status}**.")
         return
     left, right = st.columns(2)
-    if left.button("Makes sense", key=f"{key}-yes", use_container_width=True):
-        st.session_state.setdefault("relationship_status", {})[str(candidate)] = "meaningful"
-        st.rerun()
-    if right.button("Not meaningful", key=f"{key}-no", use_container_width=True):
-        st.session_state.setdefault("relationship_status", {})[str(candidate)] = "rejected"
-        st.rerun()
+    for column, label, verdict in (
+        (left, "Makes sense", "meaningful"),
+        (right, "Not meaningful", "rejected"),
+    ):
+        if column.button(label, key=f"{key}-{verdict}", use_container_width=True):
+            st.session_state.setdefault("relationship_status", {})[str(candidate)] = verdict
+            agent = st.session_state.get("agent")
+            if agent is not None:
+                agent.set_relationship_verdict(str(candidate), verdict)
+            st.rerun()
 
 
 def profile_panel(profiles: list[TableProfile]) -> None:

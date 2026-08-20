@@ -710,3 +710,124 @@ def test_a_self_join_names_the_side_that_repeats(data) -> None:
         data, "SELECT sum(x.coinIn) FROM sessions x JOIN sessions y ON x.assetId = y.assetId"
     )
     assert "x (sessions)" in refusal, refusal
+
+
+# --- review findings: five of these bypassed the guard entirely -----------------
+
+FAN = b"assetId,day,coinIn\n1,x,10\n1,y,20\n2,x,30\n"
+DAILY = b"assetId,day,fee\n1,x,100\n1,y,200\n2,x,300\n"
+
+
+@pytest.fixture
+def pair():
+    dataset = Dataset.load(
+        [
+            CsvSource.from_upload("sessions.csv", FAN),
+            CsvSource.from_upload("assets.csv", DAILY),
+        ]
+    )
+    try:
+        yield dataset
+    finally:
+        dataset.close()
+
+
+@pytest.mark.parametrize(
+    ("finding", "sql", "refused"),
+    [
+        (
+            "a derived side unique on (assetId, day), joined on assetId alone",
+            "SELECT sum(s.coinIn) FROM sessions s JOIN "
+            "(SELECT assetId, day, sum(fee) f FROM assets GROUP BY assetId, day) d "
+            "ON s.assetId = d.assetId",
+            True,
+        ),
+        (
+            "the same derived side joined on its whole grain",
+            "SELECT sum(s.coinIn) FROM sessions s JOIN "
+            "(SELECT assetId, day FROM assets GROUP BY assetId, day) d "
+            "ON s.assetId = d.assetId AND s.day = d.day",
+            False,
+        ),
+        (
+            "a measure computed in the subquery, repeated once per matching session",
+            "SELECT sum(d.f) FROM sessions s JOIN "
+            "(SELECT assetId, sum(fee) f FROM assets GROUP BY assetId) d "
+            "ON s.assetId = d.assetId",
+            True,
+        ),
+        (
+            "an aggregate sqlglot parses as an ordinary function",
+            "SELECT total(s.coinIn) FROM sessions s JOIN assets a ON s.assetId = a.assetId",
+            True,
+        ),
+        (
+            "COUNT(*), which has no column to attribute and counts the join itself",
+            "SELECT count(*) FROM sessions s JOIN assets a ON s.assetId = a.assetId",
+            True,
+        ),
+        (
+            "MIN, which no amount of repetition can change",
+            "SELECT min(s.coinIn) FROM sessions s JOIN assets a ON s.assetId = a.assetId",
+            False,
+        ),
+    ],
+)
+def test_the_ways_the_guard_could_be_walked_past(pair, finding, sql, refused) -> None:
+    """Each of these produced a wrong number and no refusal.
+
+    The derived-grain one was a reversed subset test: a subquery grouped by
+    (assetId, day) is one row per pair, and joining on assetId alone still meets
+    many of them — the check asked whether the join columns were *within* the
+    grain rather than whether they *covered* it.
+
+    A unique derived side cannot multiply the base side, but the base side repeats
+    *it*, so a measure computed in the subquery is counted once per match.
+
+    And listing the harmful aggregates rather than the harmless ones let total()
+    through as though it were as safe as MIN, when it is a SUM by another spelling.
+    """
+    verdict, _ = relationships.preflight(pair, sql, {})
+    assert bool(verdict) is refused, f"{finding}: {verdict}"
+
+
+def test_an_inner_join_that_drops_rows_says_so(pair) -> None:
+    """Nothing multiplies, so nothing is double counted — but a total over an
+    inner join that leaves rows out is quietly short, and a short total looks
+    exactly as reasonable as a correct one."""
+    cache: dict = {}
+    sql = (
+        "SELECT sum(s.coinIn) FROM sessions s "
+        "JOIN assets a ON s.assetId = a.assetId AND s.day = a.day"
+    )
+    relationships.preflight(pair, sql, cache)  # warm the measurement
+    refusal, note = relationships.preflight(pair, sql, cache)
+    assert refusal is None, "a complete join must still run"
+    assert note is None or "leaves rows out" in note
+
+
+def test_an_integer_that_names_itself_a_key_is_not_a_measure(pair) -> None:
+    """movieId identifies and jackpots measures, and both are integers."""
+    dataset = Dataset.load(
+        [CsvSource.from_upload("t.csv", b"movieId,player_id,jackpots,rate\n1,7,3,0.5\n2,8,4,0.6\n")]
+    )
+    try:
+        measures = relationships.measure_columns(dataset, "t")
+        assert "jackpots" in measures and "rate" in measures
+        assert "movieId" not in measures and "player_id" not in measures
+    finally:
+        dataset.close()
+
+
+def test_candidate_keys_are_measured_in_two_passes_not_twenty_one(pair, monkeypatch) -> None:
+    """Six singles and fifteen pairs used to be twenty-one scans of one table."""
+    passes = []
+    original = relationships._measure_keys
+
+    def counted(dataset, table, candidates):
+        passes.append(len(candidates))
+        return original(dataset, table, candidates)
+
+    monkeypatch.setattr(relationships, "_measure_keys", counted)
+    relationships.discover_keys(pair, "assets", {"assetId": 2, "day": 2, "fee": 3})
+    assert len(passes) <= 2, f"{len(passes)} passes over one table for {passes} candidates"

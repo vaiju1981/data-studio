@@ -271,6 +271,8 @@ class DataAgent:
         self.understanding = ""
         self.metrics = ""
         self.relationships = relationships.Proposals()
+        # Belongs to this agent, so a reloaded dataset starts with no verdicts.
+        self.relationship_verdicts: dict[str, str] = {}
         self.messages: list[dict[str, Any]] = [{"role": "system", "content": self._system_prompt()}]
 
     def set_metrics(self, metrics: str) -> bool:
@@ -477,8 +479,12 @@ class DataAgent:
                 self._chat(
                     messages=[
                         {
+                            # The profile, not the schema alone: it already states
+                            # each table's grain and which columns repeat, which is
+                            # the difference between proposing assetId and
+                            # proposing (assetId, day).
                             "role": "system",
-                            "content": f"Schema:\n{self.dataset.schema_text()}\n\n{RELATE_PROMPT}",
+                            "content": f"{self._data_context()}\n\n{RELATE_PROMPT}",
                         },
                         {"role": "user", "content": "Which columns relate these tables?"},
                     ]
@@ -501,6 +507,33 @@ class DataAgent:
                 logs.failure("propose.verify_failed")
         self.relationships = found
         return found
+
+    def set_relationship_verdict(self, candidate: str, verdict: str) -> None:
+        """Record what the user said, and stop describing what they rejected.
+
+        A rejected candidate is dropped from the context: leaving it there while
+        the panel says it was rejected would make the button decoration.
+        """
+        self.relationship_verdicts[candidate] = verdict
+        self.messages[0] = {"role": "system", "content": self._system_prompt()}
+
+    def _relationship_text(self) -> str:
+        """Candidates worth telling the model about, with the user's view of each."""
+        lines = []
+        for candidate in self.relationships.joins:
+            verdict = self.relationship_verdicts.get(str(candidate))
+            if verdict == "rejected":
+                continue
+            facts = self.tools._join_facts.get((candidate.left, candidate.right))
+            shape = f" — {facts.cardinality}, {facts.joined_rows:,} rows" if facts else ""
+            confirmed = " (you confirmed this)" if verdict == "meaningful" else ""
+            lines.append(f"- {candidate}{shape}{confirmed}")
+        if not lines:
+            return ""
+        return (
+            "\n\nHow the tables can be joined, measured on the loaded rows. "
+            "Structurally compatible is not the same as meaningful:\n" + "\n".join(lines)
+        )
 
     def _chat_tools(self) -> list[Callable[..., str]]:
         return [
@@ -666,6 +699,6 @@ class DataAgent:
         return (
             f"{ANALYST_PROMPT}\n\n"
             f"===== BEGIN DATA (untrusted) =====\n"
-            f"{self._data_context()}{learned}{defined}\n"
+            f"{self._data_context()}{self._relationship_text()}{learned}{defined}\n"
             f"===== END DATA ====="
         )
