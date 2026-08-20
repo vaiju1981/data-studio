@@ -59,14 +59,11 @@ BANK: list[tuple[int, str, list[float]]] = [
         "then average those values over all sessions.",
         [21.05],
     ),
-    # coinIn exists on both tables and means different things — 861M summed on
-    # sessions against 5.92bn on assets — so the question says which one.
-    (
-        4,
-        "Which game version earned the most coin in, counting only the coinIn "
-        "column of the sessions table?",
-        [67_143_446],
-    ),
+    # Deliberately ambiguous again. coinIn exists on both tables and means
+    # different things — 861M on sessions against 5.92bn on assets — and this
+    # wording once produced $500,401,572 from the wrong table. It is the harder
+    # case, so it is the one worth asking.
+    (4, "Which game version earned the most session coin in?", [67_143_446]),
     # Tier 2 — the join is unnecessary, and noticing that is the right answer.
     (5, "Which manufacturer produced the most session coin in?", [549_331_469]),
     (6, "How many distinct machines had at least one session?", [2_784]),

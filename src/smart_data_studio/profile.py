@@ -35,6 +35,9 @@ class TableProfile:
     # Columns another loaded table also has, and how far each is from identifying
     # a row. These are exactly the columns a join reaches for.
     shared: list[str] = field(default_factory=list)
+    # Measures another table also has under the same name. These do not join, they
+    # get taken from the wrong table.
+    shared_measures: list[str] = field(default_factory=list)
     # The column a row is a repeat of — playerId in a table of visits. A question
     # about that entity has to be aggregated to it, not counted by row.
     entity_key: str | None = None
@@ -79,6 +82,13 @@ class TableProfile:
             if self.shared
             else ""
         )
+        rendered_measures = (
+            "\nMeasures another table also has under the same name, with this table's "
+            "total: " + "; ".join(self.shared_measures) + ". They are different "
+            "quantities — take each from the table the question is about."
+            if self.shared_measures
+            else ""
+        )
         rendered_dictionary = (
             "\nValues held by the dimension columns:\n"
             + "\n".join(f"- {line}" for line in self.dictionary)
@@ -88,7 +98,7 @@ class TableProfile:
         return (
             f"Table {self.table_name}: {self.row_count:,} rows\n"
             f"Profile (approx_unique is an estimate, not an exact count):\n{rendered_stats}\n"
-            f"Findings:\n{rendered_findings}{rendered_keys}{rendered_shared}{rendered_dictionary}"
+            f"Findings:\n{rendered_findings}{rendered_keys}{rendered_shared}{rendered_measures}{rendered_dictionary}"
         )
 
 
@@ -146,7 +156,9 @@ def profile_table(dataset: Dataset, table_name: str) -> TableProfile:
         if len(dataset.tables) > 1
         else []
     )
-    shared = _shared_columns(dataset, table_name, row_count) if len(dataset.tables) > 1 else []
+    many = len(dataset.tables) > 1
+    shared = _shared_columns(dataset, table_name, row_count) if many else []
+    shared_measures = _shared_measures(dataset, table_name) if many else []
     grain, entity_key = _entity_grain(dataset, table_name, stats, row_count)
     if grain:
         findings.insert(0, grain)
@@ -168,6 +180,7 @@ def profile_table(dataset: Dataset, table_name: str) -> TableProfile:
         values=values,
         keys=keys,
         shared=shared,
+        shared_measures=shared_measures,
         entity_key=entity_key,
     )
 
@@ -334,6 +347,41 @@ def _shared_columns(dataset: Dataset, table_name: str, row_count: int) -> list[s
     for name, _ in constants[:2]:
         described.append(f"{name} is the same for every row, so joining on it pairs everything")
     return described
+
+
+def _shared_measures(dataset: Dataset, table_name: str) -> list[str]:
+    """Measures another table also carries under the same name, with this total.
+
+    Not a join problem — a provenance one. Asked for the game version with the most
+    *session* coin in, the model summed coinIn from the asset table, which has its
+    own daily column of that name: $500,401,572 against a true $67,143,446. Nothing
+    double-counted and no join was made, so the fan-out guard has nothing to catch.
+    The totals differ by seven times, and saying so is what stops the wrong one
+    being used.
+    """
+    mine = relationships.measure_columns(dataset, table_name)
+    elsewhere = {
+        name
+        for other in dataset.tables
+        if other != table_name
+        for name in relationships.measure_columns(dataset, other)
+    }
+    together = sorted(name for name in mine & elsewhere if not is_sensitive(name))[
+        :MAX_SHARED_COLUMNS
+    ]
+    if not together:
+        return []
+    quoted = quote_identifier(table_name)
+    totals = dataset.connection.execute(
+        "SELECT "
+        + ", ".join(f"sum({quote_identifier(name)})" for name in together)
+        + f" FROM {quoted}"
+    ).fetchone()
+    return [
+        f"{name} here totals {float(total):,.0f}"
+        for name, total in zip(together, totals, strict=True)
+        if total is not None
+    ]
 
 
 def _distinct_by_column(stats: pd.DataFrame) -> dict[str, float]:

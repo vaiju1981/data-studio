@@ -13,7 +13,7 @@ import httpx
 import ollama
 from plotly.graph_objects import Figure
 
-from smart_data_studio import logs
+from smart_data_studio import logs, relationships
 from smart_data_studio.config import (
     KEEP_TOOL_PAYLOADS,
     MAX_CONTEXT_SHEDS,
@@ -233,6 +233,17 @@ class DataAgent:
         }
         self.tools.dimension_values = {
             profile.table_name: profile.values for profile in profiles if profile.values
+        }
+        self.tools.shared_measures = {
+            table: measures
+            for table in dataset.tables
+            if (measures := relationships.measure_columns(dataset, table))
+            & {
+                name
+                for other in dataset.tables
+                if other != table
+                for name in relationships.measure_columns(dataset, other)
+            }
         }
         self.understanding = ""
         self.metrics = ""

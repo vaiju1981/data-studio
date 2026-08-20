@@ -53,6 +53,9 @@ def _dump(payload: dict[str, object]) -> str:
     return json.dumps(_finite(payload), default=str)
 
 
+AGGREGATE_NODES = relationships.AGGREGATES
+
+
 def _tables_in(tree: exp.Expression) -> set[str]:
     """Every table the query names, so a column is read against the right one."""
     return {table.name for table in tree.find_all(exp.Table) if table.name}
@@ -118,6 +121,8 @@ class AnalysisTools:
         # may each have a status column meaning different things, and merging
         # them checks a filter against the wrong vocabulary.
         self.dimension_values: dict[str, dict[str, list[str]]] = {}
+        # table -> measures another loaded table also carries under that name.
+        self.shared_measures: dict[str, set[str]] = {}
         self.question = ""
         self.chart: Figure | None = None
         self.chart_spec: ChartSpec | None = None
@@ -149,7 +154,7 @@ class AnalysisTools:
         # million rows on the way to a number 439 times too large; there is no
         # reason to pay for that before saying so. A single-table query returns
         # from preflight untouched.
-        refusal = relationships.preflight(self.dataset, sql, self._join_facts)
+        refusal, weighting = relationships.preflight(self.dataset, sql, self._join_facts)
         if refusal:
             logs.event("join.refused")
             return _dump({"error": refusal})
@@ -162,10 +167,63 @@ class AnalysisTools:
         for name, note in (
             ("grain_warning", self._grain_note(sql)),
             ("filter_warning", self._substitution_note(sql)),
+            ("source_warning", self._source_note(sql)),
+            ("weighting_warning", weighting),
         ):
             if note:
                 payload = {**payload, name: note}
         return _dump(payload)
+
+    def _source_note(self, sql: str) -> str | None:
+        """Warn when a shared measure was taken from a table nobody asked about.
+
+        Asked for the game version with the most *session* coin in, a query summed
+        coinIn from the asset table, which carries its own daily column of that
+        name: 500,401,572 against a true 67,143,446. Nothing double-counted and no
+        join was made, so neither the fan-out guard nor the filter guard has
+        anything to catch — it is the wrong column, not a wrong join. Saying the
+        totals differ in the profile was not enough on its own.
+        """
+        if not self.question or not self.shared_measures:
+            return None
+        named = self._tables_named_in_question()
+        if len(named) != 1:
+            return None  # nothing to disagree with
+        wanted = named.pop()
+        try:
+            tree = sqlglot.parse_one(sql, dialect="duckdb")
+        except Exception:
+            return None
+
+        sources = relationships._sources(tree, {name.lower() for name in self.dataset.tables})
+        for node in tree.walk():
+            if not isinstance(node, AGGREGATE_NODES):
+                continue
+            for column in node.find_all(exp.Column):
+                owner = relationships._column_owner(column, sources, self.dataset)
+                if owner is None or owner == wanted:
+                    continue
+                if column.name in self.shared_measures.get(owner, set()):
+                    return (
+                        f"{column.name} exists on both {owner} and {wanted}, and they are "
+                        f"different quantities. The question is about {wanted}, but this "
+                        f"totals {owner}.{column.name}. Take the measure from {wanted}, "
+                        f"joining to {owner} only for the columns {wanted} does not have."
+                    )
+        return None
+
+    def _tables_named_in_question(self) -> set[str]:
+        """Tables the question actually points at, by the part of the name that
+        tells them apart — every file here begins station_ and ends _redrock."""
+        asked = self.question.lower()
+        parts = [set(re.split(r"[^a-z0-9]+", name.lower())) for name in self.dataset.tables]
+        common = set.intersection(*parts) if parts else set()
+        named = set()
+        for name, tokens in zip(self.dataset.tables, parts, strict=True):
+            for token in tokens - common:
+                if token and (token in asked or token.rstrip("s") in asked):
+                    named.add(name)
+        return named
 
     def _substitution_note(self, sql: str) -> str | None:
         """Warn when the query filtered on a value the question did not ask for.

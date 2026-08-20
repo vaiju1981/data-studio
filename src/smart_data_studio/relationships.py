@@ -182,9 +182,10 @@ def verify_key(dataset: Dataset, ref: Ref) -> KeyFacts:
     """Measure whether these columns identify a row, counting nulls apart."""
     key, non_null = _key_sql(ref)
     quoted = quote_identifier(ref.table)
-    complete, distinct = dataset.connection.execute(
-        f"SELECT count(*), count(DISTINCT {key}) FROM {quoted} WHERE {non_null}"
-    ).fetchone()
+    with dataset._deadline():
+        complete, distinct = dataset.connection.execute(
+            f"SELECT count(*), count(DISTINCT {key}) FROM {quoted} WHERE {non_null}"
+        ).fetchone()
     return KeyFacts(
         ref=ref, rows=dataset.row_count(ref.table), complete=int(complete), distinct=int(distinct)
     )
@@ -341,8 +342,12 @@ def verify(dataset: Dataset, candidate: JoinCandidate) -> Verified:
             f"WHERE {non_null} GROUP BY 1"
         )
 
-    row = dataset.connection.execute(
-        f"""
+    # Bounded like any other query. Grouping two large tables by their keys is
+    # cheap next to the join it prices, but "cheap" is not "unbounded", and a
+    # verification with no deadline could outlast the question that asked for it.
+    with dataset._deadline():
+        row = dataset.connection.execute(
+            f"""
         WITH l AS ({sides["l"]}), r AS ({sides["r"]}),
         paired AS (SELECT l.k, l.n AS ln, r.n AS rn FROM l JOIN r ON l.k IS NOT DISTINCT FROM r.k)
         SELECT
@@ -359,7 +364,7 @@ def verify(dataset: Dataset, candidate: JoinCandidate) -> Verified:
           coalesce(max(ln), 0) AS r_max_partners
         FROM paired
         """
-    ).fetchone()
+        ).fetchone()
     (
         l_keys,
         r_keys,
@@ -491,8 +496,17 @@ def _join_refs(
     return per_source, simple
 
 
-def preflight(dataset: Dataset, sql: str, cache: dict | None = None) -> str | None:
-    """Why this query must not run, or None when it may.
+def preflight(
+    dataset: Dataset, sql: str, cache: dict | None = None
+) -> tuple[str | None, str | None]:
+    """(refusal, note): why this must not run, and what to say if it may.
+
+    Not every aggregate over a repeated row is wrong. A SUM always double counts.
+    MIN and MAX cannot change, however often a row appears. An AVG changes its
+    weighting, which is sometimes exactly what was asked for — "for every session,
+    look up that machine's utilisation that day, then average over sessions" is a
+    session-weighted average by construction. Refusing all three cost a bank
+    question its tool rounds for a query that was doing what it was told.
 
     Called before the query executes, not after: the incomplete asset join builds
     12.5 million rows on the way to a number that is 439 times too large, and there
@@ -508,23 +522,23 @@ def preflight(dataset: Dataset, sql: str, cache: dict | None = None) -> str | No
     # cost three bank questions their tool rounds. Fan-out within one table is the
     # grain guard's job, which already runs.
     if len(dataset.tables) < 2:
-        return None
+        return None, None
 
     try:
         tree = sqlglot.parse_one(sql, dialect="duckdb")
     except Exception:
-        return None  # the SQL guard reports malformed SQL; this is not its job
+        return None, None  # the SQL guard reports malformed SQL; this is not its job
 
     joins = list(tree.find_all(exp.Join))
     if not joins:
         # Nothing is combined, so nothing can be multiplied. Counting table
         # references instead made a CTE over one table look like a self-join.
-        return None
+        return None, None
 
     aggregates = [node for node in tree.walk() if isinstance(node, AGGREGATES)]
     if not aggregates:
         # Nothing is being totalled, so fan-out changes the row count but no figure.
-        return None
+        return None, None
 
     tables = {name.lower() for name in dataset.tables}
     sources = _sources(tree, tables)
@@ -534,7 +548,7 @@ def preflight(dataset: Dataset, sql: str, cache: dict | None = None) -> str | No
             f"This join cannot be checked for double counting ({unsupported}), and it "
             "aggregates, so it is not run. Express it as inner or left joins on "
             "AND-ed column equalities, or aggregate each side to one row per key first."
-        )
+        ), None
 
     multiplying: dict[str, str] = {}
     for join in joins:
@@ -547,17 +561,29 @@ def preflight(dataset: Dataset, sql: str, cache: dict | None = None) -> str | No
                 "aggregates, so it is not run. Give each side a provable grain — "
                 "join on the full key, or reduce a side with DISTINCT or GROUP BY "
                 "over the join columns."
-            )
+            ), None
         multiplying.update(note)
 
     if not multiplying:
-        return None
+        return None, None
+
+    weighted: str | None = None
     for node in aggregates:
         for column in node.find_all(exp.Column):
             owner = _column_owner(column, sources, dataset)
-            if owner in multiplying:
-                return multiplying[owner]
-    return None
+            if owner not in multiplying:
+                continue
+            if isinstance(node, (exp.Sum, exp.Count)):
+                return multiplying[owner], None
+            if isinstance(node, exp.Avg):
+                weighted = (
+                    f"{owner}.{column.name} is averaged over a join that repeats "
+                    f"{owner} rows, so each value counts once per matching row. That is a "
+                    f"weighted average — right if the weighting was intended, and not the "
+                    f"same as the average over {owner} alone."
+                )
+            # MIN and MAX are unaffected by how often a row appears.
+    return None, weighted
 
 
 def _unsupported(tree: exp.Expression, joins: list, sources: dict[str, Source]) -> str | None:

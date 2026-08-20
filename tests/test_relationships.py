@@ -220,7 +220,8 @@ def test_a_join_that_drops_rows_is_partial_even_when_nothing_multiplies() -> Non
 
 
 def guard(dataset, sql):
-    return relationships.preflight(dataset, sql, {})
+    """The refusal alone; the second element is the non-blocking note."""
+    return relationships.preflight(dataset, sql, {})[0]
 
 
 def test_the_incomplete_join_is_refused_before_it_runs(data) -> None:
@@ -366,7 +367,7 @@ def test_one_loaded_table_never_reaches_the_join_guard(single, sql) -> None:
     belongs on the dataset — fan-out inside one table is the grain guard's job, and
     that already runs.
     """
-    assert relationships.preflight(single, sql, {}) is None
+    assert relationships.preflight(single, sql, {})[0] is None
 
 
 @pytest.mark.parametrize(
@@ -409,7 +410,7 @@ def test_a_derived_relation_is_credited_only_when_its_grain_is_visible(
     dangerous", and refused every query containing one. Undetermined is still
     refused, because allowing it was the same bypass in another costume.
     """
-    verdict = relationships.preflight(data, sql, {})
+    verdict = relationships.preflight(data, sql, {})[0]
     assert bool(verdict) is refused, f"{label}: {verdict}"
 
 
@@ -458,5 +459,199 @@ def test_key_facts_count_nulls_apart_from_duplicates() -> None:
         assert facts.rows == 3 and facts.complete == 2
         assert facts.unique and facts.has_nulls
         assert "though 1 rows have none" in facts.describe()
+    finally:
+        dataset.close()
+
+
+# --- resource behaviour: criteria 15, 18 and 19 ---------------------------------
+
+
+def test_tables_with_nothing_in_common_produce_no_candidates_and_no_error(data) -> None:
+    """Two unrelated files are a normal thing to load together."""
+    unrelated = Dataset.load(
+        [
+            CsvSource.from_upload("weather.csv", b"city,degrees\nOslo,4\nCairo,31\n"),
+            CsvSource.from_upload("stock.csv", b"ticker,price\nAAPL,190\nMSFT,410\n"),
+        ]
+    )
+    try:
+        found = relationships.validate(unrelated, [])
+        assert (found.keys, found.joins, found.rejected) == ([], [], [])
+        # And a query over both is simply not something the guard objects to.
+        assert (
+            relationships.preflight(
+                unrelated,
+                "SELECT sum(w.degrees) FROM weather w JOIN stock s ON w.city = s.ticker",
+                {},
+            )[0]
+            is None
+        )
+    finally:
+        unrelated.close()
+
+
+def test_verification_is_bounded_by_the_query_deadline(data, monkeypatch) -> None:
+    """Grouping two tables by their keys is cheap next to the join it prices, but
+    cheap is not unbounded — a verification with no deadline could outlast the
+    question that asked for it."""
+    used = []
+    original = data._deadline
+
+    def watched():
+        used.append(True)
+        return original()
+
+    monkeypatch.setattr(data, "_deadline", watched)
+    relationships.verify_key(data, relationships.Ref("sessions", ("assetId",)))
+    verify_join(data, ["assetId"], ["assetId"])
+    assert used, "verification ran without the deadline every other query gets"
+
+
+def test_measured_facts_do_not_outlive_the_dataset_that_produced_them(data) -> None:
+    """The cache belongs to the tools, which belong to one loaded dataset. A reload
+    builds both again, so a stale measurement cannot describe new rows."""
+    from smart_data_studio.tools import AnalysisTools
+
+    first = AnalysisTools(data)
+    first.run_sql("SELECT sum(s.coinIn) FROM sessions s JOIN assets a ON s.assetId=a.assetId")
+    assert first._join_facts, "nothing was cached"
+    assert AnalysisTools(data)._join_facts == {}, "a new workspace inherited old measurements"
+
+
+# --- taking a measure from the table nobody asked about -------------------------
+
+
+def measure_tools(dataset):
+    from smart_data_studio.tools import AnalysisTools
+
+    tools = AnalysisTools(dataset)
+    tools.shared_measures = {
+        table: relationships.measure_columns(dataset, table) & {"coinIn"}
+        for table in dataset.tables
+    }
+    return tools
+
+
+@pytest.fixture
+def measures():
+    dataset = Dataset.load(
+        [
+            CsvSource.from_upload("sessions.csv", b"assetId,day,coinIn\n1,x,10.5\n2,y,20.5\n"),
+            CsvSource.from_upload(
+                "assets.csv", b"assetId,day,coinIn,paytableId\n1,x,900.5,7\n2,y,800.5,7\n"
+            ),
+        ]
+    )
+    try:
+        yield dataset
+    finally:
+        dataset.close()
+
+
+JOINED = "FROM sessions s JOIN assets a ON s.assetId=a.assetId AND s.day=a.day GROUP BY 1"
+
+
+@pytest.mark.parametrize(
+    ("label", "question", "sql", "warned"),
+    [
+        (
+            "asks about sessions, totals the asset column",
+            "Total session coin in by paytableId",
+            f"SELECT a.paytableId, sum(a.coinIn) {JOINED}",
+            True,
+        ),
+        (
+            "asks about sessions, totals the session column",
+            "Total session coin in by paytableId",
+            f"SELECT a.paytableId, sum(s.coinIn) {JOINED}",
+            False,
+        ),
+        (
+            "names no table, so there is nothing to disagree with",
+            "Total coin in by paytableId",
+            f"SELECT a.paytableId, sum(a.coinIn) {JOINED}",
+            False,
+        ),
+        (
+            "asks about assets and totals the asset column",
+            "Total asset coin in by paytableId",
+            f"SELECT a.paytableId, sum(a.coinIn) {JOINED}",
+            False,
+        ),
+    ],
+)
+def test_a_shared_measure_taken_from_the_wrong_table_is_flagged(
+    measures, label, question, sql, warned
+) -> None:
+    """Asked for the game version with the most *session* coin in, a query summed
+    coinIn from the asset table, which carries its own daily column of that name:
+    $500,401,572 against a true $67,143,446. Nothing double-counted and no join was
+    wrong, so neither the fan-out guard nor the filter guard has anything to catch
+    — it is the wrong column, not a wrong join.
+
+    Stating both totals in the profile was not enough on its own; the model still
+    read the asset column. This is what corrected it.
+    """
+    import json
+
+    tools = measure_tools(measures)
+    tools.question = question
+    payload = json.loads(tools.run_sql(sql))
+    assert ("source_warning" in payload) is warned, f"{label}: {payload.get('source_warning')}"
+
+
+@pytest.mark.parametrize(
+    ("label", "sql", "refused", "noted"),
+    [
+        (
+            "SUM over the repeated side always double counts",
+            "SELECT sum(a.manufacturer_id) FROM sessions s JOIN assets a ON s.assetId=a.assetId",
+            True,
+            False,
+        ),
+        (
+            "COUNT over the repeated side counts each row once per match",
+            "SELECT count(a.assetId) FROM sessions s JOIN assets a ON s.assetId=a.assetId",
+            True,
+            False,
+        ),
+        (
+            "AVG is reweighted, not corrupted, and may be exactly what was asked",
+            "SELECT avg(a.manufacturer_id) FROM sessions s JOIN assets a ON s.assetId=a.assetId",
+            False,
+            True,
+        ),
+        (
+            "MIN cannot change however often a row appears",
+            "SELECT min(a.manufacturer_id) FROM sessions s JOIN assets a ON s.assetId=a.assetId",
+            False,
+            False,
+        ),
+        (
+            "MAX likewise",
+            "SELECT max(a.manufacturer_id) FROM sessions s JOIN assets a ON s.assetId=a.assetId",
+            False,
+            False,
+        ),
+    ],
+)
+def test_only_the_aggregates_repetition_actually_breaks_are_refused(
+    label, sql, refused, noted
+) -> None:
+    """Refusing all of them cost a bank question its tool rounds for a query doing
+    exactly what it was told: "for every session look up that machine's utilisation
+    that day, then average over sessions" is a session-weighted average by
+    construction, and 21.05 is the right answer to it.
+    """
+    dataset = Dataset.load(
+        [
+            CsvSource.from_upload("sessions.csv", b"assetId,coinIn\n1,10\n1,20\n2,30\n"),
+            CsvSource.from_upload("assets.csv", b"assetId,manufacturer_id\n1,7\n1,9\n2,11\n"),
+        ]
+    )
+    try:
+        refusal, note = relationships.preflight(dataset, sql, {})
+        assert bool(refusal) is refused, f"{label}: {refusal}"
+        assert bool(note) is noted, f"{label}: {note}"
     finally:
         dataset.close()
