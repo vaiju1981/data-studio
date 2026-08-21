@@ -280,6 +280,14 @@ class DataAgent:
         self._progress: Callable[[str], None] | None = None
         self.messages: list[dict[str, Any]] = [{"role": "system", "content": self._system_prompt()}]
 
+    def _refresh_system_prompt(self) -> None:
+        """Rebuild messages[0] after anything the prompt is built from changes.
+
+        Understanding, metric definitions and relationship verdicts all land in the
+        system prompt, and each used to reassign messages[0] itself.
+        """
+        self.messages[0] = {"role": "system", "content": self._system_prompt()}
+
     def _report(self, message: str) -> None:
         """Say what is happening now. A failing sink must not lose the answer."""
         if self._progress is None:
@@ -299,7 +307,7 @@ class DataAgent:
         if cleaned == self.metrics:
             return False
         self.metrics = cleaned
-        self.messages[0] = {"role": "system", "content": self._system_prompt()}
+        self._refresh_system_prompt()
         return True
 
     def build_understanding(self) -> str:
@@ -314,7 +322,7 @@ class DataAgent:
         ]
         # Charting is not part of understanding, so only the query tool is offered.
         self.understanding = self._run_loop(explorer, MAX_EXPLORE_ROUNDS, [self.tools.run_sql])
-        self.messages[0] = {"role": "system", "content": self._system_prompt()}
+        self._refresh_system_prompt()
         return self.understanding
 
     def ask(
@@ -524,15 +532,15 @@ class DataAgent:
         logs.event("propose.made", joins=len(found.joins), rejected=len(found.rejected))
         for candidate in found.joins:
             try:
-                self.tools._join_facts[(candidate.left, candidate.right)] = relationships.verify(
+                self.tools.join_facts[(candidate.left, candidate.right)] = relationships.verify(
                     self.dataset, candidate
                 )
             except Exception:
                 logs.failure("propose.verify_failed")
         self.relationships = found
-        # Rebuild the prompt: exploring already wrote messages[0], so a proposal
-        # made afterwards would never reach the conversation it is for.
-        self.messages[0] = {"role": "system", "content": self._system_prompt()}
+        # Exploring already wrote messages[0], so a proposal made afterwards would
+        # never reach the conversation it is for.
+        self._refresh_system_prompt()
         return found
 
     def set_relationship_verdict(self, candidate: str, verdict: str) -> None:
@@ -541,7 +549,11 @@ class DataAgent:
         A rejected candidate leaves the context, or the button is decoration.
         """
         self.relationship_verdicts[candidate] = verdict
-        self.messages[0] = {"role": "system", "content": self._system_prompt()}
+        self._refresh_system_prompt()
+
+    def join_facts(self, candidate: relationships.JoinCandidate) -> relationships.Verified | None:
+        """What measuring this join showed, or None if it could not be measured."""
+        return self.tools.join_facts.get((candidate.left, candidate.right))
 
     def _relationship_text(self) -> str:
         """Candidates worth telling the model about, with the user's view of each."""
@@ -550,7 +562,7 @@ class DataAgent:
             verdict = self.relationship_verdicts.get(str(candidate))
             if verdict == "rejected":
                 continue
-            facts = self.tools._join_facts.get((candidate.left, candidate.right))
+            facts = self.join_facts(candidate)
             shape = f" — {facts.cardinality}, {facts.joined_rows:,} rows" if facts else ""
             confirmed = " (you confirmed this)" if verdict == "meaningful" else ""
             lines.append(f"- {candidate}{shape}{confirmed}")
