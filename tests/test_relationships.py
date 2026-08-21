@@ -771,6 +771,23 @@ def pair():
             "SELECT min(s.coinIn) FROM sessions s JOIN assets a ON s.assetId = a.assetId",
             False,
         ),
+        (
+            "the same fan-out sum hidden in the first arm of a UNION",
+            "SELECT sum(s.coinIn) FROM sessions s JOIN assets a ON s.assetId = a.assetId "
+            "UNION ALL SELECT sum(coinIn) FROM sessions",
+            True,
+        ),
+        (
+            "and in the second arm, where the query opens on a safe one",
+            "SELECT sum(coinIn) FROM sessions "
+            "UNION ALL SELECT sum(s.coinIn) FROM sessions s JOIN assets a ON s.assetId = a.assetId",
+            True,
+        ),
+        (
+            "two totals stacked with no join between them",
+            "SELECT sum(coinIn) FROM sessions UNION ALL SELECT sum(fee) FROM assets",
+            False,
+        ),
     ],
 )
 def test_the_ways_the_guard_could_be_walked_past(pair, finding, sql, refused) -> None:

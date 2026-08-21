@@ -12,14 +12,30 @@ class UnsafeQuery(ValueError):
     """Raised when a query is not a single SELECT over loaded tables."""
 
 
+# UNION, EXCEPT and INTERSECT parse to their own root node rather than a Select,
+# and all three only read. Requiring a Select root refused `SELECT id FROM a
+# EXCEPT SELECT id FROM b` — stacking period files and set-differencing two files
+# are the two most natural multi-CSV questions — while the same query wrapped in a
+# subquery passed, so the rule was arbitrary as well as wrong. INSERT ... SELECT
+# is an Insert and stays refused.
+READ_ONLY_ROOTS = (exp.Select, exp.SetOperation)
+
+
 def validate_select(sql: str, allowed_tables: set[str]) -> str:
     try:
         statements = sqlglot.parse(sql, read="duckdb")
     except sqlglot.errors.ParseError as error:
         raise UnsafeQuery(f"SQL could not be parsed: {error}") from error
 
-    if len(statements) != 1 or not isinstance(statements[0], exp.Select):
-        raise UnsafeQuery("Only one SELECT statement is allowed")
+    # Split from the shape test below because the two are different mistakes, and
+    # telling a model it wrote two statements when it wrote one set operation sent
+    # it looking for a semicolon it had never typed.
+    if len(statements) != 1:
+        raise UnsafeQuery("Only one statement is allowed")
+    if not isinstance(statements[0], READ_ONLY_ROOTS):
+        raise UnsafeQuery(
+            "Only a SELECT is allowed, optionally combined with UNION, EXCEPT or INTERSECT"
+        )
 
     statement = statements[0]
     cte_names = {cte.alias_or_name.lower() for cte in statement.find_all(exp.CTE)}
