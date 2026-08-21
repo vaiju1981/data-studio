@@ -27,10 +27,8 @@ from smart_data_studio.dataset import Dataset, QueryResult, is_sensitive, quote_
 class AnalysisRecord:
     """An analysis tool's own output, kept so the UI can show it as evidence.
 
-    Without this the model can quote a MAPE or a forecast the user has no way to
-    check — the same failure the SQL panel exists to prevent. `subject` is free
-    text because the tools describe different things: a series has a date and a
-    value, a comparison has a dimension and a measure.
+    `subject` is free text because the tools describe different things: a series
+    has a date and a value, a comparison has a dimension and a measure.
     """
 
     kind: str
@@ -83,10 +81,9 @@ def _filtered_literals(tree: exp.Expression) -> dict[str, set[str]]:
 def _aggregates_by(tree: exp.Expression, key: str) -> bool:
     """Whether the query resolves to one row per key somewhere along the way.
 
-    Three shapes reach entity grain and they are modelled differently. GROUP BY key
-    and COUNT(DISTINCT key) carry the column inside their own node — the second on
-    a Distinct that holds it. Plain SELECT DISTINCT does not: there the Distinct
-    renders as the bare word and the columns sit on the Select above it.
+    GROUP BY key and COUNT(DISTINCT key) carry the column inside their own node.
+    Plain SELECT DISTINCT does not: its Distinct renders as the bare word and the
+    columns sit on the Select above it, so that shape is matched separately.
     """
     wanted = key.lower()
     carries_key = (exp.Group, exp.Distinct)
@@ -106,20 +103,15 @@ class AnalysisTools:
         self.dataset = dataset
         self.results: list[QueryResult] = []
         self.analyses: list[AnalysisRecord] = []
-        # Names the data had no value for. Anything the answer then says about one
-        # rests on a mapping the model brought with it, which is worth recording
-        # whether or not the mapping is right.
+        # Names the data had no value for, so anything said about one came from the
+        # model rather than the file.
         self.unresolved: list[str] = []
-        # Set per turn so a query answering a question about entities can be told
-        # when it counted rows instead.
         self.entity_keys: dict[str, str] = {}
-        # Measured join facts, kept for the dataset's lifetime: the same join is
-        # checked once however many questions reach for it.
+        # Measured join facts, kept for the dataset's lifetime so a join is checked
+        # once however many questions reach for it.
         self._join_facts: dict = {}
-        # table -> column -> the values it holds, so a filter can be checked
-        # against the value the question named. Keyed by table because two files
-        # may each have a status column meaning different things, and merging
-        # them checks a filter against the wrong vocabulary.
+        # table -> column -> values held. Keyed by table because two files may each
+        # have a status column meaning different things.
         self.dimension_values: dict[str, dict[str, list[str]]] = {}
         # table -> measures another loaded table also carries under that name.
         self.shared_measures: dict[str, set[str]] = {}
@@ -132,8 +124,7 @@ class AnalysisTools:
     def reset_chart(self, keep_history: bool = True) -> None:
         """Charts belong to one question; results carry over so follow-ups can reuse them.
 
-        In single-turn mode the earlier results are hidden as well, so a chart
-        cannot quietly reach back into a question the model can no longer see.
+        Single-turn hides the earlier results too, via visible_from.
         """
         self.chart = None
         self.chart_spec = None
@@ -150,10 +141,8 @@ class AnalysisTools:
         Returns:
           A JSON result containing columns, rows, total row count, and truncation status.
         """
-        # Before the query runs, not after. The incomplete asset join builds 12.5
-        # million rows on the way to a number 439 times too large; there is no
-        # reason to pay for that before saying so. A single-table query returns
-        # from preflight untouched.
+        # Preflight before the query runs, so a join that would multiply is refused
+        # rather than paid for and then explained.
         refusal, weighting = relationships.preflight(self.dataset, sql, self._join_facts)
         if refusal:
             logs.event("join.refused")
@@ -164,25 +153,32 @@ class AnalysisTools:
             return _dump({"error": str(error)})
         self.results.append(result)
         payload = self.dataset.tool_payload(result)
-        for name, note in (
-            ("grain_warning", self._grain_note(sql)),
-            ("filter_warning", self._substitution_note(sql)),
-            ("source_warning", self._source_note(sql)),
-            ("weighting_warning", weighting),
-        ):
-            if note:
-                payload = {**payload, name: note}
-        return _dump(payload)
+        return _dump({**payload, **self._warnings(sql, weighting)})
 
-    def _source_note(self, sql: str) -> str | None:
-        """Warn when a shared measure was taken from a table nobody asked about.
+    def _warnings(self, sql: str, weighting: str | None) -> dict[str, str]:
+        """Every warning run_sql can attach, and the only place they are listed.
 
-        Asked for the game version with the most *session* coin in, a query summed
-        coinIn from the asset table, which carries its own daily column of that
-        name: 500,401,572 against a true 67,143,446. Nothing double-counted and no
-        join was made, so neither the fan-out guard nor the filter guard has
-        anything to catch — it is the wrong column, not a wrong join. Saying the
-        totals differ in the profile was not enough on its own.
+        The query is parsed once here and each check walks the same tree.
+        """
+        try:
+            tree = sqlglot.parse_one(sql, dialect="duckdb")
+        except Exception:
+            return {"weighting_warning": weighting} if weighting else {}
+        checks = (
+            ("grain_warning", self._grain_note),
+            ("filter_warning", self._substitution_note),
+            ("source_warning", self._source_note),
+        )
+        found = {name: note for name, check in checks if (note := check(tree))}
+        if weighting:
+            found["weighting_warning"] = weighting
+        return found
+
+    def _source_note(self, tree: exp.Expression) -> str | None:
+        """Warn when a measure was totalled from a table the question is not about.
+
+        Two tables carrying the same measure name hold different quantities, and
+        nothing here double counts or joins, so no other guard has anything to see.
         """
         if not self.question or not self.shared_measures:
             return None
@@ -190,10 +186,6 @@ class AnalysisTools:
         if len(named) != 1:
             return None  # nothing to disagree with
         wanted = named.pop()
-        try:
-            tree = sqlglot.parse_one(sql, dialect="duckdb")
-        except Exception:
-            return None
 
         sources = relationships._sources(tree, {name.lower() for name in self.dataset.tables})
         for node in tree.walk():
@@ -213,8 +205,8 @@ class AnalysisTools:
         return None
 
     def _tables_named_in_question(self) -> set[str]:
-        """Tables the question actually points at, by the part of the name that
-        tells them apart — every file here begins station_ and ends _redrock."""
+        """Tables the question points at, matched on the part of each name that
+        tells them apart rather than the prefix and suffix they all share."""
         asked = self.question.lower()
         parts = [set(re.split(r"[^a-z0-9]+", name.lower())) for name in self.dataset.tables]
         common = set.intersection(*parts) if parts else set()
@@ -225,22 +217,13 @@ class AnalysisTools:
                     named.add(name)
         return named
 
-    def _substitution_note(self, sql: str) -> str | None:
+    def _substitution_note(self, tree: exp.Expression) -> str | None:
         """Warn when the query filtered on a value the question did not ask for.
 
-        Asked about NATIONAL players, an answer once described REGIONAL ones. Both
-        are real values and the SQL is valid, so nothing fails — the answer is
-        simply about somebody else, and reads exactly as though it were not.
-
-        Only fires where the query does filter that column: a question naming a
-        value while grouping by the column is asking for a comparison, not a
-        filter, and has nothing to be wrong about.
+        Only where the query filters that column: a question naming a value while
+        grouping by the column is asking for a comparison, not a filter.
         """
         if not self.question or not self.dimension_values:
-            return None
-        try:
-            tree = sqlglot.parse_one(sql, dialect="duckdb")
-        except Exception:
             return None
         filtered = _filtered_literals(tree)
         touched = {name.lower() for name in _tables_in(tree)}
@@ -270,29 +253,21 @@ class AnalysisTools:
                 )
         return None
 
-    def _grain_note(self, sql: str) -> str | None:
+    def _grain_note(self, tree: exp.Expression) -> str | None:
         """Warn when a question about entities was answered by counting rows.
 
-        A table whose playerId repeats has two grains, and picking the wrong one
-        gives a number that is right for visits and wrong for players. Asked what
-        share of players beat the tier above, one such query answered 4.96% where
-        the answer per player is 30.54% — six times out, and reported as a
-        percentage of players.
-
-        Returned to the model rather than shown to the user, so it gets the chance
-        to run the right query instead of the wrong one being labelled.
+        A table whose key repeats has two grains, and the wrong one gives a figure
+        that is right per row and wrong per entity. Returned to the model rather
+        than shown to the user, so it can run the right query instead.
         """
         if not self.question:
             return None
         asked = self.question.lower()
-        try:
-            tree = sqlglot.parse_one(sql, dialect="duckdb")
-        except Exception:
-            return None
+        touched = {name.lower() for name in _tables_in(tree)}
         for table, key in self.entity_keys.items():
             # playerId -> player. A bare "id" is too generic to match a question on.
             noun = re.sub(r"(_id|Id|ID)$", "", key).strip("_").lower()
-            if len(noun) < 3 or noun not in asked or table.lower() not in sql.lower():
+            if len(noun) < 3 or noun not in asked or table.lower() not in touched:
                 continue
             if _aggregates_by(tree, key):
                 continue
@@ -331,12 +306,9 @@ class AnalysisTools:
             return _dump({"error": f"Unknown column: {column}"})
         quoted_table, quoted_column = quote_identifier(table), quote_identifier(column)
         value = f"CAST({quoted_column} AS VARCHAR)"
-        # Scored word by word, not matched as one phrase. A phrase match cannot find
-        # an abbreviation — "N LAS VEGAS" does not contain "north las vegas" — so
-        # searching the whole phrase returns the one spelling already known and
-        # hides the others, which is the entire failure this tool exists to catch.
-        # Single characters are kept: dropping them turned "Gen X" into a search for
-        # "Gen", which scores every Gen Z bucket as highly as the Gen X ones.
+        # Word by word, not as one phrase: a phrase match cannot find an
+        # abbreviation, which is the whole point of the tool. Single characters
+        # count too, or "Gen X" searches for "Gen" and matches every Gen Z bucket.
         words = contains.split()
         score = (
             " + ".join(f"CASE WHEN {value} ILIKE ? THEN 1 ELSE 0 END" for _ in words)
@@ -357,12 +329,11 @@ class AnalysisTools:
         except Exception as error:
             return _dump({"error": str(error)})
 
-        # Keep only what scores near the best. Matching any single word drags in
-        # values that merely share a fragment — DALLAS contains "las" — and burying
-        # the real spellings under those defeats the point.
+        # Keep only what scores near the best, or values sharing one fragment bury
+        # the real spellings.
         if rows and words:
-            # Rounded up, not to nearest: for a two-word name the nearest gives a
-            # floor of 1, which is no filter at all and lets DALLAS back in.
+            # Rounded up: for a two-word name the nearest gives a floor of 1, which
+            # is no filter at all.
             floor = max(1, math.ceil(max(row[2] for row in rows) * 0.6))
             rows = [row for row in rows if row[2] >= floor]
         more = len(rows) > MAX_VALUE_MATCHES
@@ -410,8 +381,8 @@ class AnalysisTools:
         source = reachable[-1]
         frame = source.frame
         if source.truncated:
-            # The stored frame is capped for the prompt's sake. Charting it directly
-            # would draw a fraction of the data and still look complete.
+            # The stored frame is capped for the prompt. Charting it would draw a
+            # fraction of the data and still look complete.
             full = self.dataset.query(source.sql, row_limit=MAX_CHART_ROWS)
             if full.truncated:
                 return json.dumps(
@@ -526,8 +497,7 @@ class AnalysisTools:
             f"{measure} between the two sides of {split}",
             lambda frame: analysis.rank_drivers(frame, measure, split),
             # This one sums. Means and correlations survive a sample; the difference
-            # between two near-equal sums does not — it reported a change of
-            # $1,091,057 where the truth was $526,870.
+            # between two near-equal sums does not.
             may_sample=False,
         )
 
@@ -548,10 +518,8 @@ class AnalysisTools:
 
     def _on_frame(self, kind: str, subject: str, analyse, may_sample: bool = True) -> str:
         """Run a whole-result analysis, on every row rather than the page shown."""
-        # visible_from, not the whole list: single-turn mode rebuilds the chat from
-        # the system prompt but the tools live for the session, so the last result
-        # may belong to a turn this one is supposed to know nothing about. Charts
-        # already respect this boundary; analyses did not.
+        # visible_from, not the whole list: the tools outlive a single-turn reset, so
+        # the newest result may belong to a turn this one cannot see.
         reachable = self.results[self.visible_from :]
         if not reachable:
             return json.dumps({"error": "Run a SQL query before analysing it."})
@@ -580,9 +548,8 @@ class AnalysisTools:
     def _analysis_frame(self, source: QueryResult):
         """The whole result, or a random sample of it when that is too large.
 
-        Sampling beats refusing. Told a result was too big to analyse, the model
-        reached for LIMIT — which takes the first rows in whatever order the scan
-        produced, and skewed a group mean by 22% while looking perfectly ordinary.
+        Sampling beats refusing: told a result was too big, the model reaches for
+        LIMIT, which takes whatever order the scan produced and skews every mean.
         """
         if not source.truncated:
             return source.frame, None
@@ -607,10 +574,7 @@ class AnalysisTools:
         self, kind: str, date_column: str, value_column: str, analyse, coverage_column: str = ""
     ) -> str:
         """Every series tool runs on the full result, not the page shown to the model."""
-        # visible_from, for the reason _on_frame gives: in single-turn mode the last
-        # result may belong to a turn this one cannot see, and forecasting it
-        # produced a projection of somebody else's question narrated as an answer to
-        # this one. Charts and the frame analyses were fixed; these were missed.
+        # visible_from, for the reason _on_frame gives.
         reachable = self.results[self.visible_from :]
         if not reachable:
             return json.dumps({"error": "Run a SQL query before analysing a series."})
