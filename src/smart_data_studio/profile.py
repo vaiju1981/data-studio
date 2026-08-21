@@ -167,7 +167,8 @@ def profile_table(dataset: Dataset, table_name: str) -> TableProfile:
         # would otherwise look like a column the file does not have.
         findings.append(
             f"No statistics could be computed for {', '.join(unsummarised)} — the values "
-            "include NaN, which DuckDB cannot summarise. The column is still queryable."
+            "include NaN or infinity, which DuckDB cannot summarise. The column is still "
+            "queryable."
         )
     if not findings:
         findings.append("No obvious constant, empty, high-null, or key-like columns were found.")

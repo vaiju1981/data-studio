@@ -108,7 +108,8 @@ def shutdown() -> None:
     behind on a mounted volume.
     """
     with _lock:
-        entries, _entries_cleared = list(_entries.values()), _entries.clear()
+        entries = list(_entries.values())
+        _entries.clear()
     for entry in entries:
         with contextlib.suppress(Exception):  # shutdown must not raise
             entry.dataset.close()
