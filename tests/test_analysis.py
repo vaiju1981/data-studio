@@ -7,6 +7,10 @@ import pandas as pd
 import pytest
 
 from smart_data_studio import analysis
+from smart_data_studio.config import (
+    MAX_COMPARISON_GROUPS,
+    MAX_LLM_PAYLOAD_CHARS,
+)
 from smart_data_studio.dataset import CsvSource, Dataset
 from smart_data_studio.tools import AnalysisTools
 
@@ -189,3 +193,34 @@ def test_every_analysis_record_carries_a_readable_subject() -> None:
         assert all(subject.strip() for subject in subjects)
     finally:
         dataset.close()
+
+
+def test_a_comparison_over_many_groups_stays_inside_the_prompt_budget() -> None:
+    """Every other tool is budgeted — run_sql digests, relate keeps 15, drivers 6.
+    This one listed every group, which on 2,000 levels meant 195,000 characters of
+    summary for the two it went on to test."""
+    rng = np.random.default_rng(0)
+    frame = pd.DataFrame(
+        {
+            "segment": [f"segment_{index % 2000}" for index in range(60_000)],
+            "value": rng.normal(100, 10, 60_000),
+        }
+    )
+    result = analysis.compare_groups(frame, "segment", "value")
+
+    assert len(result["groups"]) == MAX_COMPARISON_GROUPS
+    assert "2,000 groups" in result["note"]
+    assert f"the {MAX_COMPARISON_GROUPS} largest are listed" in result["note"]
+    # Listed largest first, so the pair actually tested is always among them.
+    assert {name for name in result["compared"]} <= {group["group"] for group in result["groups"]}
+    assert len(json.dumps(result)) < MAX_LLM_PAYLOAD_CHARS
+
+
+def test_a_comparison_over_a_few_groups_still_lists_them_all() -> None:
+    frame = pd.DataFrame(
+        {"segment": [f"s{index % 3}" for index in range(300)], "value": range(300)}
+    )
+    result = analysis.compare_groups(frame, "segment", "value")
+
+    assert len(result["groups"]) == 3
+    assert "all of them are listed" in result["note"]

@@ -7,6 +7,7 @@ import pandas as pd
 from scipy import stats
 
 from smart_data_studio.config import (
+    MAX_COMPARISON_GROUPS,
     MAX_DRIVER_LEVELS,
     MAX_RELATE_SAMPLE,
     MAX_TEST_SAMPLE,
@@ -67,6 +68,11 @@ def compare_groups(frame: pd.DataFrame, dimension: str, measure: str) -> dict[st
         .agg(["size", "mean", "median", "std"])
         .reindex(sizes.index)
     )
+    # Capped, and largest first, so the pair actually compared is always inside it.
+    # Every other tool is budgeted — run_sql digests, relate keeps 15, rank_drivers
+    # keeps 6 — and this one listed every group, which on 2,000 levels meant 195,000
+    # characters of summary for the two it went on to test.
+    shown = summary.head(MAX_COMPARISON_GROUPS)
     result: dict[str, object] = {
         "measure": measure,
         "dimension": dimension,
@@ -78,13 +84,18 @@ def compare_groups(frame: pd.DataFrame, dimension: str, measure: str) -> dict[st
                 "median": round(float(row["median"]), 4),
                 "std": round(float(row["std"]), 4) if pd.notna(row["std"]) else None,
             }
-            for name, row in summary.iterrows()
+            for name, row in shown.iterrows()
         ],
     }
     if len(sizes) > 2:
+        listed = (
+            f"the {len(shown)} largest are listed here"
+            if len(sizes) > len(shown)
+            else "all of them are listed here"
+        )
         result["note"] = (
-            f"{dimension} has {len(sizes)} groups; the two largest are compared. "
-            "Filter to the pair you care about for a different comparison."
+            f"{dimension} has {len(sizes):,} groups; the two largest are compared and "
+            f"{listed}. Filter to the pair you care about for a different comparison."
         )
 
     first, second = sizes.index[0], sizes.index[1]

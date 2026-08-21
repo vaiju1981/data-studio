@@ -121,6 +121,10 @@ SAMPLE_ROWS = 5
 # cost time, and effect size — the part that matters — is already stable.
 MAX_TEST_SAMPLE = 50_000
 MAX_RELATE_SAMPLE = 100_000
+# Group summaries a comparison returns. Listed largest first, so the two actually
+# compared always fall inside it. Uncapped, a dimension with 2,000 levels sent
+# 195,000 characters into a prompt whose result budget is MAX_LLM_PAYLOAD_CHARS.
+MAX_COMPARISON_GROUPS = 25
 # Values listed per dimension column. A column with no more than this many is
 # listed in full; a wider one shows its commonest, which is what makes a column
 # the model never queried still visible to it.
