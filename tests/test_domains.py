@@ -40,6 +40,12 @@ def test_a_byte_order_mark_does_not_become_part_of_the_first_column() -> None:
     ("label", "body"),
     [
         ("currency and percent", b'ticker,price\nAAPL,"$1,234.56"\nMSFT,"$987.65"\n'),
+        # Every currency Unicode knows, not the handful a Western reader thinks of
+        # first. Listing $, €, £ and ¥ reads as complete and is not: these three
+        # loaded as text and said nothing about it.
+        ("rupee", "ticker,price\nINFY,₹1234.56\nTCS,₹987.65\n".encode()),
+        ("won", "ticker,price\nSAM,₩1234\nHYU,₩987\n".encode()),
+        ("ruble", "ticker,price\nGAZ,₽1234.56\nSBR,₽987.65\n".encode()),
         # Semicolons, because a decimal comma requires them — see the pathological
         # case below for what a comma-separated file does with commas inside values.
         ("european decimals", b"datum;betrag\n01.02.2024;1.234,56\n03.04.2024;2.345,67\n"),

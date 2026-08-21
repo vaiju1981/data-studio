@@ -376,7 +376,10 @@ class Dataset:
                     # code is advised into losing its leading zero. Three shapes
                     # count — a currency or percent sign, a grouped number like
                     # 1.234,56, and a bare comma decimal like 2,6.
-                    f"count_if(regexp_matches({column}, '[$€£¥%]') OR "
+                    # \p{Sc} is every currency symbol Unicode knows. A list of the
+                    # familiar few reads as complete and is not: a column of ₹, ₩ or
+                    # ₽ amounts loaded as text and said nothing about it.
+                    f"count_if(regexp_matches({column}, '[\\p{{Sc}}%]') OR "
                     f"regexp_matches({column}, "
                     f"'^[-+]?[0-9]{{1,3}}([.,][0-9]{{3}})+([.,][0-9]+)?$') OR "
                     f"regexp_matches({column}, '^[-+]?[0-9]+,[0-9]+$')"
