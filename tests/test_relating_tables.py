@@ -1,8 +1,12 @@
-"""M1: what the model proposes about how tables relate is a hypothesis.
+"""How tables relate: proposals, facts and joins together.
 
-Everything here tests the validator rather than the proposal, because the proposal
-comes from a model and the guarantee is deterministic: a reference that does not
-resolve against the loaded schema never reaches a verification query.
+One file for three modules because the fixtures are shared — the same pair of
+CSVs proves that a proposal resolves, that the join it names multiplies, and that
+a query totalling over it is refused.
+
+Everything here tests what the code does with a proposal rather than the proposal
+itself, because that comes from a model and the guarantee is deterministic: a
+reference that does not resolve against the loaded schema never reaches a query.
 """
 
 from __future__ import annotations
