@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import json
 import re
+import shutil
 import tempfile
 import threading
 from collections.abc import Iterable
@@ -30,6 +31,7 @@ from smart_data_studio.config import (
     MAX_INGEST_ROWS,
     MAX_LLM_PAYLOAD_CHARS,
     MAX_LLM_ROWS,
+    MAX_LOCAL_FILE_BYTES,
     MAX_SESSION_QUERIES,
     MAX_UPLOAD_BYTES,
     QUERY_TIMEOUT_SECONDS,
@@ -98,6 +100,20 @@ class CsvSource:
         resolved = Path(path).expanduser().resolve()
         if not resolved.is_file():
             raise FileNotFoundError(f"CSV file not found: {resolved}")
+        size = resolved.stat().st_size
+        if size > MAX_LOCAL_FILE_BYTES:
+            raise ValueError(
+                f"{resolved.name} is {size / 1e9:.1f}GB; the limit is "
+                f"{MAX_LOCAL_FILE_BYTES / 1e9:.1f}GB."
+            )
+        # The same check decode_csv makes on an upload, and for the same reason: a
+        # binary file decodes to garbage rather than failing, so it is named here
+        # instead of arriving as an inscrutable parse error a hundred lines in.
+        with resolved.open("rb") as handle:
+            if b"\x00" in handle.read(65536):
+                raise ValueError(
+                    f"{resolved.name} looks binary, not CSV. Export it as text and try again."
+                )
         return cls(name=resolved.name, path=resolved)
 
     def header_names(self) -> list[str]:
@@ -108,10 +124,15 @@ class CsvSource:
         and the model is reading a column nobody named.
         """
         if self.content is not None:
-            first = self.content.split(b"\n", 1)[0].decode("utf-8", "replace")
+            raw = self.content.split(b"\n", 1)[0]
         else:
-            with self.path.open("r", encoding="utf-8", errors="replace") as handle:
-                first = handle.readline()
+            with self.path.open("rb") as handle:
+                raw = handle.readline()
+        # The same ladder decode_csv applies to an upload. Read as UTF-8 with
+        # replacements, a cp1252 header came back carrying question marks, and two
+        # names differing only by an accent then read as a duplicate. A line break
+        # cannot fall inside a multi-byte sequence, so one line decodes on its own.
+        first, _ = decode_csv(self.name, raw)
         first = first.rstrip("\r")
         # Split on whichever separator actually divides this line. Assuming a comma
         # made a semicolon or tab file parse as one enormous field, which silently
@@ -160,6 +181,36 @@ def decode_csv(name: str, content: bytes) -> tuple[str, str]:
             continue
     raise ValueError(
         f"{name} is not readable as UTF-8 or Windows-1252. Re-save it as UTF-8 — "
+        "most spreadsheets offer 'CSV UTF-8'."
+    )
+
+
+def transcode_to_utf8(source: Path) -> Path:
+    """Rewrite a CSV as UTF-8 in a temporary file, returning where it went.
+
+    Streamed a chunk at a time rather than decoded whole. A local path exists so
+    that a file larger than memory need not be held in it, and pulling 2.7GB into a
+    string to fix three accented characters would give exactly that away.
+
+    Two encodings, not decode_csv's three: this only runs on a file DuckDB has
+    already refused as non-UTF-8, and utf-8-sig differs from utf-8 by a BOM alone.
+    """
+    with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as handle:
+        destination = Path(handle.name)
+    for encoding in ("utf-8-sig", "cp1252"):
+        try:
+            # newline="" so the file's own line endings survive the round trip.
+            with (
+                source.open("r", encoding=encoding, newline="") as reader,
+                destination.open("w", encoding="utf-8", newline="") as writer,
+            ):
+                shutil.copyfileobj(reader, writer)
+            return destination
+        except UnicodeDecodeError:
+            continue
+    destination.unlink(missing_ok=True)
+    raise ValueError(
+        f"{source.name} is not readable as UTF-8 or Windows-1252. Re-save it as UTF-8 — "
         "most spreadsheets offer 'CSV UTF-8'."
     )
 
@@ -512,14 +563,31 @@ class Dataset:
             path = temporary_path
 
         try:
-            connection.execute(
-                f"CREATE TABLE {quote_identifier(table_name)} AS "
-                "SELECT * FROM read_csv_auto(?, header = true, sample_size = -1)",
-                [str(path)],
-            )
+            try:
+                Dataset._read_csv(connection, table_name, path)
+            except duckdb.InvalidInputException as error:
+                # An upload is normalised by decode_csv on the way in; a path was
+                # handed to DuckDB exactly as it sits on disk, so the same Windows
+                # export loaded through the browser and failed through the box
+                # beside it. DuckDB reads UTF-8 only — its latin-1 mode refuses the
+                # 0x80-0x9F range that carries Windows quotes and dashes, and
+                # windows-1252 needs an extension — so the file is rewritten rather
+                # than refused. Retried only for a path: content arrived decoded.
+                if temporary_path is not None or "utf-8 encoded" not in str(error):
+                    raise
+                temporary_path = transcode_to_utf8(path)
+                Dataset._read_csv(connection, table_name, temporary_path)
         finally:
             if temporary_path is not None:
                 temporary_path.unlink(missing_ok=True)
+
+    @staticmethod
+    def _read_csv(connection: duckdb.DuckDBPyConnection, table_name: str, path: Path) -> None:
+        connection.execute(
+            f"CREATE TABLE {quote_identifier(table_name)} AS "
+            "SELECT * FROM read_csv_auto(?, header = true, sample_size = -1)",
+            [str(path)],
+        )
 
     def schema(self, table_name: str) -> list[tuple[str, str]]:
         self._require_table(table_name)

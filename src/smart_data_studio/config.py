@@ -46,8 +46,15 @@ DUCKDB_THREADS = _number("SDS_DUCKDB_THREADS", 4)
 DUCKDB_TEMP_DIR = os.environ.get("SDS_DUCKDB_TEMP_DIR", "")
 QUERY_TIMEOUT_SECONDS = _number("SDS_QUERY_TIMEOUT_SECONDS", 60)
 
-# Upload ceilings, checked before parsing rather than after.
+# Size ceilings, checked before parsing. A local path gets its own and a looser
+# one: nothing crossed a network, and the 962MB and 2.7GB files this was built
+# against load and query perfectly well, so the upload limit would refuse the very
+# case paths exist for. It only catches the absurd, and catches it before the
+# table exists — which is the earliest MAX_INGEST_ROWS below can manage.
 MAX_UPLOAD_BYTES = _number("SDS_MAX_UPLOAD_BYTES", 500 * 1024 * 1024)
+MAX_LOCAL_FILE_BYTES = _number("SDS_MAX_LOCAL_FILE_BYTES", 5 * 1024 * 1024 * 1024)
+
+# Shape ceilings, necessarily measured once the table is built.
 MAX_INGEST_ROWS = _number("SDS_MAX_INGEST_ROWS", 20_000_000)
 MAX_INGEST_COLUMNS = _number("SDS_MAX_INGEST_COLUMNS", 512)
 

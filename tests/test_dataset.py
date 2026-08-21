@@ -145,3 +145,50 @@ def test_columns_mentioned_in_definitions_surface_typos() -> None:
         assert dataset.columns_mentioned_in("avgBet = amountt / orderid") == []
     finally:
         dataset.close()
+
+
+def test_a_windows_export_loads_from_a_path_as_it_does_from_an_upload(tmp_path) -> None:
+    """decode_csv normalises an upload; a path was handed to DuckDB as it sits on
+    disk, so the same file loaded through the browser and failed through the box
+    beside it. 0x92 is the smart quote DuckDB's own latin-1 mode also refuses."""
+    path = tmp_path / "euro.csv"
+    path.write_bytes("region,ventas\nCafé,10\nMünchen,20\n".encode("cp1252") + b"O\x92Brien,30\n")
+
+    dataset = Dataset.load([CsvSource.from_path(path)])
+    try:
+        assert dataset.query("SELECT * FROM euro").frame.to_dict(orient="records") == [
+            {"region": "Café", "ventas": 10},
+            {"region": "München", "ventas": 20},
+            {"region": "O’Brien", "ventas": 30},
+        ]
+    finally:
+        dataset.close()
+
+
+def test_a_utf8_path_is_not_transcoded_on_the_way_in(tmp_path) -> None:
+    """The retry must stay on the failure path: a valid file is handed straight to
+    DuckDB, which is the whole reason a path is cheaper than an upload."""
+    path = tmp_path / "plain.csv"
+    path.write_text("region,ventas\nCafé,10\n", encoding="utf-8")
+
+    dataset = Dataset.load([CsvSource.from_path(path)])
+    try:
+        assert dataset.row_count("plain") == 1
+    finally:
+        dataset.close()
+
+
+def test_a_binary_path_is_named_rather_than_parsed(tmp_path) -> None:
+    path = tmp_path / "sheet.xlsx"
+    path.write_bytes(b"PK\x03\x04\x00\x00binary payload")
+    with pytest.raises(ValueError, match="looks binary"):
+        CsvSource.from_path(path)
+
+
+def test_an_absurd_local_file_is_refused_before_it_is_parsed(tmp_path, monkeypatch) -> None:
+    """MAX_INGEST_ROWS catches this only once the table already exists."""
+    monkeypatch.setattr("smart_data_studio.dataset.MAX_LOCAL_FILE_BYTES", 10)
+    path = tmp_path / "big.csv"
+    path.write_text("region,amount\nNorth,10\nSouth,20\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="the limit is"):
+        CsvSource.from_path(path)
