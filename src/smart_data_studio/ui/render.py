@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import pandas as pd
 import streamlit as st
 
@@ -12,20 +14,32 @@ from smart_data_studio.profile import TableProfile
 from smart_data_studio.tools import AnalysisRecord
 
 
+def as_text(markdown: str) -> str:
+    """Escape dollar signs so a money figure is not rendered as mathematics.
+
+    Streamlit reads $...$ as LaTeX, so an answer quoting two amounts loses
+    everything between them: "$4.48M**, the monthly volume collapsed to a range
+    between **$509k" came out as one equation with the spaces stripped. Every
+    answer here is about data and some of that data is money, so the delimiter is
+    worth more as a currency symbol than as maths.
+    """
+    return re.sub(r"(?<!\\)\$", r"\\$", markdown)
+
+
 def answer(item: Answer, key: str, dataset: Dataset) -> None:
     """Conclusion first, then the chart, then the evidence behind both."""
     if item.plan:
         with st.expander(f"Investigated in {len(item.plan)} steps", expanded=False):
             for index, step in enumerate(item.plan, start=1):
-                st.markdown(f"{index}. {step}")
-    st.markdown(item.text)
+                st.markdown(f"{index}. {as_text(step)}")
+    st.markdown(as_text(item.text))
     for assumption in item.assumptions:
         # Shown for the same reason the SQL is: an answer nobody can check is not
         # finished.
         st.warning(
-            f"**{assumption}** — this data holds no such value, so anything the answer says "
-            "about it comes from the model's own knowledge, not from your file. Worth "
-            "confirming before relying on it."
+            f"**{as_text(assumption)}** — this data holds no such value, so anything the "
+            "answer says about it comes from the model's own knowledge, not from your file. "
+            "Worth confirming before relying on it."
         )
     if item.chart is not None:
         st.plotly_chart(item.chart, use_container_width=True, key=f"chart-{key}")
@@ -160,7 +174,7 @@ def _export(result: QueryResult, key: str, dataset: Dataset) -> None:
 
 def understanding(text: str, error: str) -> None:
     if text:
-        st.markdown(text)
+        st.markdown(as_text(text))
         return
     st.warning("Written insights are unavailable, but the computed profile is ready.")
     if error:

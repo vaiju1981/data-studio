@@ -103,3 +103,18 @@ def test_a_selection_of_a_vanished_file_does_not_break_the_sidebar(monkeypatch, 
     app.run(timeout=30)
     assert not app.exception
     assert app.session_state.chosen_paths == []
+
+
+def test_money_in_an_answer_is_not_rendered_as_mathematics() -> None:
+    """Streamlit reads $...$ as LaTeX, so an answer quoting two amounts lost
+    everything between them: the real one collapsed "$4.48M**, the monthly volume
+    collapsed to a range between **$509k" into a single equation."""
+    from smart_data_studio.ui.render import as_text
+
+    written = "peaked at $4.48M**, collapsing to between **$509k and $676k"
+    assert as_text(written) == r"peaked at \$4.48M**, collapsing to between **\$509k and \$676k"
+
+    # Idempotent, so an answer that escaped its own dollars is left alone.
+    assert as_text(as_text(written)) == as_text(written)
+    # Nothing else is touched.
+    assert as_text("plain **bold** text") == "plain **bold** text"
