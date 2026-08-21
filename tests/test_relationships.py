@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from smart_data_studio import relationships
+from smart_data_studio import facts, joins, proposals
 from smart_data_studio.config import MAX_JOIN_CANDIDATES, MAX_KEY_CANDIDATES
 from smart_data_studio.dataset import CsvSource, Dataset
 
@@ -41,7 +41,7 @@ def join(left_cols, right_cols, left="sessions", right="assets", **extra):
 
 
 def test_a_composite_join_resolves(data) -> None:
-    found = relationships.validate(data, [join(["assetId", "day"], ["assetId", "day"])])
+    found = proposals.validate(data, [join(["assetId", "day"], ["assetId", "day"])])
     assert not found.rejected
     assert str(found.joins[0]) == "sessions(assetId, day) = assets(assetId, day)"
 
@@ -49,9 +49,9 @@ def test_a_composite_join_resolves(data) -> None:
 def test_identifiers_resolve_without_case_but_keep_the_file_s_spelling(data) -> None:
     """A proposal saying assetid must resolve, and what is stored must be what the
     file calls the column — anything else produces SQL that does not run."""
-    found = relationships.validate(data, [join(["ASSETID"], ["assetid"], left="SESSIONS")])
+    found = proposals.validate(data, [join(["ASSETID"], ["assetid"], left="SESSIONS")])
     assert not found.rejected
-    assert found.joins[0].left == relationships.Ref("sessions", ("assetId",))
+    assert found.joins[0].left == proposals.Ref("sessions", ("assetId",))
 
 
 @pytest.mark.parametrize(
@@ -70,7 +70,7 @@ def test_identifiers_resolve_without_case_but_keep_the_file_s_spelling(data) -> 
 def test_a_proposal_that_does_not_resolve_is_rejected_with_a_reason(
     data, proposal, because
 ) -> None:
-    found = relationships.validate(data, [proposal])
+    found = proposals.validate(data, [proposal])
     assert not found.joins and not found.keys
     assert any(because in reason for reason in found.rejected), found.rejected
 
@@ -82,7 +82,7 @@ def test_a_withheld_column_cannot_be_proposed_or_named_in_the_refusal(data) -> N
     original = dataset_module.SENSITIVE_COLUMNS
     dataset_module.SENSITIVE_COLUMNS = ("coinin",)
     try:
-        found = relationships.validate(
+        found = proposals.validate(
             data, [{"kind": "key", "table": "sessions", "columns": ["coinIn"]}]
         )
         assert not found.keys
@@ -100,7 +100,7 @@ def test_proposals_are_bounded_per_table_and_per_pair(data) -> None:
         join(["assetId"], ["assetId"], reason=f"wording {n}")
         for n in range(MAX_JOIN_CANDIDATES + 3)
     ]
-    found = relationships.validate(data, same)
+    found = proposals.validate(data, same)
     assert len(found.joins) == 1, "the same join counted more than once"
     assert found.joins[0].reason == "wording 0", "the first reason should survive"
 
@@ -113,7 +113,7 @@ def test_proposals_are_bounded_per_table_and_per_pair(data) -> None:
         (["assetId"], ["day"]),
         (["day"], ["assetId"]),
     ]
-    found = relationships.validate(data, [join(left, right) for left, right in pairs])
+    found = proposals.validate(data, [join(left, right) for left, right in pairs])
     assert len(found.joins) == MAX_JOIN_CANDIDATES
     assert (
         sum("more than" in reason for reason in found.rejected) == len(pairs) - MAX_JOIN_CANDIDATES
@@ -121,11 +121,11 @@ def test_proposals_are_bounded_per_table_and_per_pair(data) -> None:
 
     distinct_keys = [["assetId"], ["day"], ["coinIn"], ["assetId", "day"], ["day", "coinIn"]]
     keys = [{"kind": "key", "table": "sessions", "columns": cols} for cols in distinct_keys]
-    assert len(relationships.validate(data, keys).keys) == MAX_KEY_CANDIDATES
+    assert len(proposals.validate(data, keys).keys) == MAX_KEY_CANDIDATES
 
 
 def test_a_malformed_proposal_does_not_stop_the_good_ones(data) -> None:
-    found = relationships.validate(
+    found = proposals.validate(
         data,
         [
             {"kind": "join", "left": "not a dict", "right": None},
@@ -138,7 +138,7 @@ def test_a_malformed_proposal_does_not_stop_the_good_ones(data) -> None:
 
 
 def test_nothing_proposed_is_not_an_error(data) -> None:
-    found = relationships.validate(data, [])
+    found = proposals.validate(data, [])
     assert (found.keys, found.joins, found.rejected) == ([], [], [])
 
 
@@ -146,9 +146,9 @@ def test_nothing_proposed_is_not_an_error(data) -> None:
 
 
 def verify_join(dataset, left_cols, right_cols):
-    found = relationships.validate(dataset, [join(left_cols, right_cols)])
+    found = proposals.validate(dataset, [join(left_cols, right_cols)])
     assert not found.rejected, found.rejected
-    return relationships.verify(dataset, found.joins[0])
+    return facts.verify(dataset, found.joins[0])
 
 
 def test_an_incomplete_key_is_measured_as_the_explosion_it_is(data) -> None:
@@ -221,7 +221,7 @@ def test_a_join_that_drops_rows_is_partial_even_when_nothing_multiplies() -> Non
 
 def guard(dataset, sql):
     """The refusal alone; the second element is the non-blocking note."""
-    return relationships.preflight(dataset, sql, {})[0]
+    return joins.preflight(dataset, sql, {})[0]
 
 
 def test_the_incomplete_join_is_refused_before_it_runs(data) -> None:
@@ -320,9 +320,9 @@ def test_using_is_understood(data) -> None:
 def test_measured_facts_are_reused_rather_than_remeasured(data) -> None:
     cache: dict = {}
     sql = "SELECT SUM(s.coinIn) FROM sessions s JOIN assets a ON s.assetId=a.assetId"
-    relationships.preflight(data, sql, cache)
+    joins.preflight(data, sql, cache)
     assert len(cache) == 1
-    relationships.preflight(data, sql, cache)
+    joins.preflight(data, sql, cache)
     assert len(cache) == 1, "the same join was measured twice"
 
 
@@ -363,7 +363,7 @@ def test_one_loaded_table_never_reaches_the_join_guard(single, sql) -> None:
     belongs on the dataset — fan-out inside one table is the grain guard's job, and
     that already runs.
     """
-    assert relationships.preflight(single, sql, {})[0] is None
+    assert joins.preflight(single, sql, {})[0] is None
 
 
 @pytest.mark.parametrize(
@@ -406,7 +406,7 @@ def test_a_derived_relation_is_credited_only_when_its_grain_is_visible(
     dangerous", and refused every query containing one. Undetermined is still
     refused, because allowing it was the same bypass in another costume.
     """
-    verdict = relationships.preflight(data, sql, {})[0]
+    verdict = joins.preflight(data, sql, {})[0]
     assert bool(verdict) is refused, f"{label}: {verdict}"
 
 
@@ -414,8 +414,8 @@ def test_a_derived_relation_is_credited_only_when_its_grain_is_visible(
 
 
 def test_a_single_column_key_is_found_and_reported(data) -> None:
-    facts = relationships.discover_keys(data, "assets", {"assetId": 2, "day": 2, "manufacturer": 2})
-    assert facts and all(f.unique for f in facts)
+    found = facts.discover_keys(data, "assets", {"assetId": 2, "day": 2, "manufacturer": 2})
+    assert found and all(f.unique for f in found)
 
 
 def test_a_composite_key_is_found_when_no_single_column_identifies_a_row() -> None:
@@ -425,9 +425,9 @@ def test_a_composite_key_is_found_when_no_single_column_identifies_a_row() -> No
     rows += [f"{asset},2024-01-{day:02d},x" for asset in (1, 2, 3) for day in range(1, 8)]
     dataset = Dataset.load([CsvSource.from_upload("a.csv", ("\n".join(rows) + "\n").encode())])
     try:
-        facts = relationships.discover_keys(dataset, "a", {"assetId": 3, "day": 7, "note": 1})
-        assert facts, "no key offered for a table that plainly has one"
-        best = facts[0]
+        found = facts.discover_keys(dataset, "a", {"assetId": 3, "day": 7, "note": 1})
+        assert found, "no key offered for a table that plainly has one"
+        best = found[0]
         assert best.unique and set(best.ref.columns) == {"assetId", "day"}
         assert "one row per" in best.describe()
     finally:
@@ -441,9 +441,9 @@ def test_a_measure_is_never_offered_as_a_key() -> None:
     rows += [f"{a},2024-01-{d:02d},{a * 100 + d}.5" for a in (1, 2) for d in range(1, 6)]
     dataset = Dataset.load([CsvSource.from_upload("a.csv", ("\n".join(rows) + "\n").encode())])
     try:
-        assert "grossWin" in relationships.measure_columns(dataset, "a")
-        facts = relationships.discover_keys(dataset, "a", {"grossWin": 10, "assetId": 2, "day": 5})
-        assert all("grossWin" not in f.ref.columns for f in facts), [f.ref for f in facts]
+        assert "grossWin" in facts.measure_columns(dataset, "a")
+        found = facts.discover_keys(dataset, "a", {"grossWin": 10, "assetId": 2, "day": 5})
+        assert all("grossWin" not in f.ref.columns for f in found), [f.ref for f in found]
     finally:
         dataset.close()
 
@@ -451,10 +451,10 @@ def test_a_measure_is_never_offered_as_a_key() -> None:
 def test_key_facts_count_nulls_apart_from_duplicates() -> None:
     dataset = Dataset.load([CsvSource.from_upload("a.csv", b"k,v\n1,a\n2,b\n,c\n")])
     try:
-        facts = relationships.verify_key(dataset, relationships.Ref("a", ("k",)))
-        assert facts.rows == 3 and facts.complete == 2
-        assert facts.unique and facts.has_nulls
-        assert "though 1 rows have none" in facts.describe()
+        measured = facts.verify_key(dataset, proposals.Ref("a", ("k",)))
+        assert measured.rows == 3 and measured.complete == 2
+        assert measured.unique and measured.has_nulls
+        assert "though 1 rows have none" in measured.describe()
     finally:
         dataset.close()
 
@@ -471,11 +471,11 @@ def test_tables_with_nothing_in_common_produce_no_candidates_and_no_error(data) 
         ]
     )
     try:
-        found = relationships.validate(unrelated, [])
+        found = proposals.validate(unrelated, [])
         assert (found.keys, found.joins, found.rejected) == ([], [], [])
         # And a query over both is simply not something the guard objects to.
         assert (
-            relationships.preflight(
+            joins.preflight(
                 unrelated,
                 "SELECT sum(w.degrees) FROM weather w JOIN stock s ON w.city = s.ticker",
                 {},
@@ -498,7 +498,7 @@ def test_verification_is_bounded_by_the_query_deadline(data, monkeypatch) -> Non
         return original()
 
     monkeypatch.setattr(data, "_deadline", watched)
-    relationships.verify_key(data, relationships.Ref("sessions", ("assetId",)))
+    facts.verify_key(data, proposals.Ref("sessions", ("assetId",)))
     verify_join(data, ["assetId"], ["assetId"])
     assert used, "verification ran without the deadline every other query gets"
 
@@ -522,8 +522,7 @@ def measure_tools(dataset):
 
     tools = AnalysisTools(dataset)
     tools.shared_measures = {
-        table: relationships.measure_columns(dataset, table) & {"coinIn"}
-        for table in dataset.tables
+        table: facts.measure_columns(dataset, table) & {"coinIn"} for table in dataset.tables
     }
     return tools
 
@@ -646,7 +645,7 @@ def test_only_the_aggregates_repetition_actually_breaks_are_refused(
         ]
     )
     try:
-        refusal, note = relationships.preflight(dataset, sql, {})
+        refusal, note = joins.preflight(dataset, sql, {})
         assert bool(refusal) is refused, f"{label}: {refusal}"
         assert bool(note) is noted, f"{label}: {note}"
     finally:
@@ -804,7 +803,7 @@ def test_the_ways_the_guard_could_be_walked_past(pair, finding, sql, refused) ->
     And listing the harmful aggregates rather than the harmless ones let total()
     through as though it were as safe as MIN, when it is a SUM by another spelling.
     """
-    verdict, _ = relationships.preflight(pair, sql, {})
+    verdict, _ = joins.preflight(pair, sql, {})
     assert bool(verdict) is refused, f"{finding}: {verdict}"
 
 
@@ -817,8 +816,8 @@ def test_an_inner_join_that_drops_rows_says_so(pair) -> None:
         "SELECT sum(s.coinIn) FROM sessions s "
         "JOIN assets a ON s.assetId = a.assetId AND s.day = a.day"
     )
-    relationships.preflight(pair, sql, cache)  # warm the measurement
-    refusal, note = relationships.preflight(pair, sql, cache)
+    joins.preflight(pair, sql, cache)  # warm the measurement
+    refusal, note = joins.preflight(pair, sql, cache)
     assert refusal is None, "a complete join must still run"
     assert note is None or "leaves rows out" in note
 
@@ -829,7 +828,7 @@ def test_an_integer_that_names_itself_a_key_is_not_a_measure(pair) -> None:
         [CsvSource.from_upload("t.csv", b"movieId,player_id,jackpots,rate\n1,7,3,0.5\n2,8,4,0.6\n")]
     )
     try:
-        measures = relationships.measure_columns(dataset, "t")
+        measures = facts.measure_columns(dataset, "t")
         assert "jackpots" in measures and "rate" in measures
         assert "movieId" not in measures and "player_id" not in measures
     finally:
@@ -839,14 +838,14 @@ def test_an_integer_that_names_itself_a_key_is_not_a_measure(pair) -> None:
 def test_candidate_keys_are_measured_in_two_passes_not_twenty_one(pair, monkeypatch) -> None:
     """Six singles and fifteen pairs used to be twenty-one scans of one table."""
     passes = []
-    original = relationships._measure_keys
+    original = facts._measure_keys
 
     def counted(dataset, table, candidates):
         passes.append(len(candidates))
         return original(dataset, table, candidates)
 
-    monkeypatch.setattr(relationships, "_measure_keys", counted)
-    relationships.discover_keys(pair, "assets", {"assetId": 2, "day": 2, "fee": 3})
+    monkeypatch.setattr(facts, "_measure_keys", counted)
+    facts.discover_keys(pair, "assets", {"assetId": 2, "day": 2, "fee": 3})
     assert len(passes) <= 2, f"{len(passes)} passes over one table for {passes} candidates"
 
 
@@ -896,7 +895,7 @@ def test_an_aggregate_that_cannot_be_traced_is_not_thereby_safe(
     Each reads exactly what fan-out inflates, and each walked past a guard that
     only looked at columns it could trace — treating "cannot tell" as "safe".
     """
-    verdict, _ = relationships.preflight(pair, sql, {})
+    verdict, _ = joins.preflight(pair, sql, {})
     assert bool(verdict) is refused, f"{finding}: {verdict}"
 
 
@@ -938,8 +937,8 @@ def test_an_inner_join_that_drops_rows_says_which_and_how_many(lopsided, label, 
     all matched, so there was nothing to report either way.
     """
     cache: dict = {}
-    relationships.preflight(lopsided, sql, cache)  # measure
-    refusal, note = relationships.preflight(lopsided, sql, cache)
+    joins.preflight(lopsided, sql, cache)  # measure
+    refusal, note = joins.preflight(lopsided, sql, cache)
     assert refusal is None, f"{label}: a complete join must still run"
     assert note and "leaves rows out" in note, f"{label}: {note}"
     assert "1 rows of sessions" in note and "1 of assets" in note, note
@@ -952,7 +951,7 @@ def test_an_integer_can_be_part_of_a_composite_key() -> None:
     rows += [f"{asset},2024010{day},1.5" for asset in (1, 2, 3) for day in range(1, 8)]
     dataset = Dataset.load([CsvSource.from_upload("a.csv", ("\n".join(rows) + "\n").encode())])
     try:
-        found = relationships.discover_keys(dataset, "a", {"assetId": 3, "day": 7, "fee": 1})
+        found = facts.discover_keys(dataset, "a", {"assetId": 3, "day": 7, "fee": 1})
         assert found, "no key offered for a table keyed on two integers"
         assert set(found[0].ref.columns) == {"assetId", "day"}, found[0].ref
     finally:
@@ -1000,7 +999,7 @@ def test_renaming_a_column_does_not_launder_it(pair, label, sql, refused) -> Non
     DISTINCT is the other half: repetition cannot change a distinct count, and
     refusing it turned the standard way of writing a safe count into an error.
     """
-    verdict, _ = relationships.preflight(pair, sql, {})
+    verdict, _ = joins.preflight(pair, sql, {})
     assert bool(verdict) is refused, f"{label}: {verdict}"
 
 
@@ -1012,7 +1011,7 @@ def test_an_identifier_outranks_a_measure_with_more_values() -> None:
     rows += [f"{a},2024010{d},{a * 1000 + d}" for a in (1, 2, 3) for d in range(1, 8)]
     dataset = Dataset.load([CsvSource.from_upload("a.csv", ("\n".join(rows) + "\n").encode())])
     try:
-        found = relationships.discover_keys(dataset, "a", {"assetId": 3, "day": 7, "jackpots": 21})
+        found = facts.discover_keys(dataset, "a", {"assetId": 3, "day": 7, "jackpots": 21})
         assert found, "no key offered"
         assert set(found[0].ref.columns) == {"assetId", "day"}, found[0].ref
     finally:
@@ -1028,7 +1027,7 @@ def test_a_measure_that_happens_to_be_unique_is_not_called_a_key() -> None:
     rows = ["region,jackpots"] + [f"{'N' if n % 2 else 'S'},{n * 7}" for n in range(12)]
     dataset = Dataset.load([CsvSource.from_upload("t.csv", ("\n".join(rows) + "\n").encode())])
     try:
-        found = relationships.discover_keys(dataset, "t", {"jackpots": 12, "region": 2})
+        found = facts.discover_keys(dataset, "t", {"jackpots": 12, "region": 2})
         assert found, "the column should still be reported"
         described = found[0].describe()
         assert "no column identifies a row" in described, described
@@ -1045,7 +1044,7 @@ def test_a_real_identifier_key_is_still_stated_plainly() -> None:
     rows += [f"{a},2024010{d},{a * 7 + d}" for a in (1, 2, 3) for d in range(1, 8)]
     dataset = Dataset.load([CsvSource.from_upload("a.csv", ("\n".join(rows) + "\n").encode())])
     try:
-        found = relationships.discover_keys(dataset, "a", {"assetId": 3, "day": 7, "jackpots": 21})
+        found = facts.discover_keys(dataset, "a", {"assetId": 3, "day": 7, "jackpots": 21})
         assert found[0].describe() == "one row per (assetId, day)"
     finally:
         dataset.close()

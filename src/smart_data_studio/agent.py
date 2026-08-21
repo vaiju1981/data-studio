@@ -13,7 +13,7 @@ import httpx
 import ollama
 from plotly.graph_objects import Figure
 
-from smart_data_studio import logs, relationships
+from smart_data_studio import facts, logs, proposals
 from smart_data_studio.config import (
     KEEP_TOOL_PAYLOADS,
     MAX_CONTEXT_SHEDS,
@@ -262,17 +262,17 @@ class DataAgent:
         self.tools.shared_measures = {
             table: measures
             for table in dataset.tables
-            if (measures := relationships.measure_columns(dataset, table))
+            if (measures := facts.measure_columns(dataset, table))
             & {
                 name
                 for other in dataset.tables
                 if other != table
-                for name in relationships.measure_columns(dataset, other)
+                for name in facts.measure_columns(dataset, other)
             }
         }
         self.understanding = ""
         self.metrics = ""
-        self.relationships = relationships.Proposals()
+        self.relationships = proposals.Proposals()
         # Belongs to this agent, so a reloaded dataset starts with no verdicts.
         self.relationship_verdicts: dict[str, str] = {}
         # Set for the duration of one ask(), like tools.question. A caller with
@@ -498,7 +498,7 @@ class DataAgent:
             assumptions=self.tools.unresolved[first_assumption:],
         )
 
-    def propose_relationships(self) -> relationships.Proposals:
+    def propose_relationships(self) -> proposals.Proposals:
         """Ask the model which columns relate these tables, then measure each.
 
         The model reads names, profiles and samples, which beats an overlap
@@ -506,7 +506,7 @@ class DataAgent:
         know is whether a join multiplies, so every surviving proposal is measured.
         """
         if len(self.dataset.tables) < 2:
-            return relationships.Proposals()
+            return proposals.Proposals()
         try:
             reply = (
                 self._chat(
@@ -525,14 +525,14 @@ class DataAgent:
             )
         except Exception:
             logs.failure("propose.failed")
-            return relationships.Proposals()
+            return proposals.Proposals()
 
         raw = _first_json_list(reply)
-        found = relationships.validate(self.dataset, raw)
+        found = proposals.validate(self.dataset, raw)
         logs.event("propose.made", joins=len(found.joins), rejected=len(found.rejected))
         for candidate in found.joins:
             try:
-                self.tools.join_facts[(candidate.left, candidate.right)] = relationships.verify(
+                self.tools.join_facts[(candidate.left, candidate.right)] = facts.verify(
                     self.dataset, candidate
                 )
             except Exception:
@@ -551,7 +551,7 @@ class DataAgent:
         self.relationship_verdicts[candidate] = verdict
         self._refresh_system_prompt()
 
-    def join_facts(self, candidate: relationships.JoinCandidate) -> relationships.Verified | None:
+    def join_facts(self, candidate: proposals.JoinCandidate) -> facts.Verified | None:
         """What measuring this join showed, or None if it could not be measured."""
         return self.tools.join_facts.get((candidate.left, candidate.right))
 

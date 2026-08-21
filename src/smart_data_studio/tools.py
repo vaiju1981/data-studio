@@ -11,7 +11,7 @@ import sqlglot
 from plotly.graph_objects import Figure
 from sqlglot import exp
 
-from smart_data_studio import analysis, logs, relationships, timeseries
+from smart_data_studio import analysis, joins, logs, timeseries
 from smart_data_studio.charts import ChartSpec, make_figure
 from smart_data_studio.config import (
     ANALYSIS_SAMPLE_SEED,
@@ -51,7 +51,7 @@ def _dump(payload: dict[str, object]) -> str:
     return json.dumps(_finite(payload), default=str)
 
 
-AGGREGATE_NODES = relationships.AGGREGATES
+AGGREGATE_NODES = joins.AGGREGATES
 
 
 def _tables_in(tree: exp.Expression) -> set[str]:
@@ -143,7 +143,7 @@ class AnalysisTools:
         """
         # Preflight before the query runs, so a join that would multiply is refused
         # rather than paid for and then explained.
-        refusal, weighting = relationships.preflight(self.dataset, sql, self.join_facts)
+        refusal, weighting = joins.preflight(self.dataset, sql, self.join_facts)
         if refusal:
             logs.event("join.refused")
             return _dump({"error": refusal})
@@ -187,12 +187,12 @@ class AnalysisTools:
             return None  # nothing to disagree with
         wanted = named.pop()
 
-        sources = relationships._sources(tree, {name.lower() for name in self.dataset.tables})
+        sources = joins.sources_in(tree, {name.lower() for name in self.dataset.tables})
         for node in tree.walk():
             if not isinstance(node, AGGREGATE_NODES):
                 continue
             for column in node.find_all(exp.Column):
-                owner = relationships._column_owner(column, sources, self.dataset)
+                owner = joins.column_owner(column, sources, self.dataset)
                 if owner is None or owner == wanted:
                     continue
                 if column.name in self.shared_measures.get(owner, set()):

@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
-from smart_data_studio import logs, relationships
+from smart_data_studio import facts, logs
 from smart_data_studio.config import (
     DICTIONARY_VALUES,
     MAX_CELL_CHARS_TO_MODEL,
@@ -143,7 +143,7 @@ def profile_table(dataset: Dataset, table_name: str) -> TableProfile:
     dictionary, values = _dictionary(dataset, table_name, stats)
     # Only with something to join to: one CSV adds no query and no output.
     keys = (
-        relationships.discover_keys(dataset, table_name, _distinct_by_column(stats))
+        facts.discover_keys(dataset, table_name, _distinct_by_column(stats))
         if len(dataset.tables) > 1
         else []
     )
@@ -296,7 +296,7 @@ def _shared_columns(dataset: Dataset, table_name: str, row_count: int) -> list[s
     A join reaches for the column both files have. Saying whether it repeats before
     anything joins turns a refusal into a right answer first time.
     """
-    measures = relationships.measure_columns(dataset, table_name)
+    measures = facts.measure_columns(dataset, table_name)
     mine = {
         name
         for name, _ in dataset.schema(table_name)
@@ -342,12 +342,12 @@ def _shared_measures(dataset: Dataset, table_name: str) -> list[str]:
     made, so the fan-out guard has nothing to catch. Showing both totals is what
     stops the wrong one being used.
     """
-    mine = relationships.measure_columns(dataset, table_name)
+    mine = facts.measure_columns(dataset, table_name)
     elsewhere = {
         name
         for other in dataset.tables
         if other != table_name
-        for name in relationships.measure_columns(dataset, other)
+        for name in facts.measure_columns(dataset, other)
     }
     together = sorted(name for name in mine & elsewhere if not is_sensitive(name))[
         :MAX_SHARED_COLUMNS
