@@ -151,6 +151,13 @@ MAX_KEY_SEARCH_COLUMNS = 6
 # listing them all buries the few a join would use.
 MAX_SHARED_COLUMNS = 5
 
+# Columns whose value changes within an entity, named in the profile. Taken from
+# both ends of the range rather than the top: a column changing for many entities
+# is a per-row value, one changing for a handful looks like a property of the
+# entity and is not, and only the second is something a reader cannot infer. The
+# middle is the least informative part, so that is what the cap drops.
+MAX_VARYING_COLUMNS = 8
+
 # A column with more levels than this is an identifier, not a dimension to sweep.
 MAX_DRIVER_LEVELS = 50
 # Below this a group cannot support a test: Cliff's delta from one observation is

@@ -11,6 +11,7 @@ from smart_data_studio.config import (
     DICTIONARY_VALUES,
     MAX_CELL_CHARS_TO_MODEL,
     MAX_SHARED_COLUMNS,
+    MAX_VARYING_COLUMNS,
     MIN_SENTINEL_ROWS,
     SENSITIVE_COLUMNS,
     SENTINEL_GAP_RATIO,
@@ -247,23 +248,40 @@ def _entity_grain(
         ),
         reverse=True,
     )
+    # Both ends, not the top. Ranked by count alone a rarely-changing column is
+    # always the first thing the cap discards, and it is the one worth naming:
+    # everywhere else it reads as a property of the entity.
+    if len(moving) > MAX_VARYING_COLUMNS:
+        edge = MAX_VARYING_COLUMNS // 2
+        moving = moving[:edge] + moving[-edge:]
     if entities >= row_count:
         # One row per key: it is the grain already, not an entity to aggregate to.
         return None, None
 
     listed = ", ".join(stable[:12]) + (", …" if len(stable) > 12 else "") if stable else "none"
-    changes = ", ".join(f"{name} for {count:,}" for count, name in moving[:6])
+    changes = ", ".join(
+        f"{name} for {count:,} ({_share(count, entities)})" for count, name in moving
+    )
     return (
         f"{key} repeats: {entities:,} values across {row_count:,} rows "
         f"(~{row_count / entities:.1f} rows each). Constant within it: {listed}. Every other "
         f"column varies, so adding one to GROUP BY {key} splits a single {key} across several "
         f"rows — aggregate those with MAX or SUM instead."
         + (
-            f" Changes within a single {key}, so its history can be followed: {changes}."
+            f" Changes within a single {key}: {changes}. One that changes for most of them "
+            f"is a per-row value; one that changes for a few reads everywhere else as a "
+            f"property of the {key} and is not, so filtering or grouping on it will not do "
+            f"what it appears to."
             if changes
             else ""
         )
     ), key
+
+
+def _share(count: int, total: int) -> str:
+    """A readable proportion that does not round a rare one away to 0.0%."""
+    portion = count / total if total else 0.0
+    return f"{portion:.1%}" if portion >= 0.001 else "under 0.1%"
 
 
 def _looks_like_key(name: str) -> bool:

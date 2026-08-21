@@ -4,6 +4,7 @@ import re
 
 import pytest
 
+from smart_data_studio.config import MAX_VARYING_COLUMNS
 from smart_data_studio.dataset import CsvSource, Dataset
 from smart_data_studio.profile import _looks_like_key, profile_table
 
@@ -340,5 +341,45 @@ def test_a_row_id_whose_sketch_undercounts_is_not_taken_for_the_entity() -> None
             (item for item in profile_table(dataset, "tickets").findings if "repeats" in item), ""
         )
         assert grain.startswith("customer_id repeats: 60 values across 180 rows"), grain
+    finally:
+        dataset.close()
+
+
+def test_a_column_that_changes_for_a_handful_of_entities_is_still_named() -> None:
+    """Ranked by count alone, the rarest-changing column is always the first thing
+    a cap discards — and it is the one worth naming, because everywhere else it
+    reads as a property of the entity. Grouping or filtering on it then silently
+    splits or drops entities.
+
+    Nine varying columns so the cap bites; the interesting one changes for one
+    customer in sixty and would sit last in a top-N.
+    """
+    varying = {
+        f"attr_{index}": count for index, count in enumerate([50, 45, 40, 35, 30, 25, 20, 15])
+    }
+    varying["signup_source"] = 1  # the rare one, last by volume
+
+    header = "customer_id,ticket_id," + ",".join(varying) + "\n"
+    rows = []
+    for customer in range(60):
+        for visit in range(3):
+            cells = [
+                f"v{visit}" if customer < count and visit else "v0" for count in varying.values()
+            ]
+            rows.append(f"c{customer},t{customer}_{visit}," + ",".join(cells))
+    csv = (header + "\n".join(rows) + "\n").encode()
+
+    dataset = Dataset.load([CsvSource.from_upload("tickets.csv", csv)])
+    try:
+        finding = next(
+            item for item in profile_table(dataset, "tickets").findings if "repeats" in item
+        )
+        assert "signup_source for 1" in finding, f"the rare column was dropped: {finding}"
+        assert "attr_0 for 50" in finding, "the most-varying column should still lead"
+        # The cap still applies, and it is the middle that goes: nine varying
+        # columns, eight named, and the one dropped is the least informative.
+        named = [column for column in varying if column in finding]
+        assert len(named) == MAX_VARYING_COLUMNS, named
+        assert "attr_4" not in finding, finding
     finally:
         dataset.close()
