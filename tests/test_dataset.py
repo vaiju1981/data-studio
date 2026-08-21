@@ -192,3 +192,17 @@ def test_an_absurd_local_file_is_refused_before_it_is_parsed(tmp_path, monkeypat
     path.write_text("region,amount\nNorth,10\nSouth,20\n", encoding="utf-8")
     with pytest.raises(ValueError, match="the limit is"):
         CsvSource.from_path(path)
+
+
+def test_repairing_a_column_type_leaves_the_column_order_alone() -> None:
+    """Appending the converted column moved it to the end, quietly reordering
+    SELECT *, the sample rows the model is shown, and the parsed-columns panel."""
+    rows = b"".join(f'{index},"${index}.00",C\n'.encode() for index in range(1, 60))
+    dataset = Dataset.load([CsvSource.from_upload("t.csv", b"id,price,city\n" + rows)])
+    try:
+        before = [name for name, _ in dataset.schema("t")]
+        dataset.convert_to_number("t", "price")
+        assert [name for name, _ in dataset.schema("t")] == before
+        assert dict(dataset.schema("t"))["price"] == "DOUBLE"
+    finally:
+        dataset.close()

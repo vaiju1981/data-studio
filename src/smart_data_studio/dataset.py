@@ -746,10 +746,15 @@ class Dataset:
                 "would be emptied by the conversion, so it was left as text."
             )
 
-        others = [name for name, _ in self.schema(table) if name != column]
+        # In schema order, with the conversion substituted in place. Appending it
+        # instead moved the repaired column to the end, quietly reordering SELECT *,
+        # the sample rows the model is shown, and the parsed-columns panel — so a
+        # type repair changed the shape of every later answer.
         projection = ", ".join(
-            [quote_identifier(name) for name in others]
-            + [f"TRY_CAST({cleaned} AS DOUBLE) AS {source}"]
+            f"TRY_CAST({cleaned} AS DOUBLE) AS {source}"
+            if name == column
+            else quote_identifier(name)
+            for name, _ in self.schema(table)
         )
         with logs.timed("column.converted", table=table, column=column):
             self.connection.execute(
