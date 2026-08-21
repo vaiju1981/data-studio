@@ -109,7 +109,7 @@ class AnalysisTools:
         self.entity_keys: dict[str, str] = {}
         # Measured join facts, kept for the dataset's lifetime so a join is checked
         # once however many questions reach for it.
-        self._join_facts: dict = {}
+        self.join_facts: dict = {}
         # table -> column -> values held. Keyed by table because two files may each
         # have a status column meaning different things.
         self.dimension_values: dict[str, dict[str, list[str]]] = {}
@@ -143,7 +143,7 @@ class AnalysisTools:
         """
         # Preflight before the query runs, so a join that would multiply is refused
         # rather than paid for and then explained.
-        refusal, weighting = relationships.preflight(self.dataset, sql, self._join_facts)
+        refusal, weighting = relationships.preflight(self.dataset, sql, self.join_facts)
         if refusal:
             logs.event("join.refused")
             return _dump({"error": refusal})

@@ -262,7 +262,7 @@ def relationship_panel(agent) -> None:
             "does to these rows; it cannot show that the columns mean the same thing."
         )
         for index, candidate in enumerate(found.joins):
-            facts = agent.tools._join_facts.get((candidate.left, candidate.right))
+            facts = agent.join_facts(candidate)
             with st.container(border=True):
                 st.markdown(f"**{candidate}**")
                 if candidate.reason:

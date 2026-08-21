@@ -510,8 +510,8 @@ def test_measured_facts_do_not_outlive_the_dataset_that_produced_them(data) -> N
 
     first = AnalysisTools(data)
     first.run_sql("SELECT sum(s.coinIn) FROM sessions s JOIN assets a ON s.assetId=a.assetId")
-    assert first._join_facts, "nothing was cached"
-    assert AnalysisTools(data)._join_facts == {}, "a new workspace inherited old measurements"
+    assert first.join_facts, "nothing was cached"
+    assert AnalysisTools(data).join_facts == {}, "a new workspace inherited old measurements"
 
 
 # --- taking a measure from the table nobody asked about -------------------------
