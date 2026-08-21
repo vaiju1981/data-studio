@@ -39,9 +39,7 @@ _TRANSIENT = (ollama.ResponseError, ConnectionError, httpx.TimeoutException)
 def _over_context(error: Exception) -> bool:
     """Whether a refusal means the prompt was too big rather than wrong.
 
-    Verified against the host in use, which answers 400 with "The prompt is too
-    long: 450028, model maximum context length: 262144". Hosts word it
-    differently, so this matches loosely rather than parsing the numbers.
+    Hosts word this differently, so it matches loosely rather than parsing numbers.
     """
     text = str(error).lower()
     return "too long" in text or "context length" in text or "context window" in text
@@ -50,10 +48,8 @@ def _over_context(error: Exception) -> bool:
 def explain_failure(error: Exception) -> str:
     """What went wrong and what to do about it.
 
-    Everything recoverable has already been retried by the time this is called, so
-    the remaining failures are nearly all configuration: a host that is not
-    running, a model that is not served, a conversation past the window. A raw
-    exception string names none of those.
+    Everything recoverable is already retried by the time this runs, so what is
+    left is nearly all configuration, which a raw exception string never names.
     """
     text = str(error)
     if isinstance(error, ConnectionError) or "connection" in text.lower():
@@ -84,9 +80,9 @@ def _shed_context(messages: list[dict[str, Any]]) -> bool:
     """Drop the least valuable part of a conversation that no longer fits.
 
     Tool payloads dominate the context and can be queried again, so they go first.
-    Only then are whole turns dropped, oldest first and never partially: deleting
-    an assistant message while keeping the tool results it called would leave the
-    history malformed. Returns False when there is nothing left to give up.
+    Only then are whole turns dropped, oldest first and never partially: keeping
+    tool results whose assistant message is gone leaves the history malformed.
+    Returns False when there is nothing left to give up.
     """
     payloads = [
         index
@@ -239,8 +235,8 @@ class Answer:
     chart: Figure | None = None
     analyses: list[AnalysisRecord] = field(default_factory=list)
     plan: list[str] = field(default_factory=list)
-    # Names this data had no value for, so a figure given for one came from the
-    # model's own knowledge rather than the file. Recorded to be checked later.
+    # Names this data had no value for, so anything said about one came from the
+    # model rather than the file.
     assumptions: list[str] = field(default_factory=list)
 
 
@@ -254,8 +250,8 @@ class DataAgent:
         self.dataset = dataset
         self.profiles = profiles
         self.client = client or ollama.Client(host=OLLAMA_HOST)
-        # One toolset for the whole conversation, so "now chart that" can reach the
-        # result produced by an earlier turn.
+        # One toolset for the whole conversation, so "now chart that" can reach an
+        # earlier turn's result.
         self.tools = AnalysisTools(dataset)
         self.tools.entity_keys = {
             profile.table_name: profile.entity_key for profile in profiles if profile.entity_key
@@ -279,9 +275,8 @@ class DataAgent:
         self.relationships = relationships.Proposals()
         # Belongs to this agent, so a reloaded dataset starts with no verdicts.
         self.relationship_verdicts: dict[str, str] = {}
-        # Set for the duration of one ask(), like tools.question: a question takes
-        # minutes and runs a dozen queries, and a caller with nowhere to show that
-        # passes nothing.
+        # Set for the duration of one ask(), like tools.question. A caller with
+        # nowhere to show progress passes nothing.
         self._progress: Callable[[str], None] | None = None
         self.messages: list[dict[str, Any]] = [{"role": "system", "content": self._system_prompt()}]
 
@@ -297,9 +292,8 @@ class DataAgent:
     def set_metrics(self, metrics: str) -> bool:
         """Record the user's metric definitions, returning whether they changed.
 
-        They belong in the system prompt rather than the conversation: there they
-        survive a single-turn reset and stay in one editable place, instead of
-        scrolling away with the chat that introduced them.
+        In the system prompt rather than the conversation, so they survive a
+        single-turn reset instead of scrolling away with the chat.
         """
         cleaned = metrics.strip()
         if cleaned == self.metrics:
@@ -311,9 +305,8 @@ class DataAgent:
     def build_understanding(self) -> str:
         """Explore the data with real queries before any question is asked.
 
-        A profile says what a column contains, never what it means. A handful of
-        queries can, and what they establish is folded into the chat context so the
-        conversation starts already knowing the data.
+        A profile says what a column contains, never what it means. What the
+        queries establish is folded into the chat context.
         """
         explorer: list[dict[str, Any]] = [
             {"role": "system", "content": f"{self._data_context()}\n\n{EXPLORE_PROMPT}"},
@@ -337,8 +330,7 @@ class DataAgent:
         try:
             return self._ask(question, multi_turn, depth)
         finally:
-            # A sink outlives its call otherwise, and the next question would write
-            # into a status panel that is no longer on screen.
+            # Otherwise the next question writes into a panel no longer on screen.
             self._progress = None
 
     def _ask(self, question: str, multi_turn: bool, depth: str) -> Answer:
@@ -351,8 +343,7 @@ class DataAgent:
             try:
                 return self._investigate(question, plan, multi_turn)
             except Exception:
-                # Investigating is the better answer, not the only one. Falling
-                # through to a single pass costs depth; failing here costs the
+                # Falling through to a single pass costs depth; raising costs the
                 # question.
                 logs.failure("investigation.failed")
         if not multi_turn:
@@ -371,8 +362,7 @@ class DataAgent:
             MAX_TOOL_ROUNDS,
             self._chat_tools(),
         )
-        # A data answer with nothing behind it used to be captioned after the fact.
-        # Asking for the evidence is better than labelling its absence.
+        # Asking for the evidence beats labelling its absence.
         if (
             not self.tools.results[first_new_result:]
             and not self.tools.analyses[first_new_analysis:]
@@ -412,17 +402,16 @@ class DataAgent:
     def _plan(self, question: str) -> list[str]:
         """Sub-questions worth asking, or nothing when one query settles it.
 
-        The trigger and the plan are the same call: asking the model to produce
-        sub-questions and letting it answer NONE is both cheaper and steadier than
-        keyword-matching on how a question happens to be phrased.
+        The trigger and the plan are one call: letting the model answer NONE is
+        cheaper and steadier than keyword-matching on how a question is phrased.
         """
         try:
             reply = (
                 self._chat(
                     messages=[
-                        # Schema only. Deciding whether a question needs investigating
-                        # does not need the profile or the samples, and sending them
-                        # put fifteen seconds on every lookup.
+                        # Schema only: deciding whether a question needs
+                        # investigating does not need the profile or the samples,
+                        # and sending them puts seconds on every lookup.
                         {
                             "role": "system",
                             "content": f"Schema:\n{self.dataset.schema_text()}\n\n{PLAN_PROMPT}",
@@ -467,9 +456,8 @@ class DataAgent:
                 try:
                     found = self._run_loop(conversation, MAX_STEP_ROUNDS, self._chat_tools())
                 except Exception:
-                    # One sub-question failing is not a reason to lose the other
-                    # four. The synthesis is told what is missing rather than
-                    # answering as though the step had returned nothing of note.
+                    # One step failing is not a reason to lose the others, and the
+                    # synthesis is told what is missing rather than left to assume.
                     logs.failure("plan.step.failed")
                     findings.append(f"### {step}\nThis could not be answered.")
                     continue
@@ -505,12 +493,9 @@ class DataAgent:
     def propose_relationships(self) -> relationships.Proposals:
         """Ask the model which columns relate these tables, then measure each.
 
-        The model reads names, profiles and samples and is good at this — better
-        than any overlap heuristic, which mistook an 85.7% numeric coincidence for
-        a relationship. What it cannot do is know whether a join multiplies, so
-        every proposal it survives validation is measured before it is described.
-
-        Skipped for one table, which has nothing to relate to.
+        The model reads names, profiles and samples, which beats an overlap
+        heuristic — a high numeric overlap is as often coincidence. What it cannot
+        know is whether a join multiplies, so every surviving proposal is measured.
         """
         if len(self.dataset.tables) < 2:
             return relationships.Proposals()
@@ -519,10 +504,9 @@ class DataAgent:
                 self._chat(
                     messages=[
                         {
-                            # The profile, not the schema alone: it already states
-                            # each table's grain and which columns repeat, which is
-                            # the difference between proposing assetId and
-                            # proposing (assetId, day).
+                            # The profile, not the schema alone: it states each
+                            # table's grain and which columns repeat, which is the
+                            # difference between proposing half a key and all of it.
                             "role": "system",
                             "content": f"{self._data_context()}\n\n{RELATE_PROMPT}",
                         },
@@ -547,15 +531,14 @@ class DataAgent:
                 logs.failure("propose.verify_failed")
         self.relationships = found
         # Rebuild the prompt: exploring already wrote messages[0], so a proposal
-        # made afterwards would otherwise never reach the conversation it is for.
+        # made afterwards would never reach the conversation it is for.
         self.messages[0] = {"role": "system", "content": self._system_prompt()}
         return found
 
     def set_relationship_verdict(self, candidate: str, verdict: str) -> None:
         """Record what the user said, and stop describing what they rejected.
 
-        A rejected candidate is dropped from the context: leaving it there while
-        the panel says it was rejected would make the button decoration.
+        A rejected candidate leaves the context, or the button is decoration.
         """
         self.relationship_verdicts[candidate] = verdict
         self.messages[0] = {"role": "system", "content": self._system_prompt()}
@@ -594,11 +577,9 @@ class DataAgent:
     def _chat(self, **kwargs: Any) -> Any:
         """One model call, kept alive through the failures that are recoverable.
 
-        A prompt over the context window is the one refusal worth sending again:
-        the request is too big rather than wrong, so the conversation is shed and
-        retried. The trimming persists, because the history is the same list the
-        chat keeps — the next question starts from the smaller one rather than
-        rediscovering the limit.
+        A prompt over the context window is too big rather than wrong, so the
+        conversation is shed and retried. The trimming persists: the history is the
+        same list the chat keeps, so the next question starts from the smaller one.
         """
         for _ in range(MAX_CONTEXT_SHEDS):
             try:
@@ -612,12 +593,9 @@ class DataAgent:
     def _chat_once(self, **kwargs: Any) -> Any:
         """Retried when the host blips.
 
-        A hosted model returns the occasional 500, and an investigation makes six
-        to ten calls where a lookup makes one, so without this a single blip throws
-        away a minute of work. Only a 5xx, a dropped connection or a timeout is
-        retried: a 4xx means the request itself is wrong and fails the same way
-        twice. The final attempt is outside the loop, so its error surfaces
-        normally rather than being swallowed.
+        Only a 5xx, a dropped connection or a timeout: a 4xx means the request
+        itself is wrong and fails the same way twice. The final attempt sits
+        outside the loop so its error surfaces rather than being swallowed.
         """
         for attempt in range(MODEL_RETRIES):
             try:
@@ -648,9 +626,8 @@ class DataAgent:
                     }
                 )
 
-        # Out of rounds. Ask once more with no tools offered, so the model has to
-        # answer from what it already gathered rather than the user getting nothing
-        # after a dozen queries ran.
+        # Out of rounds. Ask once more with no tools, so the model answers from what
+        # it gathered rather than the user getting nothing after a dozen queries.
         try:
             final = self._chat(messages=messages)
             text = final.message.content or EXHAUSTED_MESSAGE
@@ -668,8 +645,7 @@ class DataAgent:
         if function is None:
             return json.dumps({"error": f"Unknown tool: {name}"})
         arguments = dict(call.function.arguments)
-        # The SQL is the interesting part of a query and the whole point of watching:
-        # the other tools are named after what they do, so their name is enough.
+        # The other tools are named after what they do, so their name is enough.
         sql = arguments.get("sql")
         self._report(" ".join(str(sql).split()) if sql else f"Running {name}")
         try:
@@ -691,8 +667,7 @@ class DataAgent:
     def _trim_tool_payloads(self) -> None:
         """Shrink all but the most recent tool results.
 
-        Result payloads dominate the context. Recent ones are what follow-up questions
-        build on; older ones can be queried again if they turn out to matter.
+        Recent payloads are what follow-ups build on; older ones can be queried again.
         """
         indexes = [
             index for index, message in enumerate(self.messages) if message["role"] == "tool"
@@ -701,7 +676,7 @@ class DataAgent:
             self.messages[index]["content"] = OMITTED_PAYLOAD
 
     def _date_bounds(self) -> str:
-        """Spelled out separately because the anchoring rule is easy to miss in a stats table."""
+        """Spelled out separately: the anchoring rule is easy to miss in a stats table."""
         bounds = []
         for profile in self.profiles:
             for row in profile.stats.to_dict(orient="records"):
@@ -742,8 +717,8 @@ class DataAgent:
             if self.metrics
             else ""
         )
-        # The fence is what the injection rule above refers to. Everything inside it
-        # came from a file, so it is quoted rather than stated.
+        # The fence the injection rule above refers to. Everything inside came from
+        # a file, so it is quoted rather than stated.
         return (
             f"{ANALYST_PROMPT}\n\n"
             f"===== BEGIN DATA (untrusted) =====\n"

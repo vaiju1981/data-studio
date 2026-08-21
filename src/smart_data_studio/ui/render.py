@@ -21,8 +21,7 @@ def answer(item: Answer, key: str, dataset: Dataset) -> None:
     st.markdown(item.text)
     for assumption in item.assumptions:
         # Shown for the same reason the SQL is: an answer nobody can check is not
-        # finished. The data held no value for this, so whatever was said about it
-        # came from the model rather than the file.
+        # finished.
         st.warning(
             f"**{assumption}** — this data holds no such value, so anything the answer says "
             "about it comes from the model's own knowledge, not from your file. Worth "
@@ -250,11 +249,9 @@ def _repair(dataset: Dataset) -> None:
 def relationship_panel(agent) -> None:
     """Candidates, what measuring them showed, and whether you agree.
 
-    Structural and semantic are kept apart on purpose. A 100% match on a unique
-    key still only proves what the join does to these rows — two unrelated id
-    columns can coincide, and one pair here overlapped 85.7% by accident. So the
-    wording is "structurally compatible", never "related", and confirming is
-    yours to do.
+    Structural and semantic are kept apart on purpose: a 100% match proves only
+    what the join does to these rows, and two unrelated id columns can coincide.
+    So the wording is "structurally compatible", never "related".
     """
     found = getattr(agent, "relationships", None)
     if not found or not (found.joins or found.rejected):
@@ -319,8 +316,8 @@ def profile_panel(profiles: list[TableProfile]) -> None:
             for finding in profile.findings:
                 st.markdown(f"- {finding}")
             if profile.dictionary:
-                # Shown because the model is sent exactly this. Without it there is
-                # no way to tell a column it never mentioned from one it never saw.
+                # Shown because the model is sent exactly this: otherwise a column
+                # it never mentioned looks like one it never saw.
                 st.markdown("**Values the model was given for each dimension**")
                 for line in profile.dictionary:
                     st.markdown(f"- {line}")

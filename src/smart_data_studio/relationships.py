@@ -1,10 +1,8 @@
 """Candidate table keys and joins across loaded tables.
 
-The model proposes these from names, profiles and samples; it is good at that and
-better than any name-and-overlap heuristic. A proposal is a hypothesis, so nothing
-here trusts one: every reference is resolved against the loaded schema before a
-verification query is built, and a proposal that names something withheld, unknown
-or malformed is rejected rather than repaired.
+The model proposes these; a proposal is a hypothesis. Every reference is resolved
+against the loaded schema before a verification query is built, and one naming
+something withheld, unknown or malformed is rejected rather than repaired.
 
 Metadata is keyed by table *and* column, never by column alone — two files
 commonly hold the same column name meaning different things.
@@ -38,7 +36,7 @@ class Ref:
 
 
 # reason is annotation, not identity: the same join proposed twice with different
-# wording is one candidate, and counting it twice spends the budget on prose.
+# wording is one candidate.
 @dataclass(frozen=True)
 class KeyCandidate:
     ref: Ref
@@ -59,8 +57,8 @@ class JoinCandidate:
 class Proposals:
     keys: list[KeyCandidate] = field(default_factory=list)
     joins: list[JoinCandidate] = field(default_factory=list)
-    # Why each rejected proposal was refused, for the log and the panel. A silent
-    # drop would look identical to the model never having proposed anything.
+    # Why each rejected proposal was refused. A silent drop would look identical to
+    # the model never having proposed anything.
     rejected: list[str] = field(default_factory=list)
 
 
@@ -71,9 +69,8 @@ class Invalid(ValueError):
 def _resolve(dataset: Dataset, table: str, columns: list[str] | tuple[str, ...]) -> Ref:
     """Match a proposal against the schema, returning the schema's own spelling.
 
-    Identifiers are compared without case so a proposal saying `playerid` resolves,
-    but what is stored is what the file actually calls the column — anything else
-    produces SQL that does not run and diagnostics nobody can grep for.
+    Compared without case so `playerid` resolves, but what is stored is what the
+    file calls the column — anything else produces SQL that does not run.
     """
     known = {name.lower(): name for name in dataset.tables}
     actual_table = known.get(str(table).strip().lower())
@@ -103,8 +100,7 @@ def _resolve(dataset: Dataset, table: str, columns: list[str] | tuple[str, ...])
 def validate(dataset: Dataset, raw: list[dict]) -> Proposals:
     """Turn whatever the model proposed into candidates that resolve, or reasons.
 
-    Bounded on purpose: a model that proposes forty joins between two tables would
-    otherwise cost forty verification queries for no more insight than four.
+    Bounded: every candidate costs a verification query.
     """
     found = Proposals()
     per_table: dict[str, int] = {}
@@ -157,9 +153,9 @@ class KeyFacts:
     rows: int
     complete: int  # rows with no NULL in any key column
     distinct: int
-    # Unique, but made of measures rather than identifiers — set only on the
-    # fallback path, which is the one place that knows the difference. A unique
-    # text column like sku or email is a real key and is not marked.
+    # Unique, but made of measures rather than identifiers. Set only on the fallback
+    # path, the one place that knows the difference; a unique sku or email is a real
+    # key and is not marked.
     coincidental: bool = False
 
     @property
@@ -180,9 +176,8 @@ class KeyFacts:
             )
         nulls = f", though {self.rows - self.complete:,} rows have none" if self.has_nulls else ""
         if self.coincidental:
-            # Calling this "one row per (jackpots)" reads as a key and invites a
-            # join on it, when all it says is that these values happen not to
-            # repeat in the rows loaded today.
+            # "one row per (x)" reads as a key and invites a join on it, when all
+            # this says is that the values happen not to repeat today.
             return (
                 f"no column identifies a row; ({columns}) happens to be unique here, "
                 f"but it measures rather than identifies, so it is a property of this "
@@ -242,10 +237,9 @@ def verify_key(dataset: Dataset, ref: Ref) -> KeyFacts:
 def measure_columns(dataset: Dataset, table: str) -> set[str]:
     """Columns that are quantities rather than identifiers.
 
-    Money and percentages carry plenty of distinct values and identify nothing.
-    Ranked on distinct count alone an asset table offered (grossWin, ticketOut) as
-    its key, and listed grossWin ahead of assetId as a join column — the same
-    mistake twice, so the test lives in one place.
+    Money and percentages carry plenty of distinct values and identify nothing, so
+    distinct count alone ranks them as keys. The test lives here, used by both the
+    key search and the join ranking.
     """
     found = set()
     for name, kind in dataset.schema(table):
@@ -253,7 +247,7 @@ def measure_columns(dataset: Dataset, table: str) -> set[str]:
         if any(part in upper for part in ("DOUBLE", "FLOAT", "DECIMAL", "REAL")):
             found.add(name)  # a float is never an identifier
         elif any(part in upper for part in ("INT", "HUGEINT")) and not _looks_like_identifier(name):
-            # An integer can be either: movieId identifies, jackpots measures.
+            # An integer can be either: orderId identifies, quantity measures.
             found.add(name)
     return found
 
@@ -263,32 +257,24 @@ def discover_keys(
 ) -> list[KeyFacts]:
     """The narrowest column sets that identify a row, singles before pairs.
 
-    Bounded rather than exhaustive: single columns first, and pairs only among the
-    few with the most distinct values, since a key's parts are necessarily among
-    the more various columns. Minimality falls out of the order — once a single
-    column is a key, no pair containing it is offered, because a unique pair whose
-    subset is already unique is not a composite key.
-
-    This is what lets the profile say "one row per (assetId, day)" before anything
-    joins on assetId alone, which is the difference between preventing the 439x
-    error and correcting it afterwards.
+    Bounded rather than exhaustive: singles first, then pairs among the few with the
+    most distinct values, since a key's parts are necessarily among them. Minimality
+    falls out of that order — a unique pair whose subset is already unique is not a
+    composite key, so no pair containing a key is offered.
     """
     rows = dataset.row_count(table)
     if rows < 2:
         return []
     # Floats only. An integer is a perfectly good key component — a day stored as
-    # 20240101, an hour, a numbered stand — and excluding every integer measure
-    # from the search hid composite keys made of them.
+    # 20240101, an hour, a numbered stand.
     measures = {
         name
         for name, kind in dataset.schema(table)
         if any(part in kind.upper() for part in ("DOUBLE", "FLOAT", "DECIMAL", "REAL"))
     }
-    # Identifier-named columns first, then by distinct count. Ranking on count
-    # alone offered jackpots ahead of assetId, because a measure carries plenty of
-    # values and identifies nothing — but excluding every integer instead hid
-    # composite keys made of them, so the name decides the order rather than
-    # membership.
+    # Identifier-named first, then by distinct count: the name decides the order
+    # rather than membership, since count alone ranks a measure above a key and
+    # excluding integers outright hides composite keys made of them.
     ranked = sorted(
         ((name, count) for name, count in distinct_by_column.items() if name not in measures),
         key=lambda item: (not _looks_like_identifier(item[0]), -item[1]),
@@ -296,21 +282,18 @@ def discover_keys(
     if not ranked:
         return []
     names = [name for name, _ in ranked[:MAX_KEY_SEARCH_COLUMNS]]
-    # One scan for all the singles, then one for all the pairs. Measuring each
-    # candidate on its own meant up to twenty-one passes over the same table.
+    # One scan for all the singles, then one for all the pairs.
     singles = _measure_keys(dataset, table, [(name,) for name in names])
     exact = [facts for facts in singles if facts.unique]
-    # An identifier that is unique is a key. A measure that is unique is a
-    # coincidence of the data — jackpots was offered as the key of an asset table
-    # because its values happened not to repeat — so a composite of identifiers is
-    # looked for first, and the coincidence kept only as a fallback.
+    # A unique identifier is a key; a unique measure is a coincidence of the rows
+    # loaded today. So a composite of identifiers is looked for first, and the
+    # coincidence kept only as a fallback.
     named = [facts for facts in exact if _looks_like_identifier(facts.ref.columns[0])]
     if named:
         return named[:MAX_KEY_CANDIDATES]
 
-    # Minimality, as the plan requires: a pair containing an already-unique column
-    # is unique for that reason alone and says nothing. Without this the search
-    # offered (assetId, jackpots) — unique only because jackpots was.
+    # A pair containing an already-unique column is unique for that reason alone
+    # and says nothing.
     already = {facts.ref.columns[0] for facts in exact}
     open_names = [name for name in names if name not in already]
     combinations = [
@@ -323,18 +306,15 @@ def discover_keys(
     if unique:
         return unique[:MAX_KEY_CANDIDATES]
     if exact:
-        # Kept, because saying nothing was worse — but marked, so describe() calls
-        # it what it is rather than dressing a measure up as a key.
+        # Kept, but marked, so describe() does not dress a measure up as a key.
         quantities = measure_columns(dataset, table)
         return [
             replace(facts, coincidental=all(name in quantities for name in facts.ref.columns))
             for facts in exact[:MAX_KEY_CANDIDATES]
         ]
 
-    # Nothing identifies a row exactly. The nearest set is still the thing worth
-    # saying: (assetId, day) at 11,420 values across 11,421 rows is what a join
-    # should use, and one duplicated row does not make assetId alone — 25 values
-    # across 11,421 — any less wrong.
+    # Nothing identifies a row exactly, but the nearest set is still what a join
+    # should use: one duplicated row does not make a far coarser column any better.
     best = max(pairs, key=lambda facts: facts.distinct, default=None)
     return [best] if best is not None and best.distinct > singles[0].distinct else []
 
@@ -390,10 +370,9 @@ class Verified:
     def multiplies(self, table: str) -> bool:
         """Whether rows of this table actually repeat in the output.
 
-        Measured, not inferred from the uniqueness flag. A single stray duplicate
-        key elsewhere in a table makes it non-unique and the join N:N, while no row
-        that participates is duplicated at all — the real asset file has exactly
-        that shape. What decides whether a sum double-counts is whether any
+        Measured, not inferred from the uniqueness flag: one stray duplicate key
+        anywhere makes a table non-unique and the join N:N while no participating
+        row repeats at all. What decides whether a sum double counts is whether a
         matched row finds more than one partner.
         """
         if table == self.left.ref.table:
@@ -414,14 +393,13 @@ def _key_sql(ref: Ref) -> tuple[str, str]:
 def verify(dataset: Dataset, candidate: JoinCandidate) -> Verified:
     """Measure a join by counting, never by building it.
 
-    Grouping each side by its key first and joining those frequency tables gives
-    the joined row count as sum(left_count * right_count) — the 439x explosion is
-    measured at 25 rows rather than materialised at 12.5 million.
+    Grouping each side by its key and joining those frequency tables gives the
+    joined row count as sum(left_count * right_count), so an explosion is priced
+    rather than materialised.
 
-    NULL keys are counted apart. DuckDB counts NULL-bearing tuples in
+    NULL keys are counted apart: DuckDB counts NULL-bearing tuples in
     count(DISTINCT (a, b)) while an equality join matches none of them, so folding
-    them together overstates containment on exactly the columns most likely to
-    hold nulls.
+    them together overstates containment.
     """
     sides = {}
     for name, ref in (("l", candidate.left), ("r", candidate.right)):
@@ -431,9 +409,7 @@ def verify(dataset: Dataset, candidate: JoinCandidate) -> Verified:
             f"WHERE {non_null} GROUP BY 1"
         )
 
-    # Bounded like any other query. Grouping two large tables by their keys is
-    # cheap next to the join it prices, but "cheap" is not "unbounded", and a
-    # verification with no deadline could outlast the question that asked for it.
+    # Bounded like any other query: cheap next to the join it prices is not free.
     with dataset._deadline():
         row = dataset.connection.execute(
             f"""
@@ -487,11 +463,10 @@ def verify(dataset: Dataset, candidate: JoinCandidate) -> Verified:
     )
 
 
-# --- M3: refusing a join before it runs -----------------------------------------
+# --- refusing a join before it runs ---------------------------------------------
 
-# DuckDB names some aggregates that sqlglot parses as ordinary functions, so the
-# class test alone let total() past — and a query whose only aggregate is unlisted
-# skipped the guard entirely.
+# DuckDB names some aggregates that sqlglot parses as ordinary functions, so a
+# class test alone lets total() past and skips the guard entirely.
 ANONYMOUS_AGGREGATES = frozenset(
     {"total", "list", "histogram", "arg_max", "arg_min", "product", "geomean", "entropy"}
 )
@@ -516,10 +491,8 @@ class Source:
     """What a FROM or JOIN item resolves to.
 
     `unique_on` is set for a derived relation that visibly reduces its own grain —
-    a subquery with DISTINCT or GROUP BY. Base-table facts must not be used for
-    one of those: `ratings JOIN (SELECT DISTINCT movieId FROM tags)` is safe even
-    though `tags.movieId` repeats, and warning about it would refuse SQL the model
-    writes correctly and unprompted.
+    a subquery with DISTINCT or GROUP BY. Base-table facts must not be used for one
+    of those: `a JOIN (SELECT DISTINCT k FROM b)` is safe even though `b.k` repeats.
     """
 
     table: str | None  # None for a derived relation
@@ -541,9 +514,8 @@ def _grain_of(select: exp.Expression) -> frozenset[str] | None:
 def _sources(tree: exp.Expression, tables: set[str]) -> dict[str, Source]:
     """Alias, or name where there is no alias, mapped to what it stands for.
 
-    A CTE is a derived relation like any subquery. Treating it as a bare name left
-    `WITH top AS (SELECT playerId FROM t GROUP BY playerId) SELECT ... FROM t JOIN top`
-    looking like t joined to itself — a correct and very common shape, refused.
+    A CTE is a derived relation like any subquery. Treated as a bare name, a CTE
+    over table t joined back to t looks like t joined to itself.
     """
     found: dict[str, Source] = {}
     for cte in tree.find_all(exp.CTE):
@@ -634,26 +606,17 @@ def preflight(
 ) -> tuple[str | None, str | None]:
     """(refusal, note): why this must not run, and what to say if it may.
 
-    Not every aggregate over a repeated row is wrong. A SUM always double counts.
-    MIN and MAX cannot change, however often a row appears. An AVG changes its
-    weighting, which is sometimes exactly what was asked for — "for every session,
-    look up that machine's utilisation that day, then average over sessions" is a
-    session-weighted average by construction. Refusing all three cost a bank
-    question its tool rounds for a query that was doing what it was told.
+    Not every aggregate over a repeated row is wrong. SUM always double counts.
+    MIN and MAX cannot change however often a row appears. AVG changes its
+    weighting, which is sometimes what was asked for, so it is noted rather than
+    refused.
 
-    Called before the query executes, not after: the incomplete asset join builds
-    12.5 million rows on the way to a number that is 439 times too large, and there
-    is no reason to pay for that before saying so.
-
-    A query touching one table is returned untouched — table *references*, not
-    distinct names, so a self-join is not mistaken for a single-table query and
-    waved through.
+    Called before the query executes, so an explosion is refused rather than paid
+    for.
     """
-    # One loaded table, one code path — the plan's guarantee, and a property of the
-    # dataset rather than of the query. Gating on query shape instead let a CTE
-    # over the single table reach a guard that exists for cross-table fan-out, and
-    # cost three bank questions their tool rounds. Fan-out within one table is the
-    # grain guard's job, which already runs.
+    # Gated on the dataset rather than the query shape: fan-out within one table is
+    # the grain guard's job, and gating on shape let a CTE over a single table reach
+    # a guard meant for cross-table fan-out.
     if len(dataset.tables) < 2:
         return None, None
 
@@ -664,8 +627,7 @@ def preflight(
 
     joins = list(tree.find_all(exp.Join))
     if not joins:
-        # Nothing is combined, so nothing can be multiplied. Counting table
-        # references instead made a CTE over one table look like a self-join.
+        # Nothing is combined, so nothing can be multiplied.
         return None, None
 
     aggregates = aggregates_in(tree)
@@ -687,8 +649,7 @@ def preflight(
     for join in joins:
         note = _join_multiplication(dataset, join, sources, cache)
         if note is None:
-            # Undetermined is not the same as safe. Letting it through was how an
-            # unmeasurable join ran precisely because it was unmeasurable.
+            # Undetermined is not the same as safe.
             return (
                 "This join's output grain cannot be established, and the query "
                 "aggregates, so it is not run. Give each side a provable grain — "
@@ -706,15 +667,12 @@ def preflight(
         if isinstance(node, (exp.Min, exp.Max)):
             continue  # unaffected by how often a row appears
         if _is_distinct(node):
-            # Counting or summing distinct values cannot be changed by repeating
-            # rows — that is what DISTINCT is for, and refusing it turned the
-            # standard way of writing a safe count into an error.
+            # Repeating rows cannot change a count or sum of distinct values.
             continue
         owners = [_column_alias(column, sources, dataset) for column in node.find_all(exp.Column)]
         hit = next((owner for owner in owners if owner in multiplying), None)
-        # A column reaching us through a derived relation is not traced, it is
-        # merely renamed: sum(w.v) over a subquery that joins inside itself was
-        # allowed because w resolved, while what w selects was never examined.
+        # A column reaching us through a derived relation is renamed, not traced:
+        # the alias resolves while what it selects is never examined.
         traced = [
             owner
             for owner in owners
@@ -724,9 +682,7 @@ def preflight(
             continue  # every column traced to a base relation, none repeated
         if hit is None:
             # Nothing to trace: COUNT(*), SUM(1), or a column projected out of a
-            # subquery under an alias. All of them read the joined output, which is
-            # the thing fan-out inflates — and treating "cannot tell" as "safe" is
-            # how each of them walked past.
+            # subquery. All read the joined output, which is what fan-out inflates.
             first = next(iter(multiplying.values()))
             return (
                 f"{first} This aggregate reads the joined output rather than a column "
@@ -749,16 +705,13 @@ def preflight(
 
 
 def _unsupported(tree: exp.Expression, joins: list, sources: dict[str, Source]) -> str | None:
-    """The shapes whose output grain the first version cannot prove."""
-    # A window function is deliberately not refused. It adds columns and never
-    # multiplies rows, so it cannot cause fan-out; what it cannot do is *prove* a
-    # grain, and the grain logic simply never credits one. Refusing outright
-    # blocked ordinary analysis — a LAG inside a CTE cost a bank question its
-    # rounds — for a risk windows do not carry.
+    """The shapes whose output grain cannot be proved."""
+    # A window function is deliberately absent: it adds columns and never multiplies
+    # rows, so it cannot cause fan-out. It merely cannot prove a grain, and the
+    # grain logic never credits one.
     for join in joins:
         # RIGHT and FULL change which unmatched rows survive, not which rows
-        # repeat, and repetition is the whole question here. A self-join is
-        # measurable too, now that each side is tracked by its alias.
+        # repeat, and repetition is the whole question here.
         if (join.args.get("kind") or "").upper() == "CROSS":
             return "cross join"
         if join.args.get("using"):
@@ -775,9 +728,8 @@ def _unsupported(tree: exp.Expression, joins: list, sources: dict[str, Source]) 
 def _predicate_problem(condition: exp.Expression) -> str | None:
     """Anything in an ON clause that is not an AND-ed equality of two columns.
 
-    Checked here rather than left to the measurer: a predicate we cannot measure
-    used to fall through as "nothing found to multiply", which let an unmeasurable
-    join run precisely because it was unmeasurable.
+    Checked here rather than left to the measurer, where an unmeasurable predicate
+    falls through as "nothing found to multiply".
     """
     stack = [condition]
     while stack:
@@ -827,9 +779,9 @@ def _join_multiplication(
     (left_alias, (left_source, left_columns)), (right_alias, (right_source, right_columns)) = (
         resolved.items()
     )
-    # A derived relation that already reduced itself to one row per key cannot
-    # multiply the other side, whatever its base table does. One that has not
-    # proved its grain is not something this version can reason about either way.
+    # A derived relation already reduced to one row per key cannot multiply the
+    # other side, whatever its base table does. One that has not proved its grain
+    # cannot be reasoned about either way.
     for source, columns in (
         (left_source, left_columns),
         (right_source, right_columns),
@@ -889,9 +841,8 @@ def _dropped_note(
 ) -> str | None:
     """Say when an inner join silently leaves rows out.
 
-    Nothing multiplies, so nothing is double counted — but an inner join that
-    drops 9,185 of one side's rows produces a total that is quietly short, and a
-    short total looks exactly as reasonable as a correct one.
+    Nothing multiplies, so nothing double counts — but a total over what matched is
+    quietly short, and reads exactly as reasonable as a correct one.
     """
     for join in joins:
         if (join.args.get("side") or "").upper() in {"LEFT", "RIGHT", "FULL"}:
@@ -942,9 +893,8 @@ def _using_sides(join: exp.Join, sources: dict[str, Source], using: list[str]):
 def _derived_is_unique(source: Source, columns: list[str]) -> bool:
     """Whether joining on these columns meets one row of this derived relation.
 
-    The subset runs this way round. A subquery grouped by (assetId, day) is one
-    row per pair, and joining on assetId alone still meets many of them — the
-    reversed test called that unique and waved the join through.
+    The subset runs this way round: a subquery grouped by (a, b) is one row per
+    pair, and joining on a alone still meets many of them.
     """
     return bool(source.unique_on) and source.unique_on <= {c.lower() for c in columns}
 

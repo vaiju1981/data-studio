@@ -14,8 +14,7 @@ from statsmodels.tsa.seasonal import STL
 from smart_data_studio.config import MAX_FORECAST_PERIODS
 
 # A first or last period this far below the interior median is nearly always a
-# partial period rather than a real collapse. Left in, a 23-day trailing month
-# turned a flat series into a fabricated 15% decline.
+# partial period rather than a real collapse.
 BOUNDARY_RATIO = 0.85
 # ...and the step into it must be this many times the usual one.
 BOUNDARY_STEP_MULTIPLE = 3.0
@@ -132,8 +131,8 @@ def _drop_proven_partials(
 ) -> pd.Series:
     """Drop periods whose coverage falls short of the days they span.
 
-    This is the version worth having: it removes a genuinely incomplete period
-    wherever it sits, and never removes a real decline.
+    Proved rather than inferred, so this removes an incomplete period wherever it
+    sits and never removes a real decline.
     """
     expected = _expected_days(series.index, freq)
     actual = covered.reindex(series.index)
@@ -254,7 +253,7 @@ def _fit(values: pd.Series, season: int | None):
 def _backtest(values: pd.Series, season: int | None) -> dict[str, object]:
     """Hold out the tail and compare the model against two do-nothing baselines.
 
-    On flat series a seasonal model can look impressive while adding nothing over
+    On a flat series a seasonal model looks impressive while adding nothing over
     the mean, so the comparison travels with every forecast.
     """
     horizon = min(4, len(values) // 5)
@@ -277,8 +276,7 @@ def _backtest(values: pd.Series, season: int | None) -> dict[str, object]:
         return round(float(np.abs(actual - np.asarray(prediction)).sum() / scale * 100), 2)
 
     # Holding out the tail can leave too few points for a seasonal fit even when
-    # the full series had enough. Fall back rather than lose the comparison, which
-    # is the part that keeps a flat forecast honest.
+    # the full series had enough. Fall back rather than lose the comparison.
     model_error = None
     for attempt in (season, None) if season else (None,):
         try:
@@ -345,9 +343,9 @@ def decompose(series: Series) -> dict[str, object]:
 def _generalized_esd(values: np.ndarray, max_outliers: int) -> list[int]:
     """Rosner's test: remove the most extreme point, then retest.
 
-    Peeling one at a time is what stops two outliers from hiding each other — a
-    single spike inflates the standard deviation enough to mask its neighbour, and
-    a plain z-score never recovers from that.
+    Peeling one at a time stops two outliers hiding each other: one spike inflates
+    the standard deviation enough to mask its neighbour, which a z-score never
+    recovers from.
     """
     count = len(values)
     remaining = list(range(count))

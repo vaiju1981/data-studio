@@ -83,10 +83,9 @@ def _sidebar() -> None:
     chosen: list[str] = []
     if ALLOW_LOCAL_PATHS:
         known = recent.recall()
-        # A selection is kept across reruns so the sidebar always shows what the
-        # button will load — the box below keeps its text, and the two disagreeing
-        # meant a second click quietly loaded only what was typed. Pruned to what
-        # still exists, since Streamlit refuses a selection outside its options.
+        # Kept across reruns so the sidebar always shows what the button will load,
+        # and pruned to what still exists, since Streamlit refuses a selection
+        # outside its options.
         st.session_state.chosen_paths = [
             path for path in st.session_state.get("chosen_paths", []) if path in known
         ]
@@ -160,9 +159,8 @@ def _metrics_controls() -> None:
         "Definitions",
         key="metrics",
         height=140,
-        # Deliberately generic: the example is the first thing a new user reads, and
-        # naming one industry's measures makes a tool for any CSV look like a tool
-        # for that industry.
+        # Deliberately generic: naming one industry's measures makes a tool for any
+        # CSV look like a tool for that industry.
         placeholder=(
             "unit price = 0 if quantity is 0, else revenue / quantity\n"
             "revenue_last_90 = sum of revenue over the last 90 days\n"
@@ -189,12 +187,7 @@ def _metrics_controls() -> None:
 
 
 def _forget() -> None:
-    """Throw the workspace away on request, and prove it in the log.
-
-    Everything is in memory already, so deletion is closing the connection and
-    dropping the references — but it has to be something a user can actually do
-    rather than a property of the implementation.
-    """
+    """Throw the workspace away on request, and prove it in the log."""
     sessions.release(st.session_state.session_id)
     recent.forget()
     st.session_state.relationship_status = {}
@@ -219,8 +212,8 @@ def _load(uploads: list[object], paths: str, chosen: list[str] | None = None) ->
         local = [Path(item) for item in chosen or []] + local
         sources = [CsvSource.from_upload(upload.name, upload.getvalue()) for upload in uploads]
         sources.extend(CsvSource.from_path(path) for path in local)
-        # Asked before the load, not after it: refusing a 2.7GB file once it is
-        # already parsed and profiled wastes the minute and the memory both.
+        # Before the load: refusing a large file once it is parsed and profiled
+        # wastes the time and the memory both.
         sessions.check_capacity(st.session_state.session_id)
         with st.spinner("Loading and profiling your data…"):
             dataset = Dataset.load(sources)

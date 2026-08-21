@@ -31,7 +31,7 @@ class ChartSpec:
 
 
 def label(name: str) -> str:
-    """total_theo_win -> Total Theo Win, avgBet -> Avg Bet."""
+    """unit_price -> Unit Price, avgBet -> Avg Bet."""
     spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", name).replace("_", " ")
     return " ".join(word.capitalize() if word.islower() else word for word in spaced.split())
 

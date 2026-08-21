@@ -29,17 +29,16 @@ class TableProfile:
     dictionary: list[str] = field(default_factory=list)
     # The same values keyed by column, for guards rather than for reading.
     values: dict[str, list[str]] = field(default_factory=dict)
-    # How a row is identified, measured. Empty for a single loaded table, which
-    # keeps that path byte-for-byte as it was.
+    # How a row is identified, measured. Empty for a single loaded table.
     keys: list = field(default_factory=list)
     # Columns another loaded table also has, and how far each is from identifying
-    # a row. These are exactly the columns a join reaches for.
+    # a row — exactly the columns a join reaches for.
     shared: list[str] = field(default_factory=list)
-    # Measures another table also has under the same name. These do not join, they
+    # Measures another table also has under the same name. These do not join; they
     # get taken from the wrong table.
     shared_measures: list[str] = field(default_factory=list)
-    # The column a row is a repeat of — playerId in a table of visits. A question
-    # about that entity has to be aggregated to it, not counted by row.
+    # The column a row is a repeat of. A question about that entity has to be
+    # aggregated to it, not counted by row.
     entity_key: str | None = None
 
     def prompt_text(self) -> str:
@@ -54,11 +53,8 @@ class TableProfile:
             "null_percentage",
         ]
         available = [column for column in columns if column in self.stats.columns]
-        # SUMMARIZE covers every column, so its min and max carry real cell values —
-        # the first and last email, the smallest and largest account number. The
-        # schema, the samples and the dictionary all exclude sensitive columns
-        # already; this was the way round them, and it is the model-facing text
-        # that has to be filtered rather than the panel the owner reads.
+        # SUMMARIZE covers every column, so min and max carry real cell values. The
+        # model-facing text is filtered here rather than the panel the owner reads.
         visible = self.stats[~self.stats["column_name"].map(is_sensitive)]
         rendered_stats = (
             visible[available]
@@ -68,8 +64,7 @@ class TableProfile:
         rendered_findings = "\n".join(
             f"- {finding}" for finding in self.findings if not _names_sensitive(finding)
         )
-        # Stated before anything joins, so the right key is used the first time
-        # rather than a wrong one being refused and rewritten.
+        # Stated before anything joins, so the right key is used first time.
         rendered_keys = (
             "\nHow a row is identified: " + "; ".join(facts.describe() for facts in self.keys) + "."
             if self.keys
@@ -114,11 +109,9 @@ def profile_dataset(dataset: Dataset) -> list[TableProfile]:
 def _summarize(dataset: Dataset, table_name: str) -> tuple[pd.DataFrame, list[str]]:
     """SUMMARIZE, falling back to column by column when one column defeats it.
 
-    A real asset file carries NaN in a DOUBLE column, and stddev over NaN raises
-    OutOfRange. That took the whole table's profile with it, so a 962MB file that
-    loaded and queried perfectly well could not be profiled at all — and the app
-    is unusable for a file it cannot profile. One bad column now costs its own
-    statistics and nothing else.
+    stddev over a NaN or infinity raises OutOfRange, which otherwise takes the
+    whole table's profile with it — and the app is unusable for a file it cannot
+    profile. One bad column costs its own statistics and nothing else.
     """
     quoted = quote_identifier(table_name)
     try:
@@ -145,12 +138,10 @@ def profile_table(dataset: Dataset, table_name: str) -> TableProfile:
     row_count = dataset.row_count(table_name)
     exact_distinct = _exact_distinct(dataset, table_name, stats, row_count)
     findings = _findings(stats, row_count, exact_distinct)
-    # Ahead of the rest: a column whose average is meaningless is worth more than
-    # a note that another column is high-cardinality.
+    # Ahead of the rest: a meaningless average outranks a cardinality note.
     findings = list(_sentinels(dataset, table_name, stats).values()) + findings
     dictionary, values = _dictionary(dataset, table_name, stats)
-    # Only with something to join to. §10 of the multi-CSV plan: one CSV adds no
-    # profile query and no line of output.
+    # Only with something to join to: one CSV adds no query and no output.
     keys = (
         relationships.discover_keys(dataset, table_name, _distinct_by_column(stats))
         if len(dataset.tables) > 1
@@ -163,8 +154,8 @@ def profile_table(dataset: Dataset, table_name: str) -> TableProfile:
     if grain:
         findings.insert(0, grain)
     if unsummarised:
-        # Said rather than silently missing: a column absent from the statistics
-        # would otherwise look like a column the file does not have.
+        # Said rather than silently missing, or the column reads as one the file
+        # does not have.
         findings.append(
             f"No statistics could be computed for {', '.join(unsummarised)} — the values "
             "include NaN or infinity, which DuckDB cannot summarise. The column is still "
@@ -192,9 +183,8 @@ def _entity_grain(
     """Report which columns stay constant within the table's entity key.
 
     Grouping by an entity key together with a column that varies inside it splits
-    one entity across several rows, each carrying a partial total — a wrong number
-    that looks entirely reasonable. Nothing in a column-by-column profile reveals
-    this, so it is worth one extra pass.
+    one entity across several rows, each carrying a partial total. A column-by-column
+    profile cannot reveal that, so it is worth one extra pass.
     """
     records = stats.to_dict(orient="records")
     candidates = [
@@ -216,8 +206,7 @@ def _entity_grain(
         for index, name in enumerate(others)
     )
     # count_if rides along on the same pass: max says a column varies somewhere,
-    # this says how widely. A tier that moves for 55,629 of 460,442 players is
-    # where "how do we upsell" is actually answerable, and nothing else says so.
+    # this says how widely.
     outer = ", ".join(
         f"max(d{index}) AS m{index}, count_if(d{index} > 1) AS c{index}"
         for index in range(len(others))
@@ -234,8 +223,8 @@ def _entity_grain(
     entities = int(row[0])
     # Two values per column now, so the stride is two.
     stable = [others[index] for index in range(len(others)) if _number(row[1 + index * 2]) <= 1]
-    # Only dimensions: visitId and startTime differ per visit by definition, and
-    # listing them buries the one that carries meaning — a player changing tier.
+    # Only dimensions: a per-row id or timestamp varies by definition, and listing
+    # those buries the one that carries meaning.
     dimensions = _dimension_columns(stats, row_count)
     moving = sorted(
         (
@@ -267,9 +256,8 @@ def _entity_grain(
 def _looks_like_key(name: str) -> bool:
     """id, player_id, playerId, playerID — but not paid, valid, PAID or PYRAMID.
 
-    The separator is what counts. Testing only that the character before "id" is
-    upper-case accepted every all-caps word ending in those letters, so the letter
-    before the suffix has to be lower-case: the boundary in playerId, absent in PAID.
+    The separator is what counts, so the letter before the suffix has to be lower
+    case: the boundary is present in playerId and absent in PAID.
     """
     lowered = name.lower()
     if lowered == "id" or lowered.endswith("_id"):
@@ -283,9 +271,8 @@ def _exact_distinct(
     """Exact distinct counts for the columns that could be keys.
 
     SUMMARIZE reports approx_unique from a sketch, which drifts either way and can
-    even exceed the row count — so it can neither confirm a key nor be quoted as a
-    fact. Only near-unique columns are worth the exact pass, which keeps the cost
-    off wide tables.
+    exceed the row count, so it can neither confirm a key nor be quoted as a fact.
+    Only near-unique columns are worth the exact pass.
     """
     if row_count == 0:
         return {}
@@ -306,9 +293,8 @@ def _exact_distinct(
 def _shared_columns(dataset: Dataset, table_name: str, row_count: int) -> list[str]:
     """How far each column shared with another table is from identifying a row.
 
-    A join reaches for the column both files have, and the whole 439x failure was
-    joining on one of those without checking whether it repeats. Saying so before
-    anything joins is what turns a refusal into a right answer first time.
+    A join reaches for the column both files have. Saying whether it repeats before
+    anything joins turns a refusal into a right answer first time.
     """
     measures = relationships.measure_columns(dataset, table_name)
     mine = {
@@ -332,10 +318,9 @@ def _shared_columns(dataset: Dataset, table_name: str, row_count: int) -> list[s
         ((name, int(distinct)) for name, distinct in zip(together, counts, strict=True)),
         key=lambda item: -item[1],
     )
-    # Bounded and prioritised. Two of these files share twenty-five column names,
-    # and listing them all buries the few a join would actually use. The most
-    # various come first because those are the plausible keys; constants are kept
-    # regardless, since joining two tables on one pairs every row with every row.
+    # Bounded and prioritised: the most various first, because those are the
+    # plausible keys. Constants are kept regardless, since joining on one pairs
+    # every row with every row.
     constants = [item for item in measured if item[1] <= 1]
     plausible = [item for item in measured if item[1] > 1][:MAX_SHARED_COLUMNS]
 
@@ -353,12 +338,9 @@ def _shared_columns(dataset: Dataset, table_name: str, row_count: int) -> list[s
 def _shared_measures(dataset: Dataset, table_name: str) -> list[str]:
     """Measures another table also carries under the same name, with this total.
 
-    Not a join problem — a provenance one. Asked for the game version with the most
-    *session* coin in, the model summed coinIn from the asset table, which has its
-    own daily column of that name: $500,401,572 against a true $67,143,446. Nothing
-    double-counted and no join was made, so the fan-out guard has nothing to catch.
-    The totals differ by seven times, and saying so is what stops the wrong one
-    being used.
+    A provenance problem, not a join one: nothing double counts and no join is
+    made, so the fan-out guard has nothing to catch. Showing both totals is what
+    stops the wrong one being used.
     """
     mine = relationships.measure_columns(dataset, table_name)
     elsewhere = {
@@ -417,15 +399,11 @@ def _dictionary(
 ) -> tuple[list[str], dict[str, list[str]]]:
     """The values each dimension column actually holds, not merely its name.
 
-    The schema tells the model that ageGroup exists; it does not say the column
-    runs from "21-25" to "81+". Without that, a question about segmentation
-    reaches for whatever column the exploration happened to sample, and columns it
-    never queried go unmentioned even though they were listed all along — which is
-    how a summary can cover geoType and clubLevel and never notice ageGroup, city
-    or state.
+    The schema says an ageGroup column exists; it does not say the column runs from
+    "21-25" to "81+". Without that, a question about segmentation reaches for
+    whichever column the exploration happened to sample.
 
-    approx_top_k gathers every column in a single pass, so this costs one scan
-    rather than one per column.
+    approx_top_k gathers every column in one pass rather than one scan per column.
     """
     candidates = list(_dimension_columns(stats, dataset.row_count(table_name)).items())
     if not candidates:
@@ -443,8 +421,8 @@ def _dictionary(
     )
 
     lines: list[str] = []
-    # The same values kept structurally, so a guard can ask whether a value named
-    # in a question is the one the query actually filtered on.
+    # Kept structurally too, so a guard can compare a value named in a question
+    # against the one the query filtered on.
     held: dict[str, list[str]] = {}
     for index, (name, distinct) in enumerate(candidates):
         # Explicit None test: this arrives as a numpy array, and `array or []`
@@ -468,23 +446,17 @@ def _dictionary(
 def _sentinels(dataset: Dataset, table_name: str, stats: pd.DataFrame) -> dict[str, str]:
     """Extreme values that repeat, which are codes rather than measurements.
 
-    Real datasets bury "missing" inside a numeric column as -200, -999 or 9999.
-    Nothing about the load is wrong — the value parses, the column is numeric, the
-    average is arithmetic — and the answer is silently, confidently wrong. The UCI
-    air quality file reports mean CO of -34.2 this way, against a true 2.15.
+    Real datasets bury "missing" inside a numeric column as -200, -999 or 9999. The
+    value parses, the column is numeric, the average is arithmetic, and the answer
+    is silently wrong.
 
     The test is that a value is both repeated and *isolated*: the step from it to
-    the next value is far wider than the typical step between values, and it
-    accounts for a real share of the rows. Comparing the step to the column's whole
-    range instead looks right and is not — it catches -200 in a column spanning 12,
-    and misses the same -200 in a column spanning 1,476, which is the case that
-    turned a true mean of 246.9 into 168.6.
+    the next is far wider than the typical step, and it covers a real share of the
+    rows. Comparing the step to the column's whole range instead scales with the
+    range, so the same code is caught in a narrow column and missed in a wide one.
 
     Typical step is the inner range over the distinct values in it, so a binned
-    column whose values all sit 100 apart is not accused of hiding a code in its
-    lowest bin.
-
-    SUMMARIZE has already paid for min and max, so this costs one further scan.
+    column whose values sit evenly apart is not accused of hiding a code.
     """
     candidates = []
     for row in stats.to_dict(orient="records"):

@@ -1,9 +1,8 @@
 """Track live workspaces so the host cannot be filled by abandoned ones.
 
 Every session holds its own in-memory DuckDB, which is the real concurrency
-ceiling here: a 2.7GB file is a 2.7GB workspace, and two idle tabs cost as much
-as two busy ones. So sessions are counted, idle ones are closed, and everything
-is closed again on shutdown.
+ceiling: an idle tab costs as much as a busy one. So sessions are counted, idle
+ones are closed, and everything is closed again on shutdown.
 """
 
 from __future__ import annotations
@@ -42,10 +41,9 @@ _lock = threading.Lock()
 def check_capacity(session_id: str) -> None:
     """Refuse a full host before the caller pays to load anything.
 
-    register() is the real gate, but it runs after the file is parsed and
-    profiled — so a host with no room still spent a minute and several gigabytes
-    finding that out. This asks the same question first and cheaply. A session
-    replacing its own workspace always has room, since its slot is reused.
+    register() is the real gate, but it runs after the file is parsed and profiled.
+    This asks the same question first and cheaply. A session replacing its own
+    workspace always has room, since its slot is reused.
     """
     with _lock:
         _evict_idle_locked()

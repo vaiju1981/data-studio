@@ -49,9 +49,8 @@ def _describe_effect(magnitude: float) -> str:
 def compare_groups(frame: pd.DataFrame, dimension: str, measure: str) -> dict[str, object]:
     """Test whether two groups really differ on a measure, and by how much.
 
-    Effect size leads, because significance does not survive contact with large
-    data: at a few million rows every difference is "significant", so a p-value
-    alone would rubber-stamp noise as a finding.
+    Effect size leads: at a few million rows every difference is significant, so a
+    p-value alone rubber-stamps noise as a finding.
     """
     _require(frame, dimension, measure)
     values = pd.to_numeric(frame[measure], errors="coerce")
@@ -69,9 +68,7 @@ def compare_groups(frame: pd.DataFrame, dimension: str, measure: str) -> dict[st
         .reindex(sizes.index)
     )
     # Capped, and largest first, so the pair actually compared is always inside it.
-    # Every other tool is budgeted — run_sql digests, relate keeps 15, rank_drivers
-    # keeps 6 — and this one listed every group, which on 2,000 levels meant 195,000
-    # characters of summary for the two it went on to test.
+    # Every tool here is budgeted, or one call fills the prompt on its own.
     shown = summary.head(MAX_COMPARISON_GROUPS)
     result: dict[str, object] = {
         "measure": measure,
@@ -150,7 +147,7 @@ def rank_drivers(frame: pd.DataFrame, measure: str, split: str) -> dict[str, obj
     """Sweep every usable dimension and rank what moved a measure between two sides.
 
     Sweeping is the point: asked by hand, the model checks whichever dimension it
-    thought of and misses the one that actually explains the move.
+    thought of and misses the one that explains the move.
     """
     _require(frame, measure, split)
     sides = frame[split].dropna().unique()
@@ -183,8 +180,7 @@ def rank_drivers(frame: pd.DataFrame, measure: str, split: str) -> dict[str, obj
         if before not in pivot.columns or after not in pivot.columns:
             continue
         change = (pivot[after] - pivot[before]).sort_values()
-        # head and tail overlap once there are six levels or fewer, which listed
-        # every mover twice.
+        # head and tail overlap at six levels or fewer, listing every mover twice.
         shown = change if len(change) <= 6 else pd.concat([change.head(3), change.tail(3)])
         movers = [
             {"level": str(level), "change": round(float(delta), 2)}
@@ -197,8 +193,7 @@ def rank_drivers(frame: pd.DataFrame, measure: str, split: str) -> dict[str, obj
                 "dimension": column,
                 "levels": int(len(change)),
                 # The biggest single move is what a reader acts on. Spread is total
-                # churn, which ranks a dimension high merely for having many levels
-                # and ties whenever movement is symmetric.
+                # churn, which ranks a dimension high merely for having many levels.
                 "largest_move": round(largest, 2),
                 "concentration": round(largest / spread, 3) if spread else None,
                 # Against an even split of the churn. A dimension with many levels
@@ -237,8 +232,8 @@ def rank_drivers(frame: pd.DataFrame, measure: str, split: str) -> dict[str, obj
 def relate(frame: pd.DataFrame, target: str) -> dict[str, object]:
     """Rank every column by how strongly it is associated with a target column.
 
-    Association, not the size of the biggest gap: a small group with an extreme
-    mean looks impressive by eye while explaining almost none of the variation.
+    Association, not the biggest gap: a small group with an extreme mean looks
+    impressive while explaining almost none of the variation.
     """
     _require(frame, target)
     values = pd.to_numeric(frame[target], errors="coerce")
@@ -258,9 +253,8 @@ def relate(frame: pd.DataFrame, target: str) -> dict[str, object]:
         series = working[column]
         if series.nunique() < 2:
             continue
-        # Every association is computed on the rows where both columns are present,
-        # so a sparse column is scored on what it actually has rather than silently
-        # borrowing the target's row count.
+        # Computed on the rows where both columns are present, so a sparse column is
+        # scored on what it has rather than borrowing the target's row count.
         paired = pd.DataFrame({"value": series, "target": outcome}).dropna()
         if len(paired) < MIN_ASSOCIATION_ROWS or paired["value"].nunique() < 2:
             continue

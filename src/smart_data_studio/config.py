@@ -35,8 +35,8 @@ MODEL_RETRY_SECONDS = _number("SDS_MODEL_RETRY_SECONDS", 2)
 # session limits allow.
 MAX_CONTEXT_SHEDS = _number("SDS_MAX_CONTEXT_SHEDS", 3)
 
-# Reading a path off the host is right for a local tool and disqualifying for a
-# shared one, so hosted deployments turn it off.
+# Right for a local tool, disqualifying for a shared one, so hosted deployments
+# turn it off.
 ALLOW_LOCAL_PATHS = _flag("SDS_ALLOW_LOCAL_PATHS", True)
 
 # DuckDB is given a budget before the connection is locked; without one a single
@@ -47,10 +47,8 @@ DUCKDB_TEMP_DIR = os.environ.get("SDS_DUCKDB_TEMP_DIR", "")
 QUERY_TIMEOUT_SECONDS = _number("SDS_QUERY_TIMEOUT_SECONDS", 60)
 
 # Size ceilings, checked before parsing. A local path gets its own and a looser
-# one: nothing crossed a network, and the 962MB and 2.7GB files this was built
-# against load and query perfectly well, so the upload limit would refuse the very
-# case paths exist for. It only catches the absurd, and catches it before the
-# table exists — which is the earliest MAX_INGEST_ROWS below can manage.
+# one: nothing crossed a network, and multi-gigabyte local files load and query
+# perfectly well, so the upload limit would refuse the case paths exist for.
 MAX_UPLOAD_BYTES = _number("SDS_MAX_UPLOAD_BYTES", 500 * 1024 * 1024)
 MAX_LOCAL_FILE_BYTES = _number("SDS_MAX_LOCAL_FILE_BYTES", 5 * 1024 * 1024 * 1024)
 
@@ -58,9 +56,9 @@ MAX_LOCAL_FILE_BYTES = _number("SDS_MAX_LOCAL_FILE_BYTES", 5 * 1024 * 1024 * 102
 MAX_INGEST_ROWS = _number("SDS_MAX_INGEST_ROWS", 20_000_000)
 MAX_INGEST_COLUMNS = _number("SDS_MAX_INGEST_COLUMNS", 512)
 
-# Deliberately loose. The binding constraint is DUCKDB_MEMORY_LIMIT, which spills
-# to disk rather than failing; this only catches the absurd. Set at 400M it
-# refused a real 7.9M x 57 file that loads and queries perfectly well.
+# Deliberately loose: the binding constraint is DUCKDB_MEMORY_LIMIT, which spills
+# to disk rather than failing, so this only catches the absurd. Tightened to 400M
+# it refused ordinary wide files that load and query fine.
 MAX_INGEST_CELLS = _number("SDS_MAX_INGEST_CELLS", 2_000_000_000)
 MAX_HEADER_LENGTH = _number("SDS_MAX_HEADER_LENGTH", 200)
 # Long free text is rarely the analysis and always the cost, so it is trimmed on
@@ -115,9 +113,8 @@ DIGEST_SAMPLE_ROWS = 10
 
 MAX_CHART_ROWS = 5_000
 # Statistical tools read the whole result, so this bounds what they will pull.
-# Budgeted in cells rather than rows: a two-column comparison can hold every row
-# of a large table, while a 57-column result cannot, and one row cap cannot serve
-# both without either sampling needlessly or running out of memory.
+# Budgeted in cells rather than rows: a two-column comparison can hold every row of
+# a large table while a very wide result cannot, and one row cap cannot serve both.
 MAX_ANALYSIS_CELLS = 20_000_000
 MAX_ANALYSIS_ROWS = 2_000_000
 # Fixed so the same question gives the same answer twice.
@@ -128,30 +125,29 @@ SAMPLE_ROWS = 5
 # cost time, and effect size — the part that matters — is already stable.
 MAX_TEST_SAMPLE = 50_000
 MAX_RELATE_SAMPLE = 100_000
-# Group summaries a comparison returns. Listed largest first, so the two actually
-# compared always fall inside it. Uncapped, a dimension with 2,000 levels sent
-# 195,000 characters into a prompt whose result budget is MAX_LLM_PAYLOAD_CHARS.
+# Group summaries a comparison returns, listed largest first so the two actually
+# compared always fall inside it. Uncapped, a high-cardinality dimension overruns
+# MAX_LLM_PAYLOAD_CHARS many times over.
 MAX_COMPARISON_GROUPS = 25
 # Values listed per dimension column. A column with no more than this many is
 # listed in full; a wider one shows its commonest, which is what makes a column
 # the model never queried still visible to it.
 DICTIONARY_VALUES = 12
 
-# Values returned when looking up what a column really holds. Enough to show every
-# spelling of a city; short enough not to dump a column into the prompt.
+# Values returned when looking up what a column holds. Enough to show every
+# spelling of a name; short enough not to dump a column into the prompt.
 MAX_VALUE_MATCHES = 25
 
-# Bounds on what the model may propose about how tables relate. A model that
-# proposes forty joins between two tables costs forty verification queries for no
-# more insight than four.
+# Bounds on what the model may propose about how tables relate: every candidate
+# costs a verification query.
 MAX_KEY_CANDIDATES = 4
 MAX_JOIN_CANDIDATES = 4
 MAX_KEY_COLUMNS = 4
 # How many of a table's most various columns are searched for a key. Pairs are
-# quadratic, and a key's parts are necessarily among the columns with the most
-# distinct values, so a small window finds (assetId, day) without a sweep.
+# quadratic, and a key's parts are necessarily among the most various columns, so
+# a small window finds a composite key without a full sweep.
 MAX_KEY_SEARCH_COLUMNS = 6
-# Shared column names reported per table. Two real files shared twenty-five, and
+# Shared column names reported per table: two related files can share dozens, and
 # listing them all buries the few a join would use.
 MAX_SHARED_COLUMNS = 5
 
@@ -162,7 +158,7 @@ MAX_DRIVER_LEVELS = 50
 MIN_COMPARISON_ROWS = 10
 MIN_ASSOCIATION_ROWS = 10
 # A repeated extreme is a missing-value code, not a measurement. Set low because
-# the consequence — an average computed over -200s — is silent and severe.
+# the consequence — an average computed over sentinels — is silent and severe.
 SENTINEL_SHARE = 0.02
 MIN_SENTINEL_ROWS = 50
 # How many typical steps the value must stand away from the rest before it is a
@@ -172,7 +168,7 @@ SENTINEL_GAP_RATIO = 20
 # A forecast cannot reach further ahead than the history it was built from.
 MAX_FORECAST_PERIODS = 120
 
-# Eight tools means longer chains; six rounds left complex questions unanswered.
+# Eight tools means longer chains than six rounds can finish.
 MAX_TOOL_ROUNDS = 10
 MAX_EXPLORE_ROUNDS = 8
 # A judgement question is worked as a few sub-questions, each on a short leash.

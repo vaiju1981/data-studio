@@ -62,8 +62,8 @@ CODE_WORDS = ("id", "code", "zip", "postal", "phone", "account", "number", "no",
 def _looks_like_code(name: str) -> bool:
     """Is this column an identifier rather than a quantity?
 
-    zipCode is entirely digits and entirely not a number: summing it is nonsense
-    and casting it drops the leading zero that makes it correct.
+    A zip code is entirely digits and entirely not a number: casting it drops the
+    leading zero that makes it correct.
     """
     parts = re.split(r"[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])", name)
     return any(part.lower() in CODE_WORDS for part in parts if part)
@@ -106,9 +106,8 @@ class CsvSource:
                 f"{resolved.name} is {size / 1e9:.1f}GB; the limit is "
                 f"{MAX_LOCAL_FILE_BYTES / 1e9:.1f}GB."
             )
-        # The same check decode_csv makes on an upload, and for the same reason: a
-        # binary file decodes to garbage rather than failing, so it is named here
-        # instead of arriving as an inscrutable parse error a hundred lines in.
+        # The check decode_csv makes on an upload: a binary file decodes to garbage
+        # rather than failing, so it is named here rather than as a parse error.
         with resolved.open("rb") as handle:
             if b"\x00" in handle.read(65536):
                 raise ValueError(
@@ -128,16 +127,14 @@ class CsvSource:
         else:
             with self.path.open("rb") as handle:
                 raw = handle.readline()
-        # The same ladder decode_csv applies to an upload. Read as UTF-8 with
-        # replacements, a cp1252 header came back carrying question marks, and two
-        # names differing only by an accent then read as a duplicate. A line break
-        # cannot fall inside a multi-byte sequence, so one line decodes on its own.
+        # The same ladder decode_csv applies to an upload, so an accented header is
+        # not replaced into a false duplicate. A line break cannot fall inside a
+        # multi-byte sequence, so one line decodes on its own.
         first, _ = decode_csv(self.name, raw)
         first = first.rstrip("\r")
-        # Split on whichever separator actually divides this line. Assuming a comma
-        # made a semicolon or tab file parse as one enormous field, which silently
-        # disabled the duplicate-name check and could read a wide header as a single
-        # over-long name — reported as "the first row is probably data".
+        # Split on whichever separator actually divides this line: assuming a comma
+        # reads a semicolon or tab file as one enormous field, which disables the
+        # duplicate check below.
         best: list[str] = []
         for delimiter in (",", ";", "\t", "|"):
             fields = next(csv.reader([first], delimiter=delimiter), [])
@@ -166,10 +163,8 @@ class CsvSource:
 def decode_csv(name: str, content: bytes) -> tuple[str, str]:
     """Decode a CSV that was not necessarily written in UTF-8.
 
-    Refusing anything but UTF-8 turned away ordinary European and older Excel
-    exports. UTF-8 is tried first because it fails loudly on non-UTF-8 input;
-    cp1252 is the fallback because it decodes every byte, so trying it first would
-    silently mangle valid UTF-8.
+    Order matters: UTF-8 first because it fails loudly on non-UTF-8 input, cp1252
+    last because it decodes almost every byte and would silently mangle UTF-8.
     """
     head = content[:65536]
     if b"\x00" in head:
@@ -188,12 +183,11 @@ def decode_csv(name: str, content: bytes) -> tuple[str, str]:
 def transcode_to_utf8(source: Path) -> Path:
     """Rewrite a CSV as UTF-8 in a temporary file, returning where it went.
 
-    Streamed a chunk at a time rather than decoded whole. A local path exists so
-    that a file larger than memory need not be held in it, and pulling 2.7GB into a
-    string to fix three accented characters would give exactly that away.
+    Streamed rather than decoded whole: a local path exists so that a file larger
+    than memory need not be held in it.
 
-    Two encodings, not decode_csv's three: this only runs on a file DuckDB has
-    already refused as non-UTF-8, and utf-8-sig differs from utf-8 by a BOM alone.
+    Two encodings, not decode_csv's three, since this only runs on a file DuckDB
+    has already refused as non-UTF-8 and utf-8-sig differs by a BOM alone.
     """
     with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as handle:
         destination = Path(handle.name)
@@ -217,11 +211,7 @@ def transcode_to_utf8(source: Path) -> Path:
 
 @dataclass
 class TableLineage:
-    """Where a table came from and what it turned into.
-
-    Shown before any analysis, because "which file, parsed how" is the first
-    question anyone asks of a number they did not expect.
-    """
+    """Where a table came from and what it turned into."""
 
     table: str
     source: str
@@ -253,11 +243,7 @@ class QueryResult:
 
 
 def _trim_cells(row: dict[str, object]) -> dict[str, object]:
-    """Shorten long free text before it reaches the prompt.
-
-    A notes field can be longer than the rest of the row put together, and the
-    analysis never turns on its tail.
-    """
+    """Shorten long free text before it reaches the prompt."""
     trimmed = {}
     for key, value in row.items():
         if isinstance(value, str) and len(value) > MAX_CELL_CHARS_TO_MODEL:
@@ -280,9 +266,7 @@ class Dataset:
         self.connection = connection
         self.tables = tables
         self.lineage = lineage
-        # Files that could not be read, kept so the panel can name them. Loading
-        # four CSVs and getting nothing because one was malformed is the wrong
-        # trade when the other three are fine.
+        # Files that could not be read, kept so the panel can name them.
         self.rejected = rejected
         self.queries_run = 0
 
@@ -311,8 +295,7 @@ class Dataset:
                     # table is dropped so it cannot be queried as though it loaded.
                     logs.failure("ingest.failed")
                     connection.execute(f"DROP TABLE IF EXISTS {quote_identifier(table_name)}")
-                    # Most of these errors name the file themselves; prefixing
-                    # unconditionally printed it twice.
+                    # Most of these errors name the file themselves.
                     name = safe_name(source.name)
                     reason = str(error)
                     rejected.append(reason if name in reason else f"{name} — {reason}")
@@ -340,8 +323,7 @@ class Dataset:
     def _apply_budget(connection: duckdb.DuckDBPyConnection) -> None:
         """Bound memory, threads and spill before the connection is locked shut.
 
-        Without this one careless join takes the whole process with it, and after
-        the lock these settings can no longer be changed — which is the point.
+        After the lock these settings can no longer be changed, which is the point.
         """
         Path(temp_directory()).mkdir(parents=True, exist_ok=True)
         connection.execute(f"SET memory_limit='{DUCKDB_MEMORY_LIMIT}'")
@@ -371,9 +353,9 @@ class Dataset:
     def _column_warnings(connection: duckdb.DuckDBPyConnection, table_name: str) -> list[str]:
         """Everything worth saying about how the columns parsed, in one pass.
 
-        These are heuristics, not facts, so they are measured on a sample: scanning
-        7.9M rows with a regex per text column added 30s to load for advice that a
-        sample settles just as well. Counts are reported as shares for that reason.
+        Heuristics rather than facts, so they are measured on a sample and reported
+        as shares: a regex per text column over a whole large file costs tens of
+        seconds for advice a sample settles just as well.
         """
         quoted = quote_identifier(table_name)
         described = [
@@ -391,11 +373,9 @@ class Dataset:
                     f"count({column}) AS present_{index}",
                     f"count(TRY_CAST({column} AS DOUBLE)) AS numeric_{index}",
                     # Decoration only: a bare digit string must not match, or a zip
-                    # code gets advised into losing its leading zero. Three shapes
+                    # code is advised into losing its leading zero. Three shapes
                     # count — a currency or percent sign, a grouped number like
-                    # 1.234,56, and a bare comma decimal like 2,6, which real
-                    # European exports use constantly and the grouped pattern alone
-                    # never matched.
+                    # 1.234,56, and a bare comma decimal like 2,6.
                     f"count_if(regexp_matches({column}, '[$€£¥%]') OR "
                     f"regexp_matches({column}, "
                     f"'^[-+]?[0-9]{{1,3}}([.,][0-9]{{3}})+([.,][0-9]+)?$') OR "
@@ -403,8 +383,8 @@ class Dataset:
                     f") AS decorated_{index}",
                     f"count_if(lower(trim({column})) IN "
                     f"('na','n/a','nan','null','none','-','--','?','.','#n/a')) AS missing_{index}",
-                    # A leading zero is the mark of a code, not a quantity: zip,
-                    # phone, account. Casting one away is the bug, not the fix.
+                    # A leading zero marks a code, not a quantity. Casting it away
+                    # is the bug, not the fix.
                     f"count_if(regexp_matches({column}, '^0[0-9]+$')) AS coded_{index}",
                 ]
             elif "DATE" in kind or "TIMESTAMP" in kind:
@@ -415,23 +395,20 @@ class Dataset:
         blank = " AND ".join(f"{quote_identifier(name)} IS NULL" for name, _ in described)
         projections.append(f"count_if({blank}) AS blank_rows")
         # Does each column's own name occur among its values? A real header almost
-        # never repeats as data in its own column, while a data row promoted to a
-        # header repeats constantly — which is what catches a headerless file whose
-        # first row is mostly words, where counting numeric names does not.
+        # never repeats as data in its own column; a data row promoted to a header
+        # does, which catches a headerless file whose first row is words not numbers.
         for index, (name, _) in enumerate(described):
             literal = name.replace("'", "''")
-            # Trimmed on both sides: a file separated by ", " leaves a leading
-            # space on every value while DuckDB strips it from the header, so an
-            # exact comparison matched nothing on the real file this was built for.
+            # Trimmed both sides: a file separated by ", " leaves a leading space on
+            # every value while DuckDB strips it from the header.
             projections.append(
                 f"count_if(trim(CAST({quote_identifier(name)} AS VARCHAR)) = trim('{literal}')) "
                 f"AS selfnamed_{index}"
             )
 
         # LIMIT, not a random sample: reservoir sampling still reads every row, and
-        # what is being detected is a *format* — whether values carry currency signs
-        # or comma decimals — which does not vary down the file the way a statistic
-        # does. This is why the statistical tools sample randomly and this does not.
+        # a *format* does not vary down the file the way a statistic does. The
+        # statistical tools sample randomly for that reason; this deliberately does not.
         row = connection.execute(
             f"SELECT {', '.join(projections)} FROM "
             f"(SELECT * FROM {quoted} LIMIT {WARNING_SAMPLE_ROWS})"
@@ -441,9 +418,8 @@ class Dataset:
 
         warnings: list[str] = []
         numeric_names = sum(1 for name, _ in described if re.fullmatch(r"[-+]?[0-9.,]+", name))
-        # Compared rather than cast: these counts arrive as floats, and an empty
-        # table makes them NaN, which int() refuses. This runs before the no-rows
-        # guard below, so it has to tolerate that.
+        # Compared rather than cast: these arrive as floats and an empty table makes
+        # them NaN, which int() refuses. This runs before the no-rows guard below.
         self_named = sum(
             1 for index in range(len(described)) if (values.get(f"selfnamed_{index}") or 0) > 0
         )
@@ -483,13 +459,12 @@ class Dataset:
                 missing = int(values[f"missing_{index}"] or 0)
                 coded = int(values[f"coded_{index}"] or 0)
                 if coded / present >= 0.05 or _looks_like_code(name):
-                    # An identifier, not a quantity. Text is the right type here, and
-                    # advising a cast would strip the leading zero off a zip code.
+                    # An identifier, not a quantity: text is the right type, and a
+                    # cast would strip the leading zero.
                     continue
-                # Decorated and plainly-numeric values together: a real column of
-                # comma decimals still holds bare integers like "2", which left the
-                # decorated share under its threshold and the numeric share under
-                # its own, so neither branch fired and the column passed silently.
+                # Decorated and plainly-numeric together: a column of comma decimals
+                # still holds bare integers like "2", which leaves each share alone
+                # under its own threshold and neither branch firing.
                 convertible = (decorated + numeric) / present
                 if decorated / present >= 0.2 and convertible >= 0.9:
                     warnings.append(
@@ -566,13 +541,11 @@ class Dataset:
             try:
                 Dataset._read_csv(connection, table_name, path)
             except duckdb.InvalidInputException as error:
-                # An upload is normalised by decode_csv on the way in; a path was
-                # handed to DuckDB exactly as it sits on disk, so the same Windows
-                # export loaded through the browser and failed through the box
-                # beside it. DuckDB reads UTF-8 only — its latin-1 mode refuses the
-                # 0x80-0x9F range that carries Windows quotes and dashes, and
+                # An upload arrives decoded; a path is handed to DuckDB as it sits
+                # on disk. DuckDB reads UTF-8 only — its latin-1 mode refuses the
+                # 0x80-0x9F range Windows uses for quotes and dashes, and
                 # windows-1252 needs an extension — so the file is rewritten rather
-                # than refused. Retried only for a path: content arrived decoded.
+                # than refused. A path only: content is already UTF-8.
                 if temporary_path is not None or "utf-8 encoded" not in str(error):
                     raise
                 temporary_path = transcode_to_utf8(path)
@@ -620,8 +593,8 @@ class Dataset:
     def _digest(self, result: QueryResult) -> dict[str, object]:
         """A compact stand-in for a result too large to put in the prompt.
 
-        The statistics come from SUMMARIZE over the whole result rather than the
-        rows on screen, so anything the model quotes from here holds for every row.
+        SUMMARIZE runs over the whole result rather than the rows on screen, so
+        anything quoted from here holds for every row.
         """
         stats = self.connection.execute(f"SUMMARIZE ({result.sql})").fetchdf()
         columns: dict[str, dict[str, object]] = {}
@@ -662,9 +635,8 @@ class Dataset:
         def too_big(digest: dict[str, object]) -> bool:
             return len(json.dumps(digest, default=str)) > MAX_LLM_PAYLOAD_CHARS
 
-        # The digest has to fit the budget too. Sample rows go first, since the
-        # statistics are the part worth keeping; on a result wide enough that the
-        # statistics alone overflow, describe fewer columns rather than overrun.
+        # The digest has to fit the budget too. Sample rows go first, the statistics
+        # being the part worth keeping; only then are fewer columns described.
         described = columns
         digest = build(sample, described)
         while sample and too_big(digest):
@@ -692,9 +664,8 @@ class Dataset:
         with logs.timed("query", sql=clean_sql) as fields, self._deadline():
             frame = self.connection.execute(counted_sql).fetchdf()
             fields["returned"] = len(frame)
-        # Read the count positionally. A result of its own carrying this column name
-        # would otherwise shadow ours, and we would report the user's data as the
-        # row count and drop their column instead of the one we added.
+        # Positional, so a result carrying this column name of its own does not
+        # shadow ours and get dropped in place of the column we added.
         total_rows = int(frame.iloc[0, -1]) if len(frame) else 0
         return QueryResult(
             sql=clean_sql,
@@ -705,10 +676,8 @@ class Dataset:
     def convert_to_number(self, table: str, column: str) -> str:
         """Rewrite a text column as a number, stripping whatever kept it text.
 
-        The panel can say a column was read as text; without this the only remedy
-        is casting it by hand in every query. Which separator convention applies is
-        decided from the data rather than assumed, because getting it backwards
-        turns 1.234,56 into 1.23456.
+        Which separator convention applies is decided from the data rather than
+        assumed: getting it backwards turns 1.234,56 into 1.23456.
         """
         self._require_table(table)
         kinds = dict(self.schema(table))
@@ -720,8 +689,7 @@ class Dataset:
             )
         quoted, source = quote_identifier(table), quote_identifier(column)
         # Character classes rather than backslash escapes: a backslash does not
-        # survive the trip through a SQL string literal into DuckDB's regex, and
-        # getting this backwards turns 1.234,56 into 1.23456.
+        # survive a SQL string literal on its way into DuckDB's regex.
         european = self.connection.execute(
             f"SELECT count_if(regexp_matches({source}, ',[0-9]{{1,2}}$')) > "
             f"count_if(regexp_matches({source}, '[.][0-9]{{1,2}}$')) FROM {quoted}"
@@ -739,17 +707,14 @@ class Dataset:
             f"TRY_CAST({cleaned} AS DOUBLE) IS NULL), count({source}) FROM {quoted}"
         ).fetchone()
         if total and would_fail / total > 0.5:
-            # Converting a genuinely textual column empties it. Refuse rather than
-            # let one click turn a region name into a column of nulls.
+            # Converting a genuinely textual column empties it, so refuse instead.
             raise ValueError(
                 f"{column} is not a number in disguise: {would_fail:,} of {total:,} values "
                 "would be emptied by the conversion, so it was left as text."
             )
 
-        # In schema order, with the conversion substituted in place. Appending it
-        # instead moved the repaired column to the end, quietly reordering SELECT *,
-        # the sample rows the model is shown, and the parsed-columns panel — so a
-        # type repair changed the shape of every later answer.
+        # In schema order, with the conversion substituted in place: appending it
+        # would move the repaired column to the end and reorder every SELECT *.
         projection = ", ".join(
             f"TRY_CAST({cleaned} AS DOUBLE) AS {source}"
             if name == column
@@ -789,8 +754,8 @@ class Dataset:
     def columns_mentioned_in(self, text: str) -> list[str]:
         """Loaded column names that appear in free text.
 
-        Used to confirm a metric definition refers to real columns: a name absent
-        from the result is the typo, and the user sees it before the model does.
+        Confirms a metric definition refers to real columns: a name absent from the
+        result is the typo.
         """
         words = {word.lower() for word in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", text)}
         found = {
@@ -803,8 +768,7 @@ class Dataset:
         """Interrupt a query that outstays its welcome.
 
         DuckDB has no statement timeout, but a connection can be interrupted from
-        another thread, which is enough to stop a runaway cross join without
-        losing the session.
+        another thread, which stops a runaway without losing the session.
         """
         timer = threading.Timer(QUERY_TIMEOUT_SECONDS, self.connection.interrupt)
         timer.daemon = True

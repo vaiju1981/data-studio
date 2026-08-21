@@ -13,11 +13,7 @@ class UnsafeQuery(ValueError):
 
 
 # UNION, EXCEPT and INTERSECT parse to their own root node rather than a Select,
-# and all three only read. Requiring a Select root refused `SELECT id FROM a
-# EXCEPT SELECT id FROM b` — stacking period files and set-differencing two files
-# are the two most natural multi-CSV questions — while the same query wrapped in a
-# subquery passed, so the rule was arbitrary as well as wrong. INSERT ... SELECT
-# is an Insert and stays refused.
+# and all three only read. INSERT ... SELECT is an Insert and stays refused.
 READ_ONLY_ROOTS = (exp.Select, exp.SetOperation)
 
 
@@ -27,9 +23,8 @@ def validate_select(sql: str, allowed_tables: set[str]) -> str:
     except sqlglot.errors.ParseError as error:
         raise UnsafeQuery(f"SQL could not be parsed: {error}") from error
 
-    # Split from the shape test below because the two are different mistakes, and
-    # telling a model it wrote two statements when it wrote one set operation sent
-    # it looking for a semicolon it had never typed.
+    # Split from the shape test below: they are different mistakes, and a model
+    # told it wrote two statements looks for a semicolon it never typed.
     if len(statements) != 1:
         raise UnsafeQuery("Only one statement is allowed")
     if not isinstance(statements[0], READ_ONLY_ROOTS):
