@@ -415,3 +415,29 @@ def test_an_analysis_cannot_reach_a_result_the_turn_forgot() -> None:
         assert "Run a SQL query" in json.loads(tools.compare_groups("g", "v"))["error"]
     finally:
         dataset.close()
+
+
+MONTHLY = b"d,v\n" + b"".join(
+    f"2024-{month:02d}-01,{100 + month}\n".encode() for month in range(1, 13)
+)
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [("forecast", ("d", "v", 3)), ("analyze_trend", ("d", "v")), ("detect_anomalies", ("d", "v"))],
+)
+def test_a_series_tool_cannot_reach_a_result_the_turn_forgot(tool: str, arguments: tuple) -> None:
+    """The same boundary the frame analyses respect. Reading self.results[-1] here
+    forecast a hidden turn's result and reported it as an answer to this one."""
+    dataset = Dataset.load([CsvSource.from_upload("s.csv", MONTHLY)])
+    try:
+        tools = AnalysisTools(dataset)
+        tools.run_sql("SELECT d, v FROM s ORDER BY d")
+        tools.reset_chart(keep_history=False)
+        assert "Run a SQL query" in json.loads(getattr(tools, tool)(*arguments))["error"]
+
+        # ...and a result this turn can see is analysed as usual.
+        tools.run_sql("SELECT d, v FROM s ORDER BY d")
+        assert "error" not in json.loads(getattr(tools, tool)(*arguments))
+    finally:
+        dataset.close()

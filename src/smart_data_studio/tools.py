@@ -607,9 +607,14 @@ class AnalysisTools:
         self, kind: str, date_column: str, value_column: str, analyse, coverage_column: str = ""
     ) -> str:
         """Every series tool runs on the full result, not the page shown to the model."""
-        if not self.results:
+        # visible_from, for the reason _on_frame gives: in single-turn mode the last
+        # result may belong to a turn this one cannot see, and forecasting it
+        # produced a projection of somebody else's question narrated as an answer to
+        # this one. Charts and the frame analyses were fixed; these were missed.
+        reachable = self.results[self.visible_from :]
+        if not reachable:
             return json.dumps({"error": "Run a SQL query before analysing a series."})
-        source = self.results[-1]
+        source = reachable[-1]
         frame = source.frame
         if source.truncated:
             full = self.dataset.query(source.sql, row_limit=MAX_CHART_ROWS)
