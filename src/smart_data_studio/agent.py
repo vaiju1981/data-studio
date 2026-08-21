@@ -148,7 +148,13 @@ and N LAS VEGAS are the same city, and matching just the first misses a fifth of
 while returning a number that looks entirely right. Filter on all of them with IN or ILIKE.
 Use make_chart after run_sql when a visualization materially helps. The chart must use exact column
 names from the latest result. Mention truncation whenever the tool says truncated is true.
-Keep the final answer concise, explain the important result, and never hide limitations.
+Write the answer out, do not summarise it. Lead with the direct answer in a sentence or
+two, then explain it: what the figures are, what one row of the result stands for, and what
+they mean for the question asked. State what the data covers — the period, how much of it,
+and the grain — and state what it does not. Where the answer rested on a choice you made,
+name the choice and say what the alternative would have shown; where two readings of the
+question differ, give both. Never hide a limitation. Length is not the goal: every sentence
+must carry a figure from a query or a caveat that changes how the answer should be read.
 
 For questions about trends, forecasts or unusual periods, first run_sql to aggregate one row per
 whole period, then call forecast, analyze_trend or detect_anomalies on that result.
@@ -273,7 +279,20 @@ class DataAgent:
         self.relationships = relationships.Proposals()
         # Belongs to this agent, so a reloaded dataset starts with no verdicts.
         self.relationship_verdicts: dict[str, str] = {}
+        # Set for the duration of one ask(), like tools.question: a question takes
+        # minutes and runs a dozen queries, and a caller with nowhere to show that
+        # passes nothing.
+        self._progress: Callable[[str], None] | None = None
         self.messages: list[dict[str, Any]] = [{"role": "system", "content": self._system_prompt()}]
+
+    def _report(self, message: str) -> None:
+        """Say what is happening now. A failing sink must not lose the answer."""
+        if self._progress is None:
+            return
+        try:
+            self._progress(message)
+        except Exception:
+            logs.failure("progress.failed")
 
     def set_metrics(self, metrics: str) -> bool:
         """Record the user's metric definitions, returning whether they changed.
@@ -305,9 +324,26 @@ class DataAgent:
         self.messages[0] = {"role": "system", "content": self._system_prompt()}
         return self.understanding
 
-    def ask(self, question: str, multi_turn: bool = True, depth: str = "auto") -> Answer:
+    def ask(
+        self,
+        question: str,
+        multi_turn: bool = True,
+        depth: str = "auto",
+        progress: Callable[[str], None] | None = None,
+    ) -> Answer:
         logs.bind(question=logs.new_session())
         logs.event("question.received", multi_turn=multi_turn, depth=depth)
+        self._progress = progress
+        try:
+            return self._ask(question, multi_turn, depth)
+        finally:
+            # A sink outlives its call otherwise, and the next question would write
+            # into a status panel that is no longer on screen.
+            self._progress = None
+
+    def _ask(self, question: str, multi_turn: bool, depth: str) -> Answer:
+        if depth in {"auto", "always"}:
+            self._report("Deciding how to answer this")
         plan = self._plan(question) if depth in {"auto", "always"} else []
         if depth == "always" and not plan:
             plan = [question]
@@ -329,6 +365,7 @@ class DataAgent:
         self.tools.question = question
         self.tools.reset_chart(keep_history=multi_turn)
         self.messages.append({"role": "user", "content": question})
+        self._report("Answering in one pass")
         text = self._run_loop(
             self.messages,
             MAX_TOOL_ROUNDS,
@@ -417,8 +454,10 @@ class DataAgent:
         first_assumption = len(self.tools.unresolved)
         self.tools.reset_chart(keep_history=multi_turn)
 
+        self._report(f"Investigating in {len(plan)} steps")
         findings = []
-        for step in plan:
+        for number, step in enumerate(plan, start=1):
+            self._report(f"Step {number} of {len(plan)}: {step}")
             with logs.timed("plan.step"):
                 conversation = [
                     {"role": "system", "content": self._system_prompt()},
@@ -439,6 +478,7 @@ class DataAgent:
         if all("could not be answered" in finding for finding in findings):
             raise RuntimeError("no step of the investigation produced anything")
 
+        self._report(f"Writing the answer from {len(findings)} findings")
         transcript = "\n\n".join(findings)
         closing = [
             {"role": "system", "content": f"{self._system_prompt()}\n\n{SYNTHESIS_PROMPT}"},
@@ -627,9 +667,14 @@ class DataAgent:
         function = available.get(name)
         if function is None:
             return json.dumps({"error": f"Unknown tool: {name}"})
+        arguments = dict(call.function.arguments)
+        # The SQL is the interesting part of a query and the whole point of watching:
+        # the other tools are named after what they do, so their name is enough.
+        sql = arguments.get("sql")
+        self._report(" ".join(str(sql).split()) if sql else f"Running {name}")
         try:
             with logs.timed("tool.call", tool=name):
-                return function(**dict(call.function.arguments))
+                return function(**arguments)
         except Exception as error:
             # A malformed tool call is the model's mistake to correct on the next
             # round, not a reason to end the turn.

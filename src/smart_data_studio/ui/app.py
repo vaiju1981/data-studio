@@ -283,21 +283,40 @@ def _conversation() -> None:
                 render.answer(item["answer"], str(index), st.session_state.dataset)
 
 
+def _progress(status, message: str) -> None:
+    """Show what the agent is doing while it does it.
+
+    The guard admits a single SELECT and nothing else, so a message starting with
+    SELECT or WITH is SQL rather than a phase — worth a code block, and too long to
+    put in the collapsed label.
+    """
+    if message.upper().startswith(("SELECT", "WITH")):
+        status.code(message, language="sql", wrap_lines=True)
+    else:
+        status.write(message)
+        # expanded is passed every time on purpose: update() clears the field when
+        # it is omitted, which collapses the panel mid-question.
+        status.update(label=message, expanded=True)
+
+
 def _answer(question: str) -> None:
     st.session_state.chat.append({"role": "user", "content": question})
     with st.chat_message("user"):
         st.markdown(question)
     with st.chat_message("assistant"):
-        try:
-            with st.spinner("Working through it…"):
+        with st.status("Working through it…", expanded=True) as status:
+            try:
                 answer = st.session_state.agent.ask(
                     question,
                     multi_turn=st.session_state.mode == MULTI_TURN,
                     depth=DEPTHS[st.session_state.depth],
+                    progress=lambda message: _progress(status, message),
                 )
-        except Exception as error:
-            logs.failure("answer.failed")
-            answer = Answer(text=explain_failure(error), results=[])
+                status.update(label="Done", state="complete", expanded=False)
+            except Exception as error:
+                logs.failure("answer.failed")
+                answer = Answer(text=explain_failure(error), results=[])
+                status.update(label="Could not finish", state="error", expanded=False)
         # Every user turn gets an assistant turn, so a failure cannot leave the
         # rendered history and the agent's own history out of step.
         render.answer(answer, str(len(st.session_state.chat)), st.session_state.dataset)

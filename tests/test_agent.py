@@ -581,3 +581,69 @@ def test_an_assumption_is_reported_with_the_answer_that_relied_on_it() -> None:
         assert second.assumptions == [], "a later answer inherited an earlier caveat"
     finally:
         dataset.close()
+
+
+def test_progress_reports_each_step_and_the_sql_as_it_runs() -> None:
+    """A question takes minutes and runs several queries. A caller that shows only a
+    spinner cannot tell a slow answer from a stuck one, so the loop says where it is."""
+    client = FakeClient(
+        [
+            tool_call(
+                "run_sql", sql="SELECT region,\n  SUM(amount) AS total\nFROM sales GROUP BY 1"
+            ),
+            Message(role="assistant", content="North totals 25."),
+        ],
+        plan=["Which region sells most?", "Does that hold per order?"],
+    )
+    agent, dataset = make_agent(client)
+    seen: list[str] = []
+    try:
+        agent.ask("Where should we focus?", progress=seen.append)
+    finally:
+        dataset.close()
+
+    assert seen[0] == "Deciding how to answer this"
+    assert "Investigating in 2 steps" in seen
+    assert "Step 1 of 2: Which region sells most?" in seen
+    assert "Step 2 of 2: Does that hold per order?" in seen
+    assert any(line.startswith("Writing the answer from") for line in seen)
+    # Newlines collapsed: the caller puts this in a label as well as a code block.
+    assert "SELECT region, SUM(amount) AS total FROM sales GROUP BY 1" in seen
+
+
+def test_a_single_pass_question_reports_without_a_plan() -> None:
+    client = FakeClient([Message(role="assistant", content="Nothing to query.")])
+    agent, dataset = make_agent(client)
+    seen: list[str] = []
+    try:
+        agent.ask("Hello", progress=seen.append)
+    finally:
+        dataset.close()
+    assert "Answering in one pass" in seen
+    assert not any("Step" in line for line in seen)
+
+
+def test_a_progress_sink_does_not_outlive_its_question() -> None:
+    """It writes into a status panel that is gone by the next question."""
+    client = FakeClient([Message(role="assistant", content="Done.")])
+    agent, dataset = make_agent(client)
+    try:
+        agent.ask("First", progress=lambda message: None)
+        assert agent._progress is None
+        agent.ask("Second")  # would raise if the dead sink were still called
+    finally:
+        dataset.close()
+
+
+def test_a_failing_progress_sink_does_not_lose_the_answer() -> None:
+    """Reporting is decoration. Losing the analysis to it would be absurd."""
+    client = FakeClient([Message(role="assistant", content="North totals 25.")])
+    agent, dataset = make_agent(client)
+
+    def broken(message: str) -> None:
+        raise RuntimeError("the panel is gone")
+
+    try:
+        assert agent.ask("How much?", progress=broken).text == "North totals 25."
+    finally:
+        dataset.close()
