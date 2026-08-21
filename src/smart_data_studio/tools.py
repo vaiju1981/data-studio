@@ -284,9 +284,9 @@ class AnalysisTools:
 
         Call this whenever a question names a place, segment or category and the
         answer needs a filter on it. Seeing one spelling in the profile is not
-        evidence it is the only one: "NORTH LAS VEGAS" and "N LAS VEGAS" are the
-        same city, and matching only the first misses a fifth of the visits while
-        returning a number that looks entirely right.
+        evidence it is the only one: a value written "NORTH DISTRICT" in some rows
+        and "N DISTRICT" in others is one value, and matching only the first
+        silently undercounts while returning a number that looks entirely right.
 
         Args:
           table: The table to look in, exactly as it appears in the schema.

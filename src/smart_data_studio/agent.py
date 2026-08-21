@@ -139,9 +139,10 @@ the figure from SQL as usual. Do not refuse, and do not invent the number: name 
 you used, in the answer, so it can be checked. Every number still comes from a query; it is
 the mapping that came from you, and only saying so makes it correctable.
 Before filtering a text column on a name, call find_values to see every spelling that name
-has. Seeing one spelling in the profile is not evidence it is the only one: NORTH LAS VEGAS
-and N LAS VEGAS are the same city, and matching just the first misses a fifth of the visits
-while returning a number that looks entirely right. Filter on all of them with IN or ILIKE.
+has. Seeing one spelling in the profile is not evidence it is the only one: a value written
+NORTH DISTRICT in some rows and N DISTRICT in others is one value, and matching just the first
+silently undercounts while returning a number that looks entirely right. Filter on all of them
+with IN or ILIKE.
 Use make_chart after run_sql when a visualization materially helps. The chart must use exact column
 names from the latest result. Mention truncation whenever the tool says truncated is true.
 Write the answer out, do not summarise it. Lead with the direct answer in a sentence or
