@@ -320,3 +320,25 @@ def test_a_column_that_cannot_be_summarised_costs_only_its_own_statistics() -> N
         assert dataset.query("SELECT count(*) AS n FROM t").frame.iloc[0, 0] == 3
     finally:
         dataset.close()
+
+
+def test_a_row_id_whose_sketch_undercounts_is_not_taken_for_the_entity() -> None:
+    """approx_unique comes from a sketch that drifts. A row id reading 172 of 180
+    is a candidate key ahead of the real one, and once it is chosen the table looks
+    like it is already at entity grain, so nothing about grain is reported at all —
+    which is any table carrying both a row id and an entity id.
+    """
+    rows = ["customer_id,ticket_id,plan"]
+    for customer in range(60):
+        for visit in range(3):
+            rows.append(f"c{customer},t{customer}_{visit},{'pro' if visit else 'basic'}")
+    csv = ("\n".join(rows) + "\n").encode()
+
+    dataset = Dataset.load([CsvSource.from_upload("tickets.csv", csv)])
+    try:
+        grain = next(
+            (item for item in profile_table(dataset, "tickets").findings if "repeats" in item), ""
+        )
+        assert grain.startswith("customer_id repeats: 60 values across 180 rows"), grain
+    finally:
+        dataset.close()

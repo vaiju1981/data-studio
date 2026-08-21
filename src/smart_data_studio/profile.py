@@ -150,7 +150,7 @@ def profile_table(dataset: Dataset, table_name: str) -> TableProfile:
     many = len(dataset.tables) > 1
     shared = _shared_columns(dataset, table_name, row_count) if many else []
     shared_measures = _shared_measures(dataset, table_name) if many else []
-    grain, entity_key = _entity_grain(dataset, table_name, stats, row_count)
+    grain, entity_key = _entity_grain(dataset, table_name, stats, row_count, exact_distinct)
     if grain:
         findings.insert(0, grain)
     if unsummarised:
@@ -178,20 +178,33 @@ def profile_table(dataset: Dataset, table_name: str) -> TableProfile:
 
 
 def _entity_grain(
-    dataset: Dataset, table_name: str, stats: pd.DataFrame, row_count: int
+    dataset: Dataset,
+    table_name: str,
+    stats: pd.DataFrame,
+    row_count: int,
+    exact_distinct: dict[str, int],
 ) -> tuple[str | None, str | None]:
     """Report which columns stay constant within the table's entity key.
 
     Grouping by an entity key together with a column that varies inside it splits
     one entity across several rows, each carrying a partial total. A column-by-column
     profile cannot reveal that, so it is worth one extra pass.
+
+    The exact counts decide which column is the key. approx_unique comes from a
+    sketch that drifts, and a row id reading a few short of the row count is picked
+    as the entity ahead of the real one — after which the table looks like it is
+    already at entity grain and nothing is reported at all.
     """
     records = stats.to_dict(orient="records")
+
+    def distinct(row: dict) -> float:
+        exact = exact_distinct.get(str(row["column_name"]))
+        return float(exact) if exact is not None else _number(row.get("approx_unique"))
+
     candidates = [
-        (_number(row.get("approx_unique")), str(row["column_name"]))
+        (distinct(row), str(row["column_name"]))
         for row in records
-        if _looks_like_key(str(row["column_name"]))
-        and 1 < _number(row.get("approx_unique")) < row_count
+        if _looks_like_key(str(row["column_name"])) and 1 < distinct(row) < row_count
     ]
     if not candidates:
         return None, None
