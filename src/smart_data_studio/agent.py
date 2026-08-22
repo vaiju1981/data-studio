@@ -652,7 +652,7 @@ class DataAgent:
                     {
                         "role": "tool",
                         "tool_name": call.function.name,
-                        "content": self._invoke(call),
+                        "content": self._invoke(call, tools),
                     }
                 )
 
@@ -668,9 +668,16 @@ class DataAgent:
         messages.append({"role": "assistant", "content": text})
         return text
 
-    def _invoke(self, call: Any) -> str:
+    def _invoke(self, call: Any, offered: list[Callable[..., str]]) -> str:
+        """Run one tool call, from the tools this loop actually offered.
+
+        Resolved against every chat tool instead, exploration — which offers only
+        run_sql — would have run a forecast or a cohort grid for any model that
+        returned a call it had not been given. A conforming model does not, and
+        what a tool can reach should not rest on that.
+        """
         name = call.function.name
-        available = {function.__name__: function for function in self._chat_tools()}
+        available = {function.__name__: function for function in offered}
         function = available.get(name)
         if function is None:
             return json.dumps({"error": f"Unknown tool: {name}"})
