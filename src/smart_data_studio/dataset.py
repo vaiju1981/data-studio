@@ -115,6 +115,23 @@ def quote_identifier(value: str) -> str:
     return f'"{value.replace(chr(34), chr(34) * 2)}"'
 
 
+class _CsvByteCounter:
+    """Count UTF-8 output from pandas without retaining the rendered CSV."""
+
+    def __init__(self) -> None:
+        self.size = 0
+
+    def write(self, text: str) -> int:
+        self.size += len(text.encode("utf-8"))
+        return len(text)
+
+
+def csv_size(frame: pd.DataFrame, header: bool = True) -> int:
+    counter = _CsvByteCounter()
+    frame.to_csv(counter, index=False, header=header)
+    return counter.size
+
+
 @dataclass(frozen=True)
 class CsvSource:
     """One CSV supplied either as an upload or as a local path."""
@@ -783,27 +800,32 @@ class Dataset:
         return QueryResult(sql=clean_sql, frame=frame.iloc[:, :-1], total_rows=total_rows)
 
     def export_size(self, sql: str, row_limit: int = MAX_EXPORT_ROWS) -> int:
-        """Bytes the CSV of this result will weigh, measured over every row of it.
+        """Exact CSV bytes for the capped result, counted without retaining them.
 
         Priced from the page on screen this was a guess, and a bad one: the first
         five thousand rows of a result are not its widest. A note column holding
         "x" at the top and four hundred characters lower down under-priced a
         50,000-row export by thirty-nine times, which is no bound at all.
 
-        COLUMNS(*) replicates the aggregate per column rather than packing the row,
-        so the sums come back one per column and are added here. strlen counts
-        bytes where length counts characters, and an accented CSV is the larger of
-        the two. Quoting is not modelled — a value carrying a comma costs two more
-        bytes — so this reads a little low, which is why the finished export is
-        weighed again before it is kept.
+        The LIMIT belongs inside the query: the UI exports at most that many rows,
+        and counting the rest falsely refuses a result only because it has a long
+        tail. DuckDB yields bounded chunks and pandas writes them into a counter,
+        so quoting, nested values, blobs and Unicode are measured exactly without
+        first allocating the full DataFrame or CSV.
         """
-        row = self.run(
-            f"SELECT count(*), sum(strlen(CAST(COLUMNS(*) AS VARCHAR))) "
-            f"FROM ({sql}) LIMIT {int(row_limit)}"
-        ).fetchone()
-        rows, columns = int(row[0]), [int(value or 0) for value in row[1:]]
-        # One separator or newline per column, per row.
-        return sum(columns) + rows * len(columns)
+        capped = f"SELECT * FROM ({sql}) AS export_rows LIMIT {int(row_limit)}"
+        cursor = self.run(capped)
+        total = 0
+        first = True
+        while True:
+            frame = cursor.fetch_df_chunk()
+            if frame.empty:
+                if first:
+                    total += csv_size(frame)
+                break
+            total += csv_size(frame, header=first)
+            first = False
+        return total
 
     def _withheld_columns(self) -> set[str]:
         """Names dropped as sensitive, so asking for one gets a reason.
