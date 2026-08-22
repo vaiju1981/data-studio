@@ -49,7 +49,9 @@ RUBRIC: dict[str, str] = {
         "division, not a cause; if it gives two totals, their ratio is not a cause. "
         "An analyst deriving one number from two is doing the job, and the "
         "derivation does not have to appear in the evidence for the claim to rest "
-        "on it. Only fault a mechanism that no arithmetic over the evidence reaches."
+        "on it. Only fault a mechanism that no arithmetic over the evidence reaches. "
+        "The word 'because' does not decide it: what decides it is whether the thing "
+        "named is in the evidence."
     ),
     "unstated_base": (
         "A share, rate, percentage or 'X of Y' whose denominator is never stated or "

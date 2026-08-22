@@ -80,6 +80,36 @@ Returned 2 rows. All 2 are reproduced here:
       top  6628194   206698
      rest  1228904   255527"""
 
+# A decomposition wearing the word "because". Every figure it names is in the
+# evidence and the two tiers account for the whole movement, so this says where
+# the change sits rather than what caused it. The judge faulted it three times out
+# of three until the rubric said the word does not decide the fault — what follows
+# it does, and whether that is in the evidence.
+DECOMPOSED = (
+    "Revenue fell from 20,000,000 in January to 8,468,037 in April because the top tier "
+    "fell from 16,000,000 to 4,468,037; mid was unchanged at 4,000,000."
+)
+
+DECOMPOSED_EVIDENCE = """Query 1:
+SELECT month, sum(revenue) AS revenue FROM sales GROUP BY 1 ORDER BY 1
+Returned 3 rows. All 3 are reproduced here:
+   month   revenue
+ 2026-01  20000000
+ 2026-02  16353518
+ 2026-04   8468037
+
+Query 2:
+SELECT month, tier, sum(revenue) AS revenue FROM sales GROUP BY 1, 2 ORDER BY 1, 2
+Returned 6 rows. All 6 are reproduced here:
+   month tier   revenue
+ 2026-01  mid   4000000
+ 2026-01  top  16000000
+ 2026-02  mid   4000000
+ 2026-02  top  12353518
+ 2026-04  mid   4000000
+ 2026-04  top   4468037"""
+
+
 PLANTED: list[tuple[str, str]] = [
     (
         "invented_cause",
@@ -122,19 +152,32 @@ def test_the_judge_catches_a_planted_fault(fault: str, answer: str) -> None:
     )
 
 
+# The question travels with the fixture: a sound answer graded against a question
+# it does not answer is a different test, and a confusing one to read when it fails.
+SOUND: list[tuple[str, str, str, str]] = [
+    ("plain", "How is the January cohort doing month over month?", CLEAN, EVIDENCE),
+    ("derived", "How do the segments compare?", DERIVED, DERIVED_EVIDENCE),
+    ("decomposed", "Why did revenue fall?", DECOMPOSED, DECOMPOSED_EVIDENCE),
+]
+
+
 @pytest.mark.parametrize(
-    ("label", "answer", "evidence"),
-    [("plain", CLEAN, EVIDENCE), ("derived", DERIVED, DERIVED_EVIDENCE)],
-    ids=["plain", "derived"],
+    ("label", "question", "answer", "evidence"), SOUND, ids=[item[0] for item in SOUND]
 )
-def test_the_judge_leaves_a_sound_answer_alone(label: str, answer: str, evidence: str) -> None:
+def test_the_judge_leaves_a_sound_answer_alone(
+    label: str, question: str, answer: str, evidence: str
+) -> None:
     """The other half of calibration, and the half that keeps it honest: a judge
     that fails everything catches every planted fault and is still useless.
 
     The derived case is the one that bit. A claim resting on arithmetic over two
     figures in the evidence is supported, and a judge demanding the arithmetic be
-    spelled out faults the analyst for doing their job."""
-    graded = grade("How do the segments compare?", answer, evidence)
+    spelled out faults the analyst for doing their job.
+
+    The decomposed case is the same mistake wearing a different word: "because the
+    top tier collapsed from 16,000,000 to 4,468,037" names a group the evidence
+    holds and quotes its figures. Saying where a change sits is the job too."""
+    graded = grade(question, answer, evidence)
     assert not failures(graded, answer), (
         f"{label}: a sound answer was faulted: {describe(graded, answer)}"
     )
