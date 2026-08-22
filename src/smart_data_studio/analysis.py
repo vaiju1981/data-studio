@@ -243,7 +243,10 @@ def rank_drivers(frame: pd.DataFrame, measure: str, split: str) -> dict[str, obj
             "with an even split across levels — a many-levelled dimension earns a big "
             "top move for free, and lift near 1 shows that is all it is. Positive "
             "changes are gains, negative are losses; within a dimension they sum to the "
-            "total change."
+            "total change. Each dimension is that same change sliced another way, not a "
+            "separate part of it: a move here and a move there are the same movement "
+            "counted twice, so never add across dimensions, and a large move locates "
+            "the change rather than explaining it."
         ),
     }
 

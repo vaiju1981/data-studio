@@ -374,3 +374,35 @@ def test_a_genuinely_small_group_still_says_so() -> None:
     )
     with pytest.raises(analysis.NotAnalysable, match="at least 10 are needed"):
         analysis.compare_groups(frame, "tier", "spend")
+
+
+def test_every_dimension_accounts_for_the_whole_change_not_a_part_of_it() -> None:
+    """Six dimensions come back side by side under one key called "drivers".
+
+    Each is the same total sliced a different way, so their moves are the same
+    money seen from two angles — added together they double count, and the
+    largest of them locates the change rather than explaining it. Nothing in the
+    numbers says so, so the reading has to.
+    """
+    frame = pd.DataFrame(
+        {
+            "period": ["before"] * 4 + ["after"] * 4,
+            "region": ["north", "north", "south", "south"] * 2,
+            "tier": ["gold", "silver"] * 4,
+            "revenue": [100.0, 100.0, 100.0, 100.0, 40.0, 100.0, 100.0, 100.0],
+        }
+    )
+    found = analysis.rank_drivers(frame, "revenue", "period")
+
+    assert found["total_change"] == -60.0
+    # Both dimensions carry the whole change, which is the point: they are two
+    # views of one movement, not two contributions to it.
+    for dimension in found["drivers"]:
+        moved = sum(item["change"] for item in dimension["movers"])
+        assert moved == found["total_change"], (
+            f"{dimension['dimension']} sums to {moved}, not the total change"
+        )
+
+    reading = found["reading"]
+    assert "never add across dimensions" in reading
+    assert "locates the change rather than explaining it" in reading
