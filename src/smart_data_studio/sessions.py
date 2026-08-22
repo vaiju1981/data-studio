@@ -71,11 +71,21 @@ def register(session_id: str, dataset: Dataset) -> None:
         logs.event("session.registered", active=len(_entries))
 
 
-def touch(session_id: str) -> None:
+def touch(session_id: str) -> bool:
+    """Mark a session live, and report whether it still is.
+
+    The answer matters to a caller holding the Dataset. Eviction closes the
+    connection from whichever thread noticed, and a tab that keeps rendering the
+    workspace it had discovers this on its next question, as "Connection already
+    closed" — an error about a database, where what happened was that the session
+    went idle and was released.
+    """
     with _lock:
         entry = _entries.get(session_id)
-        if entry is not None:
-            entry.touched = time.monotonic()
+        if entry is None:
+            return False
+        entry.touched = time.monotonic()
+        return True
 
 
 def release(session_id: str) -> None:

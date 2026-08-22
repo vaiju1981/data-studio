@@ -29,9 +29,12 @@ def main() -> None:
         st.session_state.session_id = logs.new_session()
         logs.event("session.started")
     logs.bind(session=st.session_state.session_id)
-    sessions.touch(st.session_state.session_id)
     render.styles()
     _initialize_state()
+    # After the state exists, because the first run of a tab has no workspace and
+    # is not an eviction. A tab that had one and no longer does is.
+    if not sessions.touch(st.session_state.session_id) and st.session_state.dataset is not None:
+        _expire()
 
     with st.sidebar:
         _sidebar()
@@ -39,6 +42,11 @@ def main() -> None:
     if st.session_state.dataset is None:
         st.title("Smart Data Studio")
         st.caption("Load CSVs, understand their shape, and ask questions in plain English.")
+        if st.session_state.expired:
+            st.warning(
+                "This workspace was released after sitting idle, so the data is gone from "
+                "memory. Load the files again to carry on — nothing was sent anywhere."
+            )
         render.empty_state()
         return
 
@@ -66,6 +74,7 @@ def _initialize_state() -> None:
         "mode": MULTI_TURN,
         "depth": next(iter(DEPTHS)),
         "metrics": "",
+        "expired": False,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -186,12 +195,9 @@ def _metrics_controls() -> None:
         st.warning("No loaded column names found in these definitions — check the spelling.")
 
 
-def _forget() -> None:
-    """Throw the workspace away on request, and prove it in the log."""
-    sessions.release(st.session_state.session_id)
-    recent.forget()
+def _clear_workspace() -> None:
+    """Drop everything that describes the loaded data, keeping the tab's settings."""
     st.session_state.relationship_status = {}
-    st.session_state.chosen_paths = []
     for key in ("dataset", "agent"):
         st.session_state[key] = None
     st.session_state.profiles = []
@@ -200,6 +206,26 @@ def _forget() -> None:
     st.session_state.insight_error = ""
     for stale in [key for key in st.session_state if str(key).startswith("export-")]:
         del st.session_state[stale]
+
+
+def _expire() -> None:
+    """The workspace was released for being idle while this tab still showed it.
+
+    Cleared here rather than left to fail later: the connection is already closed,
+    so every panel below is describing rows that no longer exist.
+    """
+    _clear_workspace()
+    st.session_state.expired = True
+    logs.event("session.expired")
+
+
+def _forget() -> None:
+    """Throw the workspace away on request, and prove it in the log."""
+    sessions.release(st.session_state.session_id)
+    recent.forget()
+    _clear_workspace()
+    st.session_state.chosen_paths = []
+    st.session_state.expired = False
     logs.event("data.deleted", by="user")
     st.rerun()
 
@@ -244,6 +270,7 @@ def _load(uploads: list[object], paths: str, chosen: list[str] | None = None) ->
         for stale in [key for key in st.session_state if str(key).startswith("export-")]:
             del st.session_state[stale]
         st.session_state.insight_error = ""
+        st.session_state.expired = False
         # Verdicts describe the workspace that is going away, not the new one.
         st.session_state.relationship_status = {}
         try:

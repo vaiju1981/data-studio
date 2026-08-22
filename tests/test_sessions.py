@@ -93,3 +93,16 @@ def test_the_spill_directory_is_always_one_we_own(monkeypatch, tmp_path) -> None
     monkeypatch.setattr(config, "DUCKDB_TEMP_DIR", str(tmp_path))
     assert Path(config.temp_directory()).parent == tmp_path
     assert Path(config.temp_directory()).name == "smart-data-studio"
+
+
+def test_an_evicted_session_says_so_rather_than_going_quiet() -> None:
+    """touch() was silent about a session that no longer existed, so a tab went on
+    rendering a workspace whose connection was already closed and only found out
+    at the next question, as "Connection already closed"."""
+    dataset = make_dataset()
+    sessions.register("one", dataset)
+    assert sessions.touch("one") is True
+
+    sessions.release("one")
+    assert sessions.touch("one") is False
+    assert sessions.touch("never-registered") is False

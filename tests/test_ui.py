@@ -118,3 +118,27 @@ def test_money_in_an_answer_is_not_rendered_as_mathematics() -> None:
     assert as_text(as_text(written)) == as_text(written)
     # Nothing else is touched.
     assert as_text("plain **bold** text") == "plain **bold** text"
+
+
+def test_an_evicted_workspace_clears_the_tab_instead_of_failing_later(monkeypatch, tmp_path):
+    """Eviction closes the connection from whichever thread noticed. The tab went
+    on rendering panels over a closed workspace and only found out at the next
+    question, as "Connection already closed" — a database error where what happened
+    was that the session had been released for sitting idle.
+
+    A tab holding a dataset the registry has never heard of is exactly what an
+    evicted one looks like from here, so that is what this sets up."""
+    from smart_data_studio.dataset import CsvSource, Dataset
+
+    app = run_app(monkeypatch, tmp_path)
+    dataset = Dataset.load([CsvSource.from_upload("s.csv", b"a\n1\n")])
+    try:
+        app.session_state.dataset = dataset
+        app.run(timeout=30)
+
+        assert not app.exception
+        assert app.session_state.dataset is None
+        assert app.session_state.expired
+        assert any("released after sitting idle" in item.value for item in app.warning)
+    finally:
+        dataset.close()
