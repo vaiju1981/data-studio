@@ -14,10 +14,10 @@ import xml.etree.ElementTree as ElementTree
 from collections import Counter
 from pathlib import Path
 
-# Both banks, not one. The multi-table bank was added opt-in like the first and
-# never added here, so this gate has been failing CI on every commit since —
-# reporting the second bank's own skips as the fast suite going quiet.
-ALLOWED = ("test_question_bank", "test_multi_table_bank")
+# Every opt-in bank, not one. The multi-table bank was added like the first and
+# never added here, so this gate failed CI on every commit until it was; the
+# answer-quality bank is opt-in for the same reason and belongs here too.
+ALLOWED = ("test_question_bank", "test_multi_table_bank", "test_answer_quality")
 
 
 def main(report: str) -> int:
