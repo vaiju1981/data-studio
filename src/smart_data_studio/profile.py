@@ -20,6 +20,7 @@ from smart_data_studio.config import (
 )
 from smart_data_studio.dataset import (
     Dataset,
+    OutOfQueries,
     is_sensitive,
     looks_like_identifier,
     quote_identifier,
@@ -126,16 +127,40 @@ def _summarize(dataset: Dataset, table_name: str) -> tuple[pd.DataFrame, list[st
     except Exception:
         logs.failure("summarize.per_column")
 
-    frames, refused = [], []
-    for name, _ in dataset.schema(table_name):
-        try:
-            frames.append(
-                dataset.run(f"SUMMARIZE (SELECT {quote_identifier(name)} FROM {quoted})").fetchdf()
-            )
-        except Exception:
-            refused.append(name)
+    names = [name for name, _ in dataset.schema(table_name)]
+    frames, refused = _summarize_in_halves(dataset, quoted, names)
     stats = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     return stats, refused
+
+
+def _summarize_in_halves(
+    dataset: Dataset, quoted: str, names: list[str]
+) -> tuple[list[pd.DataFrame], list[str]]:
+    """SUMMARIZE these columns together, halving to find whichever defeats it.
+
+    Column by column keeps the promise — one bad column costs its own statistics
+    and nothing else — at the price of a full scan each. On a 400-column file that
+    is 400 scans, and once every scan is charged to the workspace, one bad column
+    in a wide file spent most of the session's budget before the first question
+    was asked. Halving isolates the same column in about a dozen queries.
+    """
+    projection = ", ".join(quote_identifier(name) for name in names)
+    try:
+        frame = dataset.run(f"SUMMARIZE (SELECT {projection} FROM {quoted})").fetchdf()
+    except OutOfQueries:
+        # Nothing further will succeed either, so stop and say what went undescribed
+        # rather than retrying every remaining column against an empty budget.
+        return [], list(names)
+    except Exception:
+        if len(names) == 1:
+            return [], list(names)
+    else:
+        return [frame], []
+
+    middle = len(names) // 2
+    left, left_refused = _summarize_in_halves(dataset, quoted, names[:middle])
+    right, right_refused = _summarize_in_halves(dataset, quoted, names[middle:])
+    return left + right, left_refused + right_refused
 
 
 def profile_table(dataset: Dataset, table_name: str) -> TableProfile:

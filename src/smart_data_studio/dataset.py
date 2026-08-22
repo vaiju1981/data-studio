@@ -95,6 +95,16 @@ def looks_like_identifier(name: str) -> bool:
     return any(lowered.endswith(word) for word in IDENTIFIER_WORDS if len(word) >= 4)
 
 
+class OutOfQueries(RuntimeError):
+    """Raised when a workspace has spent its query budget.
+
+    Its own type because a caller that retries per column — the profile falling
+    back when SUMMARIZE refuses a table — would otherwise catch this alongside
+    the failure it is handling and try the next column, and the next, turning one
+    exhausted budget into a table with no statistics and no explanation.
+    """
+
+
 def is_sensitive(column: str) -> bool:
     lowered = column.lower()
     return any(marker in lowered for marker in SENSITIVE_COLUMNS)
@@ -727,7 +737,7 @@ class Dataset:
         enough that charging them would spend the session's budget on bookkeeping.
         """
         if self.queries_run >= MAX_SESSION_QUERIES:
-            raise RuntimeError(
+            raise OutOfQueries(
                 f"This session has run its {MAX_SESSION_QUERIES:,} queries. "
                 "Reload the data to start a fresh workspace."
             )

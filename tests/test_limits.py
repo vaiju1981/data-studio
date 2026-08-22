@@ -235,3 +235,55 @@ def test_a_withheld_column_is_absent_from_a_digest_too(monkeypatch) -> None:
         assert set(digest["columns"]) == {"name", "amount"}
     finally:
         dataset.close()
+
+
+def test_a_wide_file_with_one_bad_column_does_not_spend_the_session() -> None:
+    """SUMMARIZE refuses a table over one column holding an infinity, and the
+    fallback used to describe every column on its own — a full scan each. On a
+    512-column file that is 512 scans, which is more than the whole session budget,
+    so profiling exhausted it and every remaining column came back undescribed
+    with nothing said about why."""
+    from smart_data_studio.profile import profile_dataset
+
+    width = 400
+    header = ",".join(f"c{index}" for index in range(width))
+    rows = [
+        ",".join(
+            ("1e400" if (column == 7 and line % 2 == 0) else str(column)) for column in range(width)
+        )
+        for line in range(60)
+    ]
+    body = (header + "\n" + "\n".join(rows) + "\n").encode()
+
+    dataset = Dataset.load([CsvSource.from_upload("wide.csv", body)])
+    try:
+        before = dataset.queries_run
+        profiles = profile_dataset(dataset)
+        spent = dataset.queries_run - before
+        assert spent < 50, f"profiling one table spent {spent} of the session's queries"
+        # And the promise it was paying for is kept: one bad column, and only it,
+        # loses its statistics.
+        assert len(profiles[0].stats) == width - 1
+        assert any("c7" in finding for finding in profiles[0].findings)
+    finally:
+        dataset.close()
+
+
+def test_running_out_of_queries_is_not_swallowed_column_by_column() -> None:
+    """The fallback catches per column so one failure costs one column. An
+    exhausted budget is not that kind of failure — retried against every remaining
+    column it produces a table with no statistics and no reason given — so it has
+    its own type and stops the sweep."""
+    from smart_data_studio.dataset import OutOfQueries
+    from smart_data_studio.profile import _summarize_in_halves
+
+    dataset = Dataset.load([CsvSource.from_upload("s.csv", b"a,b\n1,2\n")])
+    try:
+        dataset.queries_run = module_budget = 10**9
+        assert isinstance(OutOfQueries("x"), RuntimeError)
+        frames, refused = _summarize_in_halves(dataset, '"s"', ["a", "b"])
+        assert not frames and refused == ["a", "b"]
+        # One attempt, not one per column.
+        assert dataset.queries_run == module_budget
+    finally:
+        dataset.close()
