@@ -522,3 +522,77 @@ def test_the_coverage_warning_stays_quiet_when_it_has_nothing_to_say(label: str,
         assert "coverage_warning" not in json.loads(tools.run_sql(sql)), label
     finally:
         dataset.close()
+
+
+# --- a cohort assembled by hand, which gets the base wrong -----------------------
+
+COHORT_ROWS = b"customer_id,signed_up,ordered_on,region\n" + b"".join(
+    f"c{c},2026-{1 if c < 30 else 2:02d}-05,2026-{1 + k:02d}-15,{'N' if c % 3 else 'S'}\n".encode()
+    for c in range(60)
+    for k in range(3)
+)
+
+
+def cohort_tools() -> tuple[AnalysisTools, Dataset]:
+    from smart_data_studio.profile import profile_dataset
+
+    dataset = Dataset.load([CsvSource.from_upload("orders.csv", COHORT_ROWS)])
+    tools = AnalysisTools(dataset)
+    tools.entity_keys = {
+        profile.table_name: profile.entity_key
+        for profile in profile_dataset(dataset)
+        if profile.entity_key
+    }
+    return tools, dataset
+
+
+GROUPED = "date_trunc('month', CAST(ordered_on AS DATE))"
+
+
+def test_a_cohort_written_by_hand_is_told_what_its_base_became() -> None:
+    """Six runs in six the model wrote this instead of calling the tool, and the
+    number it led with was the entities active in the first period rather than the
+    cohort. The prompt names the tool; naming it there moved three runs of six.
+    The correction has to arrive with the result to move the rest."""
+    tools, dataset = cohort_tools()
+    try:
+        payload = json.loads(
+            tools.run_sql(
+                f"SELECT {GROUPED} AS m, count(DISTINCT customer_id) AS n FROM orders "
+                "WHERE CAST(signed_up AS DATE) < '2026-02-01' GROUP BY 1"
+            )
+        )
+        warning = payload.get("cohort_warning", "")
+        assert "signed_up" in warning and "cohort" in warning, payload
+        assert "cohort_window" in warning, "the warning should name what to call instead"
+    finally:
+        dataset.close()
+
+
+@pytest.mark.parametrize(
+    ("label", "sql"),
+    [
+        (
+            "a segment counted over time is not a cohort",
+            f"SELECT {GROUPED} AS m, count(DISTINCT customer_id) AS n FROM orders "
+            "WHERE region = 'N' GROUP BY 1",
+        ),
+        (
+            "counting rows rather than entities",
+            f"SELECT {GROUPED} AS m, count(*) AS n FROM orders "
+            "WHERE CAST(signed_up AS DATE) < '2026-02-01' GROUP BY 1",
+        ),
+        (
+            "nothing filtered, so no cohort was chosen",
+            f"SELECT {GROUPED} AS m, count(DISTINCT customer_id) FROM orders GROUP BY 1",
+        ),
+    ],
+)
+def test_the_cohort_warning_stays_quiet_on_what_is_not_a_cohort(label: str, sql: str) -> None:
+    tools, dataset = cohort_tools()
+    try:
+        payload = json.loads(tools.run_sql(sql))
+        assert "error" not in payload, payload
+        assert "cohort_warning" not in payload, label
+    finally:
+        dataset.close()

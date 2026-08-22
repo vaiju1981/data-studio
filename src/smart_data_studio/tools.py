@@ -81,6 +81,24 @@ def _filtered_literals(tree: exp.Expression) -> dict[str, set[str]]:
     return found
 
 
+def _grouped_columns(tree: exp.Expression) -> list[str]:
+    """The columns a query groups by, following ordinals into the select list.
+
+    GROUP BY 1 is as common as GROUP BY region and names nothing on its own.
+    """
+    group = tree.args.get("group")
+    if group is None:
+        return []
+    selected = list(tree.expressions)
+    found: list[str] = []
+    for item in group.expressions:
+        if isinstance(item, exp.Literal) and item.is_int:
+            index = int(item.this) - 1
+            item = selected[index] if 0 <= index < len(selected) else item
+        found += [column.name for column in item.find_all(exp.Column)]
+    return found
+
+
 def _aggregates_by(tree: exp.Expression, key: str) -> bool:
     """Whether the query resolves to one row per key somewhere along the way.
 
@@ -175,6 +193,7 @@ class AnalysisTools:
             ("filter_warning", self._substitution_note),
             ("source_warning", self._source_note),
             ("coverage_warning", self._coverage_note),
+            ("cohort_warning", self._cohort_note),
         )
         found = {name: note for name, check in checks if (note := check(tree))}
         if weighting:
@@ -236,19 +255,11 @@ class AnalysisTools:
             return None
 
         columns = {name for name, _ in self.dataset.schema(table)}
-        selected = list(tree.expressions)
-        dimensions, measures = [], []
+        measures = []
         for node in tree.walk():
             if isinstance(node, (exp.Avg, exp.Sum)):
                 measures += [c.name for c in node.find_all(exp.Column) if c.name in thin]
-        for item in group.expressions:
-            # GROUP BY 1 is as common as GROUP BY region, and points at the
-            # select list rather than naming anything.
-            if isinstance(item, exp.Literal) and item.is_int:
-                index = int(item.this) - 1
-                item = selected[index] if 0 <= index < len(selected) else item
-            found = [c.name for c in item.find_all(exp.Column) if c.name in columns]
-            dimensions += found
+        dimensions = [name for name in _grouped_columns(tree) if name in columns]
         if not measures or not dimensions:
             return None
 
@@ -275,6 +286,70 @@ class AnalysisTools:
             f"how much. Count the non-null values per group and lead with what the coverage "
             f"supports."
         )
+
+    def _cohort_note(self, tree: exp.Expression) -> str | None:
+        """Warn when a cohort was assembled by hand, which gets the base wrong.
+
+        Filtering one date column to a period, grouping by another, and counting
+        distinct entities is a retention curve however it is spelled. Written that
+        way the base becomes the entities active in the first period rather than
+        everyone who started — the entities that joined and first appeared later
+        count in the numerators and not in the denominator, which reads as a
+        steeper fall than happened while every figure stays arithmetically right.
+        """
+        where = tree.args.get("where")
+        if where is None or not self.entity_keys:
+            return None
+        touched = {name.lower() for name in _tables_in(tree)}
+        table = next((t for t in self.dataset.tables if t.lower() in touched), None)
+        if table is None or len(touched) != 1:
+            return None
+        key = self.entity_keys.get(table)
+        grouped = {name.lower() for name in _grouped_columns(tree)}
+        if not key or not grouped:
+            return None
+        counts_entities = any(
+            isinstance(node, exp.Count)
+            and (node.args.get("distinct") or isinstance(node.this, exp.Distinct))
+            and key.lower() in node.sql().lower()
+            for node in tree.walk()
+        )
+        if not counts_entities:
+            return None
+
+        known = {name.lower(): name for name, _ in self.dataset.schema(table)}
+        filtered = {
+            known[column.name.lower()]
+            for column in where.find_all(exp.Column)
+            if column.name.lower() in known and column.name.lower() not in grouped
+        }
+        # A date on both sides is what makes it a cohort rather than a segment:
+        # filtering a region and grouping by month is an ordinary trend. Checked
+        # by casting rather than by name, since a start date is very often text
+        # and is called something different in every file.
+        starts = [name for name in sorted(filtered) if self._reads_as_a_date(table, name)]
+        if not starts:
+            return None
+        return (
+            f"This filters {starts[0]} to a period and counts {key} per {', '.join(grouped)}, "
+            f"which is a cohort. Built this way the base is whichever {key} values were active "
+            f"in the first period, not every {key} that started in it — the ones that joined "
+            f"and first appear later are counted above the line and missing from below it. "
+            f"Call cohort_window instead, which counts the cohort once and divides by that."
+        )
+
+    def _reads_as_a_date(self, table: str, column: str) -> bool:
+        """Whether a column's values are dates, whatever type it was stored as."""
+        quoted = quote_identifier(column)
+        try:
+            total, dates = self.dataset.connection.execute(
+                f"SELECT count(*), count(TRY_CAST({quoted} AS TIMESTAMP)) FROM "
+                f"(SELECT {quoted} FROM {quote_identifier(table)} "
+                f"WHERE {quoted} IS NOT NULL LIMIT 200)"
+            ).fetchone()
+        except Exception:
+            return False
+        return bool(total) and dates / total > 0.9
 
     def _tables_named_in_question(self) -> set[str]:
         """Tables the question points at, matched on the part of each name that
