@@ -77,8 +77,16 @@ def test_driver_sweep_needs_exactly_two_sides() -> None:
         analysis.rank_drivers(frame, "revenue", "period")
 
 
-def test_association_ranks_by_explained_variation_not_by_the_biggest_gap() -> None:
-    """A tiny extreme group looks impressive by eye but explains almost nothing."""
+def test_numeric_and_categorical_associations_are_ranked_apart() -> None:
+    """One ranked list said the two scores share a scale. They do not.
+
+    rare_extreme is five rows in three thousand, shifted far enough to stand out
+    by eye and explaining nothing anyone could act on — and its eta squared is
+    0.81. strong_numeric, which really does drive the target, scores 0.99. The
+    single list therefore happened to order these two correctly, and would have
+    inverted for any weaker driver, because eta squared and a Spearman rho are
+    different quantities that both run 0 to 1.
+    """
     rng = np.random.default_rng(1)
     size = 3000
     driver = rng.normal(0, 1, size)
@@ -92,12 +100,17 @@ def test_association_ranks_by_explained_variation_not_by_the_biggest_gap() -> No
     )
     frame.loc[frame["rare_extreme"] == "rare", "target"] += 500
 
-    ranked = analysis.relate(frame, "target")["associations"]
-    order = [item["column"] for item in ranked]
-    assert order[0] == "strong_numeric"
-    assert order.index("noise") > order.index("strong_numeric")
-    strength = {item["column"]: item["strength"] for item in ranked}
-    assert strength["strong_numeric"] > strength["rare_extreme"]
+    found = analysis.relate(frame, "target")
+    assert "associations" not in found, "the merged ranking is what claimed one scale"
+
+    numeric = [item["column"] for item in found["numeric_associations"]]
+    assert numeric == ["strong_numeric", "noise"], "within one measure the order is meaningful"
+
+    categorical = {item["column"]: item["strength"] for item in found["categorical_associations"]}
+    assert categorical["rare_extreme"] > 0.5, (
+        "the hazard this test exists for: a column of five interesting rows scores high, "
+        "and on a shared list would outrank a numeric column that explains far more"
+    )
 
 
 def test_tools_return_readable_json_and_record_evidence() -> None:

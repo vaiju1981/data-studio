@@ -8,6 +8,7 @@ from scipy import stats
 
 from smart_data_studio.config import (
     CROWDED_ABOVE,
+    MAX_ASSOCIATIONS,
     MAX_COMPARISON_GROUPS,
     MAX_DRIVER_LEVELS,
     MAX_OUTLIERS_REPORTED,
@@ -308,16 +309,34 @@ def relate(frame: pd.DataFrame, target: str) -> dict[str, object]:
                 }
             )
 
-    scored.sort(key=lambda item: item["strength"], reverse=True)
+    # Ranked apart, because one list sorted by "strength" claims the two measures
+    # are on one scale and they are not. Both run 0 to 1 and that is the whole of
+    # what they share: a Spearman rho of 0.4 and an eta squared of 0.4 are not the
+    # same finding, and eta squared climbs with the number of levels a column has,
+    # so a high-cardinality column outranks a numeric one for having more of them.
+    numeric = sorted(
+        (item for item in scored if item["kind"] == "numeric"),
+        key=lambda item: item["strength"],
+        reverse=True,
+    )
+    categorical = sorted(
+        (item for item in scored if item["kind"] == "categorical"),
+        key=lambda item: item["strength"],
+        reverse=True,
+    )
     return {
         "target": target,
         "rows_used": int(len(working)),
         "sampled": sampled,
-        "associations": scored[:15],
+        "numeric_associations": numeric[:MAX_ASSOCIATIONS],
+        "categorical_associations": categorical[:MAX_ASSOCIATIONS],
         "reading": (
-            "Strength runs 0 to 1 and is comparable across columns: absolute Spearman "
-            "correlation for numeric columns, eta squared — the share of variation the "
-            "column explains — for categorical ones. It measures association, not cause."
+            "Two different measures, ranked separately because they do not share a "
+            "scale: absolute Spearman correlation for numeric columns, eta squared — "
+            "the share of variation the column explains — for categorical ones. Eta "
+            "squared also rises with the number of levels, so read each list against "
+            "itself and do not place a categorical column above a numeric one on the "
+            "number alone. Both measure association, not cause."
         ),
     }
 
