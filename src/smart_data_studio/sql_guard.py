@@ -17,7 +17,7 @@ class UnsafeQuery(ValueError):
 READ_ONLY_ROOTS = (exp.Select, exp.SetOperation)
 
 
-def validate_select(sql: str, allowed_tables: set[str]) -> str:
+def validate_select(sql: str, allowed_tables: set[str], withheld: set[str] | None = None) -> str:
     try:
         statements = sqlglot.parse(sql, read="duckdb")
     except sqlglot.errors.ParseError as error:
@@ -42,6 +42,22 @@ def validate_select(sql: str, allowed_tables: set[str]) -> str:
     unknown = referenced - {table.lower() for table in allowed_tables}
     if unknown:
         raise UnsafeQuery(f"Unknown table(s): {', '.join(sorted(unknown))}")
+
+    # Checked here rather than on the way out, because an alias renames a column
+    # and no amount of looking at the result would recognise it afterwards.
+    if withheld:
+        named = sorted(
+            {
+                column.name
+                for column in statement.find_all(exp.Column)
+                if column.name.lower() in withheld
+            }
+        )
+        if named:
+            raise UnsafeQuery(
+                f"Column(s) withheld as sensitive on this deployment: {', '.join(named)}. "
+                "They are not in the schema and cannot be selected, filtered or grouped on."
+            )
 
     # The timeout contains a runaway after the fact; these refuse the obvious ones
     # before any work starts. Both bounds sit well above real analytics.

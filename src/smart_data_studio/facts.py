@@ -68,10 +68,7 @@ def _measure_keys(
             f"count(*) FILTER (WHERE {non_null}) AS complete_{index}",
             f"count(DISTINCT CASE WHEN {non_null} THEN {key} END) AS distinct_{index}",
         ]
-    with dataset._deadline():
-        row = dataset.connection.execute(
-            f"SELECT {', '.join(projections)} FROM {quote_identifier(table)}"
-        ).fetchone()
+    row = dataset.run(f"SELECT {', '.join(projections)} FROM {quote_identifier(table)}").fetchone()
     return [
         KeyFacts(
             ref=Ref(table, columns),
@@ -87,10 +84,9 @@ def verify_key(dataset: Dataset, ref: Ref) -> KeyFacts:
     """Measure whether these columns identify a row, counting nulls apart."""
     key, non_null = _key_sql(ref)
     quoted = quote_identifier(ref.table)
-    with dataset._deadline():
-        complete, distinct = dataset.connection.execute(
-            f"SELECT count(*), count(DISTINCT {key}) FROM {quoted} WHERE {non_null}"
-        ).fetchone()
+    complete, distinct = dataset.run(
+        f"SELECT count(*), count(DISTINCT {key}) FROM {quoted} WHERE {non_null}"
+    ).fetchone()
     return KeyFacts(
         ref=ref, rows=dataset.row_count(ref.table), complete=int(complete), distinct=int(distinct)
     )
@@ -272,9 +268,8 @@ def verify(dataset: Dataset, candidate: JoinCandidate) -> Verified:
         )
 
     # Bounded like any other query: cheap next to the join it prices is not free.
-    with dataset._deadline():
-        row = dataset.connection.execute(
-            f"""
+    row = dataset.run(
+        f"""
         WITH l AS ({sides["l"]}), r AS ({sides["r"]}),
         paired AS (SELECT l.k, l.n AS ln, r.n AS rn FROM l JOIN r ON l.k IS NOT DISTINCT FROM r.k)
         SELECT
@@ -291,7 +286,7 @@ def verify(dataset: Dataset, candidate: JoinCandidate) -> Verified:
           coalesce(max(ln), 0) AS r_max_partners
         FROM paired
         """
-        ).fetchone()
+    ).fetchone()
     (
         l_keys,
         r_keys,

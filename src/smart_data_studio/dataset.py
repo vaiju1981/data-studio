@@ -262,6 +262,9 @@ class QueryResult:
     sql: str
     frame: pd.DataFrame
     total_rows: int
+    # Sensitive columns a SELECT * picked up and query() then removed. Named so
+    # the absence reads as withheld rather than as data the file does not hold.
+    withheld: tuple[str, ...] = ()
 
     @property
     def truncated(self) -> bool:
@@ -490,6 +493,10 @@ class Dataset:
             )
 
         for index, (name, kind) in enumerate(described):
+            # These warnings are prose that names the column and quotes its shape,
+            # and they travel into the prompt with the rest of the lineage.
+            if is_sensitive(name):
+                continue
             if "VARCHAR" in kind:
                 present = int(values[f"present_{index}"] or 0)
                 if not present:
@@ -626,9 +633,18 @@ class Dataset:
     def tool_payload(self, result: QueryResult) -> dict[str, object]:
         """What the model sees: the rows themselves when small, a digest when not."""
         rows = result.rows_payload()
-        if len(json.dumps(rows, default=str)) <= MAX_LLM_PAYLOAD_CHARS:
-            return rows
-        return self._digest(result)
+        payload = (
+            rows
+            if len(json.dumps(rows, default=str)) <= MAX_LLM_PAYLOAD_CHARS
+            else self._digest(result)
+        )
+        if result.withheld:
+            payload["withheld_columns"] = (
+                f"{', '.join(result.withheld)} — withheld as sensitive on this deployment and "
+                "removed from this result. Do not ask for them again and do not describe the "
+                "result as every column of the table."
+            )
+        return payload
 
     def _digest(self, result: QueryResult) -> dict[str, object]:
         """A compact stand-in for a result too large to put in the prompt.
@@ -636,9 +652,13 @@ class Dataset:
         SUMMARIZE runs over the whole result rather than the rows on screen, so
         anything quoted from here holds for every row.
         """
-        stats = self.connection.execute(f"SUMMARIZE ({result.sql})").fetchdf()
+        stats = self.run(f"SUMMARIZE ({result.sql})").fetchdf()
         columns: dict[str, dict[str, object]] = {}
         for row in stats.to_dict(orient="records"):
+            # SUMMARIZE runs over the SQL, not over the frame the withheld columns
+            # were cut from, so a SELECT * would otherwise describe them here.
+            if is_sensitive(str(row["column_name"])):
+                continue
             entry = {
                 "type": row["column_type"],
                 "min": row["min"],
@@ -687,31 +707,70 @@ class Dataset:
             digest = build(sample, described)
         return digest
 
-    def query(self, sql: str, row_limit: int = MAX_DISPLAY_ROWS) -> QueryResult:
+    def run(self, sql: str, parameters: list[object] | None = None):
+        """Execute one query against the workspace, under the budget and the deadline.
+
+        Every path that scans data comes through here — the tools, the profile, the
+        cohort grid, the digest — because a runaway is a runaway wherever it was
+        issued from. A helper query that went straight to the connection could not
+        be cancelled at all: DuckDB has no statement timeout, only the interrupt
+        this arranges, so skipping it does not mean a longer limit, it means none.
+
+        DESCRIBE and a table's row count stay off this path. They read catalog
+        metadata rather than rows, they cannot run long, and they are asked often
+        enough that charging them would spend the session's budget on bookkeeping.
+        """
         if self.queries_run >= MAX_SESSION_QUERIES:
             raise RuntimeError(
                 f"This session has run its {MAX_SESSION_QUERIES:,} queries. "
                 "Reload the data to start a fresh workspace."
             )
         self.queries_run += 1
-        clean_sql = validate_select(sql, set(self.tables))
+        with self._deadline():
+            return self.connection.execute(sql, parameters)
+
+    def query(self, sql: str, row_limit: int = MAX_DISPLAY_ROWS) -> QueryResult:
+        clean_sql = validate_select(sql, set(self.tables), self._withheld_columns())
         # COUNT(*) OVER () is evaluated across the whole result before LIMIT applies,
         # so a single execution yields both the page of rows and the true total.
         counted_sql = (
             f"SELECT *, COUNT(*) OVER () AS {TOTAL_ROWS_COLUMN} "
             f"FROM ({clean_sql}) AS result_rows LIMIT {int(row_limit)}"
         )
-        with logs.timed("query", sql=clean_sql) as fields, self._deadline():
-            frame = self.connection.execute(counted_sql).fetchdf()
+        with logs.timed("query", sql=clean_sql) as fields:
+            frame = self.run(counted_sql).fetchdf()
             fields["returned"] = len(frame)
         # Positional, so a result carrying this column name of its own does not
         # shadow ours and get dropped in place of the column we added.
         total_rows = int(frame.iloc[0, -1]) if len(frame) else 0
+        frame = frame.iloc[:, :-1]
+
+        # The guard above refuses a query that names a sensitive column, which
+        # leaves SELECT *: it names nothing and returns everything. So the result
+        # is cut too. Both halves are needed — one cannot see a star, the other
+        # cannot see through an alias — and this is the last point before the rows
+        # reach the model, the screen and the export alike.
+        withheld = tuple(name for name in frame.columns if is_sensitive(str(name)))
+        if withheld:
+            frame = frame.drop(columns=list(withheld))
+            logs.event("query.withheld", columns=len(withheld))
         return QueryResult(
             sql=clean_sql,
-            frame=frame.iloc[:, :-1],
+            frame=frame,
             total_rows=total_rows,
+            withheld=withheld,
         )
+
+    def _withheld_columns(self) -> set[str]:
+        """Loaded column names the operator marked sensitive, lowercased to match."""
+        if not SENSITIVE_COLUMNS:
+            return set()
+        return {
+            name.lower()
+            for table in self.tables
+            for name, _ in self.schema(table)
+            if is_sensitive(name)
+        }
 
     def convert_to_number(self, table: str, column: str) -> str:
         """Rewrite a text column as a number, stripping whatever kept it text.
@@ -730,7 +789,7 @@ class Dataset:
         quoted, source = quote_identifier(table), quote_identifier(column)
         # Character classes rather than backslash escapes: a backslash does not
         # survive a SQL string literal on its way into DuckDB's regex.
-        european = self.connection.execute(
+        european = self.run(
             f"SELECT count_if(regexp_matches({source}, ',[0-9]{{1,2}}$')) > "
             f"count_if(regexp_matches({source}, '[.][0-9]{{1,2}}$')) FROM {quoted}"
         ).fetchone()[0]
@@ -742,7 +801,7 @@ class Dataset:
             cleaned = f"regexp_replace({source}, '[^0-9.-]', '', 'g')"
             convention = "plain (comma thousands, dot decimal)"
 
-        would_fail, total = self.connection.execute(
+        would_fail, total = self.run(
             f"SELECT count(*) FILTER (WHERE {source} IS NOT NULL AND "
             f"TRY_CAST({cleaned} AS DOUBLE) IS NULL), count({source}) FROM {quoted}"
         ).fetchone()
@@ -762,12 +821,8 @@ class Dataset:
             for name, _ in self.schema(table)
         )
         with logs.timed("column.converted", table=table, column=column):
-            self.connection.execute(
-                f"CREATE OR REPLACE TABLE {quoted} AS SELECT {projection} FROM {quoted}"
-            )
-        failed = self.connection.execute(
-            f"SELECT count(*) FROM {quoted} WHERE {source} IS NULL"
-        ).fetchone()[0]
+            self.run(f"CREATE OR REPLACE TABLE {quoted} AS SELECT {projection} FROM {quoted}")
+        failed = self.run(f"SELECT count(*) FROM {quoted} WHERE {source} IS NULL").fetchone()[0]
         note = f"{column} converted to a number, reading it as {convention}" + (
             f"; {failed:,} value(s) would not convert and are now empty." if failed else "."
         )
@@ -829,7 +884,7 @@ class Dataset:
         for table in self.tables:
             visible = [name for name, _ in self.schema(table) if not is_sensitive(name)]
             projection = ", ".join(quote_identifier(name) for name in visible) or "*"
-            frame = self.connection.execute(
+            frame = self.run(
                 f"SELECT {projection} FROM {quote_identifier(table)} LIMIT {int(limit)}"
             ).fetchdf()
             sections.append(

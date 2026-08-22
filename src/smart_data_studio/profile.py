@@ -122,7 +122,7 @@ def _summarize(dataset: Dataset, table_name: str) -> tuple[pd.DataFrame, list[st
     """
     quoted = quote_identifier(table_name)
     try:
-        return dataset.connection.execute(f"SUMMARIZE {quoted}").fetchdf(), []
+        return dataset.run(f"SUMMARIZE {quoted}").fetchdf(), []
     except Exception:
         logs.failure("summarize.per_column")
 
@@ -130,9 +130,7 @@ def _summarize(dataset: Dataset, table_name: str) -> tuple[pd.DataFrame, list[st
     for name, _ in dataset.schema(table_name):
         try:
             frames.append(
-                dataset.connection.execute(
-                    f"SUMMARIZE (SELECT {quote_identifier(name)} FROM {quoted})"
-                ).fetchdf()
+                dataset.run(f"SUMMARIZE (SELECT {quote_identifier(name)} FROM {quoted})").fetchdf()
             )
         except Exception:
             refused.append(name)
@@ -234,7 +232,7 @@ def _entity_grain(
     try:
         # repeated rides along on the same pass: a single-row entity cannot change
         # anything, so it is the wrong denominator for how widely a column moves.
-        row = dataset.connection.execute(
+        row = dataset.run(
             f"SELECT count(*) AS entities, count_if(n > 1) AS repeated, {outer} FROM ("
             f"SELECT {quote_identifier(key)}, count(*) AS n, {inner} "
             f"FROM {quote_identifier(table_name)} GROUP BY 1)"
@@ -312,9 +310,7 @@ def _exact_distinct(
     if not candidates:
         return {}
     projections = ", ".join(f"COUNT(DISTINCT {quote_identifier(name)})" for name in candidates)
-    row = dataset.connection.execute(
-        f"SELECT {projections} FROM {quote_identifier(table_name)}"
-    ).fetchone()
+    row = dataset.run(f"SELECT {projections} FROM {quote_identifier(table_name)}").fetchone()
     return {name: int(count) for name, count in zip(candidates, row, strict=True)}
 
 
@@ -336,7 +332,7 @@ def _shared_columns(dataset: Dataset, table_name: str, row_count: int) -> list[s
     together = sorted(mine & elsewhere)
     if not together or not row_count:
         return []
-    counts = dataset.connection.execute(
+    counts = dataset.run(
         "SELECT "
         + ", ".join(f"count(DISTINCT {quote_identifier(name)})" for name in together)
         + f" FROM {quote_identifier(table_name)}"
@@ -383,7 +379,7 @@ def _shared_measures(dataset: Dataset, table_name: str) -> list[str]:
     if not together:
         return []
     quoted = quote_identifier(table_name)
-    totals = dataset.connection.execute(
+    totals = dataset.run(
         "SELECT "
         + ", ".join(f"sum({quote_identifier(name)})" for name in together)
         + f" FROM {quoted}"
@@ -468,7 +464,7 @@ def _dictionary(
         for index, (name, _) in enumerate(candidates)
     )
     values = (
-        dataset.connection.execute(f"SELECT {projections} FROM {quote_identifier(table_name)}")
+        dataset.run(f"SELECT {projections} FROM {quote_identifier(table_name)}")
         .fetchdf()
         .iloc[0]
         .to_dict()
@@ -539,10 +535,7 @@ def _sentinels(dataset: Dataset, table_name: str, stats: pd.DataFrame) -> dict[s
             f"max({column}) FILTER (WHERE {column} < {high!r}) AS hi2_{index}",
         ]
     values = (
-        dataset.connection.execute(f"SELECT {', '.join(projections)} FROM {table}")
-        .fetchdf()
-        .iloc[0]
-        .to_dict()
+        dataset.run(f"SELECT {', '.join(projections)} FROM {table}").fetchdf().iloc[0].to_dict()
     )
 
     found: dict[str, str] = {}

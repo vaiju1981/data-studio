@@ -265,7 +265,7 @@ class AnalysisTools:
 
         measure, dimension = measures[0], dimensions[0]
         try:
-            rows = self.dataset.connection.execute(
+            rows = self.dataset.run(
                 f"SELECT count(*) AS n, count({quote_identifier(measure)}) AS present "
                 f"FROM {quote_identifier(table)} GROUP BY {quote_identifier(dimension)} "
                 f"HAVING n >= {MIN_COVERAGE_ROWS}"
@@ -342,7 +342,7 @@ class AnalysisTools:
         """Whether a column's values are dates, whatever type it was stored as."""
         quoted = quote_identifier(column)
         try:
-            total, dates = self.dataset.connection.execute(
+            total, dates = self.dataset.run(
                 f"SELECT count(*), count(TRY_CAST({quoted} AS TIMESTAMP)) FROM "
                 f"(SELECT {quoted} FROM {quote_identifier(table)} "
                 f"WHERE {quoted} IS NOT NULL LIMIT 200)"
@@ -466,7 +466,7 @@ class AnalysisTools:
         parameters = [f"%{word}%" for word in words]
         having = "HAVING score > 0" if words else ""
         try:
-            rows = self.dataset.connection.execute(
+            rows = self.dataset.run(
                 f"SELECT {value} AS value, count(*) AS rows, {score} AS score "
                 f"FROM {quoted_table} WHERE {quoted_column} IS NOT NULL "
                 f"GROUP BY 1, 3 {having} "

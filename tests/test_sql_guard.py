@@ -61,3 +61,17 @@ def test_allows_registered_tables_and_ctes() -> None:
 def test_filesystem_escape_passes_shape_guard_for_duckdb_to_block() -> None:
     sql = validate_select("SELECT * FROM read_csv_auto('/etc/passwd')", {"sales"})
     assert "READ_CSV_AUTO" in sql.upper()
+
+
+def test_a_column_withheld_as_sensitive_cannot_be_named() -> None:
+    """Hiding a column from the schema is not the same as refusing it in SQL, and
+    an alias would carry it past any check made on the result."""
+    for sql in (
+        "SELECT ssn FROM people",
+        "SELECT ssn AS taxid FROM people",
+        "SELECT name FROM people WHERE ssn IS NOT NULL",
+        "SELECT * FROM (SELECT ssn AS x FROM people)",
+    ):
+        with pytest.raises(UnsafeQuery, match="withheld as sensitive"):
+            validate_select(sql, {"people"}, {"ssn"})
+    assert "name" in validate_select("SELECT name FROM people", {"people"}, {"ssn"})

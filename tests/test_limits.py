@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import importlib
+import json
+from pathlib import Path
 
 import duckdb
 import pytest
@@ -159,5 +161,77 @@ def test_long_cells_are_trimmed_on_the_way_to_the_model() -> None:
         payload = dataset.query("SELECT note FROM n").rows_payload()
         assert "(truncated)" in payload["rows"][0]["note"]
         assert len(payload["rows"][0]["note"]) < 5000
+    finally:
+        dataset.close()
+
+
+def test_every_query_that_scans_rows_goes_through_the_guarded_path() -> None:
+    """A helper that reaches for the connection itself is not on a longer leash,
+    it is on none: DuckDB has no statement timeout, so the interrupt Dataset.run
+    arranges is the only way a query can be stopped at all. The cohort grid, the
+    value lookup, the coverage check and the digest each ran straight against the
+    connection, which is a full scan apiece that nothing could cancel."""
+    package = Path("src/smart_data_studio")
+    # dataset.py owns the guarded path; the healthcheck holds its own connection
+    # and exists to prove DuckDB answers at all.
+    exempt = {package / "dataset.py", package / "healthcheck.py"}
+    offenders = [
+        f"{path}:{number}"
+        for path in package.rglob("*.py")
+        if path not in exempt
+        for number, line in enumerate(path.read_text().splitlines(), start=1)
+        if "connection.execute(" in line
+    ]
+    assert not offenders, f"queries running outside Dataset.run: {offenders}"
+
+
+def test_a_model_callable_helper_is_bounded_like_any_other_query(monkeypatch) -> None:
+    """The structural test above says where the queries are written; this says the
+    path they were moved onto is the one that carries the deadline and the budget."""
+    from smart_data_studio.cohorts import cohort_window
+
+    rows = b"player,joined,seen\n1,2026-01-05,2026-01-06\n1,2026-01-05,2026-02-08\n"
+    dataset = Dataset.load([CsvSource.from_upload("visits.csv", rows)])
+    try:
+        deadlines = []
+        original = dataset._deadline
+        monkeypatch.setattr(dataset, "_deadline", lambda: (deadlines.append(True), original())[1])
+        before = dataset.queries_run
+        cohort_window(dataset, "visits", "player", "joined", "seen")
+        assert deadlines, "the cohort grid ran without the deadline every query gets"
+        assert dataset.queries_run > before, "its scans were not charged to the session"
+    finally:
+        dataset.close()
+
+
+def test_a_select_star_does_not_hand_back_a_withheld_column(monkeypatch) -> None:
+    """Filtering the schema tells the model the column is not there; it does not
+    stop SELECT * returning it, and that result goes to the model, to the screen
+    and into the download alike."""
+    module = reloaded(monkeypatch, SDS_SENSITIVE_COLUMNS="ssn,dob")
+    rows = b"name,ssn,dob,amount\nAda,111-22-3333,1980-01-02,10\n"
+    dataset = module.Dataset.load([module.CsvSource.from_upload("p.csv", rows)])
+    try:
+        result = dataset.query("SELECT * FROM p")
+        assert list(result.frame.columns) == ["name", "amount"]
+        assert result.withheld == ("ssn", "dob")
+
+        payload = json.dumps(dataset.tool_payload(result))
+        for secret in ("111-22-3333", "1980-01-02"):
+            assert secret not in payload
+        assert "withheld as sensitive" in payload
+    finally:
+        dataset.close()
+
+
+def test_a_withheld_column_is_absent_from_a_digest_too(monkeypatch) -> None:
+    """The digest summarises the SQL rather than the frame the columns were cut
+    from, so a large SELECT * would report their range instead of their values."""
+    module = reloaded(monkeypatch, SDS_SENSITIVE_COLUMNS="ssn")
+    body = "name,ssn,amount\n" + "".join(f"n{i},111-22-{i:04d},{i}\n" for i in range(400))
+    dataset = module.Dataset.load([module.CsvSource.from_upload("p.csv", body.encode())])
+    try:
+        digest = dataset._digest(dataset.query("SELECT * FROM p"))
+        assert set(digest["columns"]) == {"name", "amount"}
     finally:
         dataset.close()

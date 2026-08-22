@@ -57,7 +57,7 @@ def cohort_window(
     started = f"date_trunc('{period}', TRY_CAST({quote_identifier(cohort_column)} AS TIMESTAMP))"
     acted = f"date_trunc('{period}', TRY_CAST({quote_identifier(activity_column)} AS TIMESTAMP))"
 
-    frame = dataset.connection.execute(f"""
+    frame = dataset.run(f"""
         WITH base AS (
             SELECT {entity} AS entity, {started} AS cohort, {acted} AS active
             FROM {quote_identifier(table)}
@@ -87,7 +87,7 @@ def cohort_window(
     # Activity dated before the entity's own cohort. Reported rather than dropped
     # in silence: it is a real property of the data, and left unexplained the
     # answer reaches for a cause it cannot know.
-    early = dataset.connection.execute(f"""
+    early = dataset.run(f"""
         SELECT count(DISTINCT {entity}) FROM {quote_identifier(table)}
         WHERE {acted} IS NOT NULL AND {started} IS NOT NULL AND {acted} < {started}
     """).fetchone()[0]
