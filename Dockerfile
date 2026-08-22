@@ -17,7 +17,14 @@ ENV PYTHONUNBUFFERED=1 \
     SDS_DUCKDB_TEMP_DIR=/workspace/duckdb
 
 COPY --from=build /dist/*.whl /tmp/
-RUN pip install --no-cache-dir /tmp/*.whl && rm /tmp/*.whl \
+COPY requirements.lock /tmp/requirements.lock
+# The lockfile first and on its own, so every version is the one CI tested. The
+# wheel then installs with its dependencies already satisfied — resolving them
+# afresh from pyproject is how a container ends up running a release nothing was
+# ever run against.
+RUN pip install --no-cache-dir -r /tmp/requirements.lock \
+    && pip install --no-cache-dir --no-deps /tmp/*.whl \
+    && rm /tmp/*.whl /tmp/requirements.lock \
     && useradd --create-home --uid 10001 studio \
     && mkdir -p /workspace/duckdb && chown -R studio:studio /workspace
 

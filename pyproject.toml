@@ -15,7 +15,6 @@ dependencies = [
   "ollama>=0.6,<1",
   "pandas>=2.3",
   "plotly>=5.24",
-  "scikit-learn>=1.7",
   "scipy>=1.15",
   "sqlglot>=30",
   "statsmodels>=0.14",

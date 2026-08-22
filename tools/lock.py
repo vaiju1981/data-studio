@@ -19,7 +19,6 @@ RUNTIME = [
     "ollama",
     "pandas",
     "plotly",
-    "scikit-learn",
     "scipy",
     "sqlglot",
     "statsmodels",
