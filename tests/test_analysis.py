@@ -333,3 +333,31 @@ def test_an_entity_seen_once_is_reported_with_its_own_thinness() -> None:
     assert flagged["seen_once"]["observations"] == 1
     assert all(item["observations"] >= 1 for item in found["outliers"])
     assert "observations" in found["reading"]
+
+
+def test_an_already_aggregated_result_says_so_rather_than_blaming_group_size() -> None:
+    """The wrong diagnosis costs the whole turn.
+
+    Asked whether LOCAL and NATIONAL players really differ, the model queried the
+    average per geoType and handed the two rows to the test. It was told the second
+    largest group had one row and to find groups with more data — advice that leads
+    nowhere from an aggregate — so it called the tool again, and again, nine times,
+    until the round limit ended the turn with no answer at all.
+    """
+    frame = pd.DataFrame({"geoType": ["LOCAL", "NATIONAL"], "avg_theo_win": [55.04, 134.62]})
+    with pytest.raises(analysis.NotAnalysable) as raised:
+        analysis.compare_groups(frame, "geoType", "avg_theo_win")
+
+    message = str(raised.value)
+    assert "already been aggregated" in message
+    assert "without GROUP BY" in message, "the message has to say what to do instead"
+    assert "coarser dimension" not in message, "that is the advice that sent it in circles"
+
+
+def test_a_genuinely_small_group_still_says_so() -> None:
+    """The other side of it: a real result with a thin group keeps its own reason."""
+    frame = pd.DataFrame(
+        {"tier": ["top"] * 40 + ["thin"] * 3, "spend": list(range(40)) + [1.0, 2.0, 3.0]}
+    )
+    with pytest.raises(analysis.NotAnalysable, match="at least 10 are needed"):
+        analysis.compare_groups(frame, "tier", "spend")

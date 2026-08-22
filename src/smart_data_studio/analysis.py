@@ -101,6 +101,19 @@ def compare_groups(frame: pd.DataFrame, dimension: str, measure: str) -> dict[st
         )
 
     first, second = sizes.index[0], sizes.index[1]
+    if int(sizes.iloc[0]) <= 1:
+        # One row per group is not a small sample, it is a result that has already
+        # been grouped, and the advice below sends the model somewhere it cannot
+        # get to. Asked whether LOCAL and NATIONAL really differ, it queried the
+        # average per geoType, handed the two rows to this test, and was told to
+        # find groups with more data — so it tried again, nine times, until the
+        # round limit ended the turn with no answer.
+        raise NotAnalysable(
+            f"This result holds one row per {dimension}, so it has already been "
+            f"aggregated and there is nothing left to test — a mean has no spread. "
+            f"Re-run the query returning one row per observation, selecting "
+            f"{dimension} and {measure} without GROUP BY, then compare that."
+        )
     if int(sizes.iloc[1]) < MIN_COMPARISON_ROWS:
         raise NotAnalysable(
             f"The second largest group in {dimension} has {int(sizes.iloc[1])} rows; at least "
