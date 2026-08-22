@@ -140,8 +140,22 @@ def _drop_proven_partials(
     expected = _expected_days(series.index, freq)
     actual = covered.reindex(series.index)
     short = actual.notna() & (actual < expected)
+
+    # A period with no coverage figure is not a covered period. Saying "every
+    # period is fully covered" over it turns a gap in the evidence into a claim,
+    # and the caller was given the column precisely so incompleteness would be
+    # proved rather than guessed.
+    unknown = actual.isna()
+    if unknown.any():
+        notes.append(
+            f"{int(unknown.sum())} of {len(series)} periods carry no coverage figure, so "
+            "whether they are complete is unknown. They were kept: "
+            f"{', '.join(str(stamp.date()) for stamp in series.index[unknown][:5])}"
+            + (" and others." if int(unknown.sum()) > 5 else ".")
+        )
     if not short.any():
-        notes.append("Every period is fully covered, so none were excluded.")
+        if not unknown.any():
+            notes.append("Every period is fully covered, so none were excluded.")
         return series
     for stamp in series.index[short]:
         notes.append(

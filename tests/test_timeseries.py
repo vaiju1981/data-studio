@@ -242,3 +242,16 @@ def test_coverage_survives_a_row_dropped_for_a_missing_value() -> None:
     series = timeseries.prepare(frame, "month", "amount", "days")
     assert len(series.values) == 7
     assert "Every period is fully covered" in series.notes[0]
+
+
+def test_a_period_with_no_coverage_figure_is_not_called_covered() -> None:
+    """The coverage column exists so incompleteness is proved rather than guessed.
+    A period whose figure is missing is unknown, and reporting it inside "every
+    period is fully covered" turns a gap in the evidence into a claim."""
+    frame = monthly([100.0] * 8)
+    frame["days"] = [31, 28, None, 30, 31, 30, 31, 31]
+
+    notes = " ".join(timeseries.prepare(frame, "month", "amount", "days").notes)
+    assert "no coverage figure" in notes
+    assert "2024-03-01" in notes
+    assert "Every period is fully covered" not in notes
