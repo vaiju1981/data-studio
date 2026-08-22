@@ -11,7 +11,7 @@ import sqlglot
 from plotly.graph_objects import Figure
 from sqlglot import exp
 
-from smart_data_studio import analysis, joins, logs, timeseries
+from smart_data_studio import analysis, cohorts, joins, logs, timeseries
 from smart_data_studio.charts import ChartSpec, make_figure
 from smart_data_studio.config import (
     ANALYSIS_SAMPLE_SEED,
@@ -353,6 +353,56 @@ class AnalysisTools:
                 f"More than {MAX_VALUE_MATCHES} values match; only the commonest are shown."
             )
         return _dump(payload)
+
+    def cohort_window(
+        self,
+        table: str,
+        entity_column: str,
+        cohort_column: str,
+        activity_column: str,
+        period: str = "month",
+        horizon: int = 12,
+    ) -> str:
+        """Follow the entities that started in each period and see how many return.
+
+        Use this for retention, repeat purchase, account vintage, readmission
+        within a window, or any question of the form "of the ones that began then,
+        how many are still here now". Do not build it out of run_sql: the base has
+        to be the whole cohort, including entities whose first activity came later,
+        and a query written by hand divides by the ones active in the first period
+        instead — which is smaller, and gives a retention curve that is wrong
+        while every figure in it is arithmetically correct.
+
+        Args:
+          table: The table holding one row per activity, as it appears in the schema.
+          entity_column: The column identifying the thing being followed.
+          cohort_column: The date each entity started — registration, signup, admission.
+          activity_column: The date of the activity being counted.
+          period: day, week, month, quarter or year.
+          horizon: How many periods past its start each cohort is followed.
+
+        Returns:
+          JSON with each cohort's full size and, per period after it, how many were
+          active and what share of the cohort that is.
+        """
+        try:
+            outcome = cohorts.cohort_window(
+                self.dataset,
+                table,
+                entity_column,
+                cohort_column,
+                activity_column,
+                period,
+                horizon,
+            )
+        except cohorts.NotCohortable as error:
+            return _dump({"error": str(error)})
+        except Exception as error:
+            return _dump({"error": str(error)})
+        self.analyses.append(
+            AnalysisRecord("cohorts", f"{entity_column} by {cohort_column}", outcome)
+        )
+        return _dump(outcome)
 
     def make_chart(
         self,

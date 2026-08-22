@@ -220,6 +220,12 @@ MIN_SENTINEL_ROWS = 50
 # code rather than a reading. Twenty leaves a binned column alone.
 SENTINEL_GAP_RATIO = 20
 
+# Cohorts reported, and how far past its start each is followed. A file spanning
+# two years has two dozen monthly cohorts and every one carries a row per period,
+# so the whole grid is quadratic and most of it is the same shape repeated.
+MAX_COHORTS = 12
+MAX_COHORT_HORIZON = 24
+
 # A forecast cannot reach further ahead than the history it was built from.
 MAX_FORECAST_PERIODS = 120
 

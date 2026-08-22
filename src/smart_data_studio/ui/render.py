@@ -73,6 +73,7 @@ TITLES = {
     "drivers": "Drivers",
     "associations": "Associations",
     "outliers": "Outliers",
+    "cohorts": "Cohorts",
 }
 
 
