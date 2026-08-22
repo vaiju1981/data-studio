@@ -1,12 +1,12 @@
 # Build the wheel separately so the runtime image carries no toolchain.
-FROM python:3.10-slim AS build
+FROM python:3.14-slim AS build
 WORKDIR /src
 RUN pip install --no-cache-dir build==1.2.2
 COPY pyproject.toml README.md ./
 COPY src ./src
 RUN python -m build --wheel --outdir /dist
 
-FROM python:3.10-slim
+FROM python:3.14-slim
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
