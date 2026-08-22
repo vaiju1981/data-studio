@@ -313,3 +313,23 @@ def test_an_outlier_cannot_hide_behind_the_spread_it_creates() -> None:
 def test_find_outliers_refuses_what_it_cannot_answer(label, frame, because) -> None:
     with pytest.raises(analysis.NotAnalysable, match=because):
         analysis.find_outliers(frame, "who", "value")
+
+
+def test_an_entity_seen_once_is_reported_with_its_own_thinness() -> None:
+    """Two machines were flagged at 35 and -29 deviations on a real file, both
+    genuinely far from the estate. Both had a single day of data, where one
+    jackpot moves the rate entirely — far from the median because it has not
+    averaged out, which reads identically to broken hardware unless it is said."""
+    rng = np.random.default_rng(5)
+    rows = [
+        {"machine": f"m{index // 30}", "rate": value}
+        for index, value in enumerate(rng.normal(8, 0.4, 30 * 40))
+    ]
+    rows.append({"machine": "seen_once", "rate": 22.0})
+    found = analysis.find_outliers(pd.DataFrame(rows), "machine", "rate")
+
+    flagged = {item["entity"]: item for item in found["outliers"]}
+    assert "seen_once" in flagged
+    assert flagged["seen_once"]["observations"] == 1
+    assert all(item["observations"] >= 1 for item in found["outliers"])
+    assert "observations" in found["reading"]

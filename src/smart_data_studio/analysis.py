@@ -328,7 +328,8 @@ def find_outliers(frame: pd.DataFrame, dimension: str, measure: str) -> dict[str
         raise NotAnalysable(f"{measure} is not numeric")
 
     working = pd.DataFrame({dimension: frame[dimension], measure: values}).dropna()
-    per_entity = working.groupby(dimension)[measure].mean()
+    grouped = working.groupby(dimension)[measure]
+    per_entity, seen = grouped.mean(), grouped.size()
     if len(per_entity) < MIN_OUTLIER_ENTITIES:
         raise NotAnalysable(
             f"{dimension} has {len(per_entity)} values with data; at least "
@@ -360,6 +361,7 @@ def find_outliers(frame: pd.DataFrame, dimension: str, measure: str) -> dict[str
             {
                 "entity": str(name),
                 "value": round(float(per_entity[name]), 4),
+                "observations": int(seen[name]),
                 "score": round(float(score[name]), 2),
                 "direction": "high" if score[name] > 0 else "low",
             }
@@ -369,7 +371,9 @@ def find_outliers(frame: pd.DataFrame, dimension: str, measure: str) -> dict[str
             f"score is distance from the median of all {len(per_entity):,} in units of the "
             f"median absolute deviation; anything past {OUTLIER_SCORE} is reported. It "
             "measures distance from the rest, not size, so the largest entity is not "
-            "flagged for being large."
+            "flagged for being large. Read observations before acting on one: an "
+            "entity seen once is far from the median because it has had no chance "
+            "to average out, which is a different thing from behaving unusually."
         ),
     }
     if len(flagged) > MAX_OUTLIERS_REPORTED:
