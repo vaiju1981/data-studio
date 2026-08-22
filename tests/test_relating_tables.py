@@ -79,21 +79,28 @@ def test_a_proposal_that_does_not_resolve_is_rejected_with_a_reason(
     assert any(because in reason for reason in found.rejected), found.rejected
 
 
-def test_a_withheld_column_cannot_be_proposed_or_named_in_the_refusal(data) -> None:
-    """Naming it in the rejection would defeat withholding it."""
+def test_a_withheld_column_cannot_be_proposed() -> None:
+    """A withheld column is dropped as the table is built, so it cannot be proposed
+    and the refusal carries no news: the model is told there is no such column,
+    which is what it would be told about any name it invented."""
     import smart_data_studio.dataset as dataset_module
 
     original = dataset_module.SENSITIVE_COLUMNS
     dataset_module.SENSITIVE_COLUMNS = ("coinin",)
     try:
-        found = proposals.validate(
-            data, [{"kind": "key", "table": "sessions", "columns": ["coinIn"]}]
-        )
-        assert not found.keys
-        assert found.rejected == ["sessions: a withheld column was proposed"]
-        assert "coinIn" not in found.rejected[0]
+        rows = b"assetId,coinIn,day\n1,10,2026-01-01\n2,20,2026-01-02\n"
+        withheld = Dataset.load([CsvSource.from_upload("sessions.csv", rows)])
     finally:
         dataset_module.SENSITIVE_COLUMNS = original
+    try:
+        assert [name for name, _ in withheld.schema("sessions")] == ["assetId", "day"]
+        found = proposals.validate(
+            withheld, [{"kind": "key", "table": "sessions", "columns": ["coinIn"]}]
+        )
+        assert not found.keys
+        assert found.rejected == ["sessions has no column 'coinIn'"]
+    finally:
+        withheld.close()
 
 
 def test_proposals_are_bounded_per_table_and_per_pair(data) -> None:

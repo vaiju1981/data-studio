@@ -17,7 +17,7 @@ from smart_data_studio.config import (
     MAX_KEY_CANDIDATES,
     MAX_KEY_COLUMNS,
 )
-from smart_data_studio.dataset import Dataset, is_sensitive
+from smart_data_studio.dataset import Dataset
 
 
 @dataclass(frozen=True)
@@ -84,9 +84,6 @@ def _resolve(dataset: Dataset, table: str, columns: list[str] | tuple[str, ...])
         name = schema.get(str(column).strip().lower())
         if name is None:
             raise Invalid(f"{actual_table} has no column {column!r}")
-        if is_sensitive(name):
-            # Naming it in a rejection message would defeat withholding it.
-            raise Invalid(f"{actual_table}: a withheld column was proposed")
         if name in resolved:
             raise Invalid(f"{actual_table}: {name} repeated")
         resolved.append(name)

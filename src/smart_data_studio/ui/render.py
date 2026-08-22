@@ -62,8 +62,6 @@ def answer(item: Answer, key: str, dataset: Dataset) -> None:
             label = f"Query {index} · {result.total_rows:,} rows"
             if result.truncated:
                 label += f" · showing the first {len(result.frame):,}"
-            if result.withheld:
-                label += f" · {', '.join(result.withheld)} withheld as sensitive"
             st.caption(label)
             # Generated SQL runs long; without wrapping the tail is simply clipped.
             st.code(result.sql, language="sql", wrap_lines=True)

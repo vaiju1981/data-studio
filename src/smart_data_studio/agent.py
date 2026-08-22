@@ -26,7 +26,7 @@ from smart_data_studio.config import (
     MODEL_RETRY_SECONDS,
     OLLAMA_HOST,
 )
-from smart_data_studio.dataset import Dataset, QueryResult, is_sensitive
+from smart_data_studio.dataset import Dataset, QueryResult
 from smart_data_studio.profile import TableProfile
 from smart_data_studio.tools import AnalysisRecord, AnalysisTools
 
@@ -709,11 +709,6 @@ class DataAgent:
         for profile in self.profiles:
             for row in profile.stats.to_dict(orient="records"):
                 kind = str(row["column_type"]).upper()
-                # The stats frame is unfiltered — prompt_text() does its own cut —
-                # so a withheld date of birth would otherwise be named here, with
-                # the oldest and youngest in the file beside it.
-                if is_sensitive(str(row["column_name"])):
-                    continue
                 if "DATE" in kind or "TIMESTAMP" in kind:
                     bounds.append(
                         f"{profile.table_name}.{row['column_name']}: {row['min']} to {row['max']}"

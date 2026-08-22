@@ -257,10 +257,9 @@ def test_a_sensitive_column_never_reaches_the_prompt_through_its_statistics() ->
     round them.
     """
     import smart_data_studio.dataset as dataset_module
-    import smart_data_studio.profile as profile_module
 
-    original = dataset_module.SENSITIVE_COLUMNS, profile_module.SENSITIVE_COLUMNS
-    dataset_module.SENSITIVE_COLUMNS = profile_module.SENSITIVE_COLUMNS = ("email",)
+    original = dataset_module.SENSITIVE_COLUMNS
+    dataset_module.SENSITIVE_COLUMNS = ("email",)
     rows = ["email,region"] + [
         f"user{n}@example.com,{'North' if n % 2 else 'South'}" for n in range(40)
     ]
@@ -271,10 +270,11 @@ def test_a_sensitive_column_never_reaches_the_prompt_through_its_statistics() ->
         assert "@example.com" not in prompt, "a real address reached the model"
         assert "email" not in prompt
         assert "region" in prompt, "the rest of the profile still has to be there"
-        # The owner's own panel is a different audience and keeps the full table.
-        assert "email" in profile.stats["column_name"].tolist()
+        # Nor is it in the statistics behind the prompt: the column was dropped as
+        # the table was built, so there is nothing to summarise and nothing to filter.
+        assert "email" not in profile.stats["column_name"].tolist()
     finally:
-        dataset_module.SENSITIVE_COLUMNS, profile_module.SENSITIVE_COLUMNS = original
+        dataset_module.SENSITIVE_COLUMNS = original
         dataset.close()
 
 

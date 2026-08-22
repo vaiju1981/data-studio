@@ -93,22 +93,3 @@ def test_a_column_withheld_as_sensitive_cannot_be_named() -> None:
         with pytest.raises(UnsafeQuery, match="withheld as sensitive"):
             validate_select(sql, {"people"}, {"ssn"})
     assert "name" in validate_select("SELECT name FROM people", {"people"}, {"ssn"})
-
-
-def test_a_table_used_as_a_value_is_refused() -> None:
-    """DuckDB reads a bare table name in an expression as a STRUCT of the whole
-    row, so `SELECT people FROM people` returns the withheld columns under a name
-    the guard was not watching. to_json and a cast lose the struct type on the way
-    out, so nothing downstream could recognise them either."""
-    for sql in (
-        "SELECT people FROM people",
-        "SELECT p FROM people p",
-        "SELECT to_json(people) AS j FROM people",
-        "SELECT people::VARCHAR AS s FROM people",
-    ):
-        with pytest.raises(UnsafeQuery, match="names a table, not a column"):
-            validate_select(sql, {"people"}, {"ssn"})
-
-    # Ordinary analytics over the same table is untouched.
-    for sql in ("SELECT name, sum(amount) FROM people GROUP BY 1", "SELECT * FROM people"):
-        validate_select(sql, {"people"}, {"ssn"})

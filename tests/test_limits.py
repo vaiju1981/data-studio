@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import importlib
-import json
 from pathlib import Path
 
 import duckdb
@@ -11,6 +10,7 @@ import pytest
 
 from smart_data_studio import config
 from smart_data_studio.dataset import CsvSource, Dataset
+from smart_data_studio.sql_guard import UnsafeQuery
 
 
 def reloaded(monkeypatch, **environment: str):
@@ -204,24 +204,50 @@ def test_a_model_callable_helper_is_bounded_like_any_other_query(monkeypatch) ->
         dataset.close()
 
 
-def test_a_select_star_does_not_hand_back_a_withheld_column(monkeypatch) -> None:
-    """Filtering the schema tells the model the column is not there; it does not
-    stop SELECT * returning it, and that result goes to the model, to the screen
-    and into the download alike."""
+def test_a_withheld_column_is_not_in_the_workspace_to_be_reshaped(monkeypatch) -> None:
+    """Filtering a sensitive column out of the result cannot be made to work.
+
+    Hiding it from the schema left SELECT * returning it. Cutting it from the
+    result left a bare table name, which DuckDB reads as a struct of the whole
+    row. Refusing that left three more: a positional rename in a table alias, the
+    same in a CTE, and packing every column into a list. None of them is doing
+    anything wrong — they are reshaping a table that should not hold the column —
+    so the column is not loaded, and there is nothing left to reshape.
+    """
     module = reloaded(monkeypatch, SDS_SENSITIVE_COLUMNS="ssn,dob")
     rows = b"name,ssn,dob,amount\nAda,111-22-3333,1980-01-02,10\n"
     dataset = module.Dataset.load([module.CsvSource.from_upload("p.csv", rows)])
     try:
-        result = dataset.query("SELECT * FROM p")
-        assert list(result.frame.columns) == ["name", "amount"]
-        assert result.withheld == ("ssn", "dob")
+        assert [name for name, _ in dataset.schema("p")] == ["name", "amount"]
+        assert dataset.lineage[0].withheld == ["ssn", "dob"]
 
-        payload = json.dumps(dataset.tool_payload(result))
-        for secret in ("111-22-3333", "1980-01-02"):
-            assert secret not in payload
-        assert "withheld as sensitive" in payload
+        for sql in (
+            "SELECT * FROM p",
+            "SELECT COLUMNS(*) FROM p",
+            "SELECT p FROM p",
+            "SELECT to_json(p) AS j FROM p",
+            "SELECT * FROM p AS t(w, x)",
+            "WITH r(w, x) AS (SELECT * FROM p) SELECT * FROM r",
+            "SELECT [COLUMNS(*)::VARCHAR] AS everything FROM p",
+        ):
+            shown = dataset.query(sql).frame.to_string()
+            for secret in ("111-22-3333", "1980-01-02"):
+                assert secret not in shown, f"{secret} came back from: {sql}"
+
+        # Named directly it is refused with a reason, rather than with DuckDB's
+        # "column not found", which reads like a typo worth retrying.
+        with pytest.raises(UnsafeQuery, match="withheld as sensitive"):
+            dataset.query("SELECT ssn FROM p")
     finally:
         dataset.close()
+
+
+def test_a_file_of_nothing_but_withheld_columns_is_refused(monkeypatch) -> None:
+    """DuckDB will not drop a table's last column, and a table of nothing is not
+    something to hand back as though it loaded."""
+    module = reloaded(monkeypatch, SDS_SENSITIVE_COLUMNS="ssn")
+    with pytest.raises(ValueError, match="nothing left to analyse"):
+        module.Dataset.load([module.CsvSource.from_upload("p.csv", b"ssn\n111-22-3333\n")])
 
 
 def test_a_withheld_column_is_absent_from_a_digest_too(monkeypatch) -> None:
@@ -270,20 +296,19 @@ def test_a_wide_file_with_one_bad_column_does_not_spend_the_session() -> None:
 
 
 def test_running_out_of_queries_is_not_swallowed_column_by_column() -> None:
-    """The fallback catches per column so one failure costs one column. An
-    exhausted budget is not that kind of failure — retried against every remaining
-    column it produces a table with no statistics and no reason given — so it has
-    its own type and stops the sweep."""
+    """The sweep catches per attempt so one failure costs one column. An exhausted
+    budget is not that kind of failure — retried against every remaining column it
+    produces a table with no statistics and no reason given — so it has its own
+    type and stops the search."""
     from smart_data_studio.dataset import OutOfQueries
     from smart_data_studio.profile import _summarize_in_halves
 
     dataset = Dataset.load([CsvSource.from_upload("s.csv", b"a,b\n1,2\n")])
     try:
-        dataset.queries_run = module_budget = 10**9
         assert isinstance(OutOfQueries("x"), RuntimeError)
+        dataset.queries_run = spent = 10**9
         frames, refused = _summarize_in_halves(dataset, '"s"', ["a", "b"])
         assert not frames and refused == ["a", "b"]
-        # One attempt, not one per column.
-        assert dataset.queries_run == module_budget
+        assert dataset.queries_run == spent, "it tried again for each column"
     finally:
         dataset.close()

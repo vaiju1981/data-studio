@@ -14,14 +14,12 @@ from smart_data_studio.config import (
     MAX_VARYING_COLUMNS,
     MIN_SENTINEL_ROWS,
     PER_ROW_CHANGE_SHARE,
-    SENSITIVE_COLUMNS,
     SENTINEL_GAP_RATIO,
     SENTINEL_SHARE,
 )
 from smart_data_studio.dataset import (
     Dataset,
     OutOfQueries,
-    is_sensitive,
     looks_like_identifier,
     quote_identifier,
 )
@@ -63,15 +61,13 @@ class TableProfile:
         available = [column for column in columns if column in self.stats.columns]
         # SUMMARIZE covers every column, so min and max carry real cell values. The
         # model-facing text is filtered here rather than the panel the owner reads.
-        visible = self.stats[~self.stats["column_name"].map(is_sensitive)]
+        visible = self.stats
         rendered_stats = (
             visible[available]
             .map(lambda value: "—" if pd.isna(value) else value)
             .to_string(index=False)
         )
-        rendered_findings = "\n".join(
-            f"- {finding}" for finding in self.findings if not _names_sensitive(finding)
-        )
+        rendered_findings = "\n".join(f"- {finding}" for finding in self.findings)
         # Stated before anything joins, so the right key is used first time.
         rendered_keys = (
             "\nHow a row is identified: " + "; ".join(facts.describe() for facts in self.keys) + "."
@@ -103,11 +99,6 @@ class TableProfile:
             f"Profile (approx_unique is an estimate, not an exact count):\n{rendered_stats}\n"
             f"Findings:\n{rendered_findings}{rendered_keys}{rendered_shared}{rendered_measures}{rendered_dictionary}"
         )
-
-
-def _names_sensitive(text: str) -> bool:
-    """Whether a finding is about a column the model is not allowed to see."""
-    return any(part in text.lower() for part in SENSITIVE_COLUMNS)
 
 
 def profile_dataset(dataset: Dataset) -> list[TableProfile]:
@@ -143,6 +134,7 @@ def _summarize_in_halves(
     is 400 scans, and once every scan is charged to the workspace, one bad column
     in a wide file spent most of the session's budget before the first question
     was asked. Halving isolates the same column in about a dozen queries.
+
     """
     projection = ", ".join(quote_identifier(name) for name in names)
     try:
@@ -346,11 +338,7 @@ def _shared_columns(dataset: Dataset, table_name: str, row_count: int) -> list[s
     anything joins turns a refusal into a right answer first time.
     """
     measures = facts.measure_columns(dataset, table_name)
-    mine = {
-        name
-        for name, _ in dataset.schema(table_name)
-        if not is_sensitive(name) and name not in measures
-    }
+    mine = {name for name, _ in dataset.schema(table_name) if name not in measures}
     elsewhere = {
         name for other in dataset.tables if other != table_name for name, _ in dataset.schema(other)
     }
@@ -398,9 +386,7 @@ def _shared_measures(dataset: Dataset, table_name: str) -> list[str]:
         if other != table_name
         for name in facts.measure_columns(dataset, other)
     }
-    together = sorted(name for name in mine & elsewhere if not is_sensitive(name))[
-        :MAX_SHARED_COLUMNS
-    ]
+    together = sorted(mine & elsewhere)[:MAX_SHARED_COLUMNS]
     if not together:
         return []
     quoted = quote_identifier(table_name)
@@ -421,7 +407,6 @@ def _distinct_by_column(stats: pd.DataFrame) -> dict[str, float]:
     return {
         str(row["column_name"]): _number(row.get("approx_unique"))
         for row in stats.to_dict(orient="records")
-        if not is_sensitive(str(row["column_name"]))
     }
 
 
@@ -443,7 +428,7 @@ def _attribute_columns(
     found = {}
     for row in stats.to_dict(orient="records"):
         name = str(row["column_name"])
-        if is_sensitive(name) or name in measures:
+        if name in measures:
             continue
         distinct = _number(row.get("approx_unique"))
         if distinct < 2 or distinct > max(row_count * 0.9, 2):

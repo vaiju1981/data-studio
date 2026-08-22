@@ -265,6 +265,9 @@ class TableLineage:
     rows: int
     columns: int
     warnings: list[str] = field(default_factory=list)
+    # Columns the operator marked sensitive. They were dropped as the table was
+    # built, so this is the only record that the file had them at all.
+    withheld: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -272,9 +275,6 @@ class QueryResult:
     sql: str
     frame: pd.DataFrame
     total_rows: int
-    # Sensitive columns a SELECT * picked up and query() then removed. Named so
-    # the absence reads as withheld rather than as data the file does not hold.
-    withheld: tuple[str, ...] = ()
 
     @property
     def truncated(self) -> bool:
@@ -337,6 +337,7 @@ class Dataset:
                     cls._check_header(source)
                     with logs.timed("ingest", table=table_name) as fields:
                         cls._load_source(connection, table_name, source)
+                        withheld = cls._withhold_sensitive(connection, table_name)
                         shape = cls._check_size(connection, table_name)
                         fields.update(shape)
                 except Exception as error:
@@ -356,6 +357,7 @@ class Dataset:
                         source=safe_name(source.name),
                         loaded_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
                         warnings=cls._column_warnings(connection, table_name),
+                        withheld=withheld,
                         **shape,
                     )
                 )
@@ -378,6 +380,36 @@ class Dataset:
         connection.execute(f"SET memory_limit='{DUCKDB_MEMORY_LIMIT}'")
         connection.execute(f"SET threads={int(DUCKDB_THREADS)}")
         connection.execute(f"SET temp_directory='{temp_directory()}'")
+
+    @staticmethod
+    def _withhold_sensitive(connection: duckdb.DuckDBPyConnection, table_name: str) -> list[str]:
+        """Drop the operator's sensitive columns out of the table as it is built.
+
+        Filtering them on the way out cannot be made to work. Hiding them from the
+        schema left SELECT * returning them; cutting them from the result left a
+        bare table name, which DuckDB reads as a struct of the whole row; refusing
+        that left `FROM people AS t(w, x, y, z)`, which renames every column
+        positionally without naming one, and `[COLUMNS(*)]`, which packs them into
+        a list. Each is a different DuckDB feature and the next release will add
+        another, because none of them is doing anything wrong — they are only
+        reshaping a table that should never have held the column.
+
+        So it does not. DROP COLUMN is a catalog edit, instant on any size of
+        table, and after it there is nothing left to reshape.
+        """
+        if not SENSITIVE_COLUMNS:
+            return []
+        quoted = quote_identifier(table_name)
+        names = [row[0] for row in connection.execute(f"DESCRIBE {quoted}").fetchall()]
+        sensitive = [name for name in names if is_sensitive(name)]
+        if len(sensitive) == len(names):
+            raise ValueError(
+                f"Every column in {table_name} is withheld as sensitive on this deployment "
+                f"({', '.join(sensitive[:5])}), so there would be nothing left to analyse."
+            )
+        for name in sensitive:
+            connection.execute(f"ALTER TABLE {quoted} DROP COLUMN {quote_identifier(name)}")
+        return sensitive
 
     @staticmethod
     def _check_size(connection: duckdb.DuckDBPyConnection, table_name: str) -> dict[str, int]:
@@ -503,10 +535,6 @@ class Dataset:
             )
 
         for index, (name, kind) in enumerate(described):
-            # These warnings are prose that names the column and quotes its shape,
-            # and they travel into the prompt with the rest of the lineage.
-            if is_sensitive(name):
-                continue
             if "VARCHAR" in kind:
                 present = int(values[f"present_{index}"] or 0)
                 if not present:
@@ -637,30 +665,26 @@ class Dataset:
         ).fetchone()[0]
 
     def schema_text(self) -> str:
+        # The table holds only what was loaded, so this needs no filter. The count
+        # comes from the lineage because that is now the only record the file ever
+        # had those columns, and an unexplained gap invites the model to guess.
+        withheld = {item.table: len(item.withheld) for item in self.lineage}
         sections = []
         for table in self.tables:
-            shown = [(name, kind) for name, kind in self.schema(table) if not is_sensitive(name)]
-            hidden = len(self.schema(table)) - len(shown)
-            columns = ", ".join(f"{quote_identifier(name)} {kind}" for name, kind in shown)
-            note = f" — {hidden} column(s) withheld as sensitive" if hidden else ""
+            columns = ", ".join(
+                f"{quote_identifier(name)} {kind}" for name, kind in self.schema(table)
+            )
+            hidden = withheld.get(table, 0)
+            note = f" — {hidden} column(s) withheld as sensitive, not loaded" if hidden else ""
             sections.append(f"Table {quote_identifier(table)} ({columns}){note}")
         return "\n".join(sections)
 
     def tool_payload(self, result: QueryResult) -> dict[str, object]:
         """What the model sees: the rows themselves when small, a digest when not."""
         rows = result.rows_payload()
-        payload = (
-            rows
-            if len(json.dumps(rows, default=str)) <= MAX_LLM_PAYLOAD_CHARS
-            else self._digest(result)
-        )
-        if result.withheld:
-            payload["withheld_columns"] = (
-                f"{', '.join(result.withheld)} — withheld as sensitive on this deployment and "
-                "removed from this result. Do not ask for them again and do not describe the "
-                "result as every column of the table."
-            )
-        return payload
+        if len(json.dumps(rows, default=str)) <= MAX_LLM_PAYLOAD_CHARS:
+            return rows
+        return self._digest(result)
 
     def _digest(self, result: QueryResult) -> dict[str, object]:
         """A compact stand-in for a result too large to put in the prompt.
@@ -671,10 +695,6 @@ class Dataset:
         stats = self.run(f"SUMMARIZE ({result.sql})").fetchdf()
         columns: dict[str, dict[str, object]] = {}
         for row in stats.to_dict(orient="records"):
-            # SUMMARIZE runs over the SQL, not over the frame the withheld columns
-            # were cut from, so a SELECT * would otherwise describe them here.
-            if is_sensitive(str(row["column_name"])):
-                continue
             entry = {
                 "type": row["column_type"],
                 "min": row["min"],
@@ -759,34 +779,16 @@ class Dataset:
         # Positional, so a result carrying this column name of its own does not
         # shadow ours and get dropped in place of the column we added.
         total_rows = int(frame.iloc[0, -1]) if len(frame) else 0
-        frame = frame.iloc[:, :-1]
-
-        # The guard above refuses a query that names a sensitive column, which
-        # leaves SELECT *: it names nothing and returns everything. So the result
-        # is cut too. Both halves are needed — one cannot see a star, the other
-        # cannot see through an alias — and this is the last point before the rows
-        # reach the model, the screen and the export alike.
-        withheld = tuple(name for name in frame.columns if is_sensitive(str(name)))
-        if withheld:
-            frame = frame.drop(columns=list(withheld))
-            logs.event("query.withheld", columns=len(withheld))
-        return QueryResult(
-            sql=clean_sql,
-            frame=frame,
-            total_rows=total_rows,
-            withheld=withheld,
-        )
+        return QueryResult(sql=clean_sql, frame=frame.iloc[:, :-1], total_rows=total_rows)
 
     def _withheld_columns(self) -> set[str]:
-        """Loaded column names the operator marked sensitive, lowercased to match."""
-        if not SENSITIVE_COLUMNS:
-            return set()
-        return {
-            name.lower()
-            for table in self.tables
-            for name, _ in self.schema(table)
-            if is_sensitive(name)
-        }
+        """Names dropped as sensitive, so asking for one gets a reason.
+
+        Not a guard — the columns are not in the workspace and no query could
+        reach them. DuckDB would say the column does not exist, which reads like
+        a typo and invites the model to try three spellings of it.
+        """
+        return {name.lower() for item in self.lineage for name in item.withheld}
 
     def convert_to_number(self, table: str, column: str) -> str:
         """Rewrite a text column as a number, stripping whatever kept it text.
@@ -898,10 +900,8 @@ class Dataset:
         """First rows of each table, so the model sees real values and not only types."""
         sections = []
         for table in self.tables:
-            visible = [name for name, _ in self.schema(table) if not is_sensitive(name)]
-            projection = ", ".join(quote_identifier(name) for name in visible) or "*"
             frame = self.run(
-                f"SELECT {projection} FROM {quote_identifier(table)} LIMIT {int(limit)}"
+                f"SELECT * FROM {quote_identifier(table)} LIMIT {int(limit)}"
             ).fetchdf()
             sections.append(
                 f"Sample rows from {table}:\n{frame.to_string(index=False, max_cols=30)}"

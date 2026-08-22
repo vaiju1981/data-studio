@@ -23,7 +23,7 @@ from smart_data_studio.config import (
     MAX_VALUE_MATCHES,
     MIN_COVERAGE_ROWS,
 )
-from smart_data_studio.dataset import Dataset, QueryResult, is_sensitive, quote_identifier
+from smart_data_studio.dataset import Dataset, QueryResult, quote_identifier
 
 
 @dataclass
@@ -448,7 +448,7 @@ class AnalysisTools:
         """
         if table not in self.dataset.tables:
             return _dump({"error": f"Unknown table: {table}"})
-        columns = {name for name, _ in self.dataset.schema(table) if not is_sensitive(name)}
+        columns = {name for name, _ in self.dataset.schema(table)}
         if column not in columns:
             return _dump({"error": f"Unknown column: {column}"})
         quoted_table, quoted_column = quote_identifier(table), quote_identifier(column)
