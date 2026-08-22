@@ -162,21 +162,32 @@ def test_an_evicted_workspace_clears_the_tab_instead_of_failing_later(monkeypatc
         dataset.close()
 
 
-def test_an_export_is_priced_before_it_is_built() -> None:
-    """Measuring the finished bytes catches the caching but not the allocation
-    that produced them, and the allocation is what takes the process down. The
-    estimate comes off the rows already on screen, so it costs nothing."""
-    import pandas as pd
-
-    from smart_data_studio.dataset import QueryResult
+def test_an_export_is_priced_over_every_row_before_it_is_built(monkeypatch) -> None:
+    """The page cannot price the export. Weighing the finished bytes catches the
+    caching but not the allocation that produced them, and pricing from the rows
+    already on screen missed by 39x on a column that is short at the top and long
+    further down — a bound that is no bound. DuckDB measures the whole result."""
+    from smart_data_studio.dataset import CsvSource, Dataset
     from smart_data_studio.ui import render
 
-    frame = pd.DataFrame({f"c{index}": ["abcdefghij"] * 500 for index in range(20)})
-    result = QueryResult(sql="SELECT 1", frame=frame, total_rows=250_000)
+    rows = ["n,note"] + [f"{index}," + ("x" if index < 200 else "y" * 400) for index in range(2000)]
+    dataset = Dataset.load([CsvSource.from_upload("t.csv", ("\n".join(rows) + "\n").encode())])
+    try:
+        result = dataset.query("SELECT * FROM t")
+        priced = dataset.export_size(result.sql)
+        weighed = len(result.frame.to_csv(index=False).encode("utf-8"))
+        assert abs(priced - weighed) < weighed * 0.01, f"priced {priced}, weighs {weighed}"
 
-    per_row = len(frame.to_csv(index=False).encode("utf-8")) / len(frame)
-    estimate = render._estimated_export_bytes(result)
-    assert abs(estimate - per_row * 250_000) < per_row, "the estimate misprices the full export"
+        # The page alone would have said something far smaller.
+        page = result.frame.head(200)
+        from_the_page = (
+            len(page.to_csv(index=False).encode("utf-8")) / len(page) * len(result.frame)
+        )
+        assert from_the_page < weighed / 10, "the fixture no longer demonstrates the problem"
 
-    # An empty result prices at nothing rather than dividing by zero.
-    assert render._estimated_export_bytes(QueryResult("SELECT 1", frame.head(0), 0)) == 0
+        # And it is the price the ceiling is read from, before anything is built.
+        monkeypatch.setattr(render, "MAX_SESSION_EXPORT_BYTES", priced // 2)
+        monkeypatch.setattr(render.st, "session_state", {})
+        assert "would take the session past" in render._no_room_for_export(priced)
+    finally:
+        dataset.close()

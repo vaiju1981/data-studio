@@ -27,6 +27,7 @@ from smart_data_studio.config import (
     IDENTIFIER_WORDS,
     MAX_CELL_CHARS_TO_MODEL,
     MAX_DISPLAY_ROWS,
+    MAX_EXPORT_ROWS,
     MAX_HEADER_LENGTH,
     MAX_INGEST_CELLS,
     MAX_INGEST_COLUMNS,
@@ -780,6 +781,29 @@ class Dataset:
         # shadow ours and get dropped in place of the column we added.
         total_rows = int(frame.iloc[0, -1]) if len(frame) else 0
         return QueryResult(sql=clean_sql, frame=frame.iloc[:, :-1], total_rows=total_rows)
+
+    def export_size(self, sql: str, row_limit: int = MAX_EXPORT_ROWS) -> int:
+        """Bytes the CSV of this result will weigh, measured over every row of it.
+
+        Priced from the page on screen this was a guess, and a bad one: the first
+        five thousand rows of a result are not its widest. A note column holding
+        "x" at the top and four hundred characters lower down under-priced a
+        50,000-row export by thirty-nine times, which is no bound at all.
+
+        COLUMNS(*) replicates the aggregate per column rather than packing the row,
+        so the sums come back one per column and are added here. strlen counts
+        bytes where length counts characters, and an accented CSV is the larger of
+        the two. Quoting is not modelled — a value carrying a comma costs two more
+        bytes — so this reads a little low, which is why the finished export is
+        weighed again before it is kept.
+        """
+        row = self.run(
+            f"SELECT count(*), sum(strlen(CAST(COLUMNS(*) AS VARCHAR))) "
+            f"FROM ({sql}) LIMIT {int(row_limit)}"
+        ).fetchone()
+        rows, columns = int(row[0]), [int(value or 0) for value in row[1:]]
+        # One separator or newline per column, per row.
+        return sum(columns) + rows * len(columns)
 
     def _withheld_columns(self) -> set[str]:
         """Names dropped as sensitive, so asking for one gets a reason.
