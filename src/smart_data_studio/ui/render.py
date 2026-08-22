@@ -8,7 +8,7 @@ import pandas as pd
 import streamlit as st
 
 from smart_data_studio.agent import Answer
-from smart_data_studio.config import MAX_EXPORT_ROWS
+from smart_data_studio.config import MAX_EXPORT_ROWS, MAX_SESSION_EXPORT_BYTES
 from smart_data_studio.dataset import Dataset, QueryResult
 from smart_data_studio.profile import TableProfile
 from smart_data_studio.tools import AnalysisRecord
@@ -139,6 +139,29 @@ def _analysis(analysis: AnalysisRecord, key: str) -> None:
             )
 
 
+def _no_room_for_export(size: int) -> str:
+    """Why one more prepared download will not fit, or empty when it will.
+
+    Every prepared export stays in session state until the chat is replaced, so
+    the ceiling is on what the tab is holding rather than on any one file. A row
+    cap cannot stand in for it: 250,000 rows of one column and of ninety are very
+    different objects, and several wide ones exhaust the process.
+    """
+    held = sum(
+        len(value)
+        for key, value in st.session_state.items()
+        if str(key).startswith("export-") and isinstance(value, bytes)
+    )
+    if held + size <= MAX_SESSION_EXPORT_BYTES:
+        return ""
+    return (
+        f"This export is {size / 1e6:.0f}MB and would take the session past its "
+        f"{MAX_SESSION_EXPORT_BYTES / 1e6:.0f}MB of prepared downloads "
+        f"({held / 1e6:.0f}MB is already held). Download the ones you have — or "
+        "narrow the query — and try again."
+    )
+
+
 def _export(result: QueryResult, key: str, dataset: Dataset) -> None:
     """Small results download straight away; large ones are rebuilt only on request."""
     if not result.truncated:
@@ -158,7 +181,12 @@ def _export(result: QueryResult, key: str, dataset: Dataset) -> None:
         if st.button(f"Prepare full export ({exportable:,} rows)", key=f"prepare-{key}"):
             with st.spinner("Building the export…"):
                 full = dataset.query(result.sql, row_limit=MAX_EXPORT_ROWS)
-            st.session_state[state_key] = full.frame.to_csv(index=False).encode("utf-8")
+            payload = full.frame.to_csv(index=False).encode("utf-8")
+            refusal = _no_room_for_export(len(payload))
+            if refusal:
+                st.error(refusal)
+                return
+            st.session_state[state_key] = payload
             st.rerun()
         if result.total_rows > MAX_EXPORT_ROWS:
             st.caption(

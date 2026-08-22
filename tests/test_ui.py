@@ -120,6 +120,24 @@ def test_money_in_an_answer_is_not_rendered_as_mathematics() -> None:
     assert as_text("plain **bold** text") == "plain **bold** text"
 
 
+def test_prepared_exports_are_bounded_by_a_ceiling_that_is_actually_read(monkeypatch) -> None:
+    """MAX_SESSION_EXPORT_BYTES was declared and never consulted, so each prepared
+    export cached another bytes object in session state and several wide ones could
+    take the process out. The cap is on what the tab holds, not on any one file."""
+    from smart_data_studio.ui import render
+
+    monkeypatch.setattr(render, "MAX_SESSION_EXPORT_BYTES", 1_000)
+    monkeypatch.setattr(render.st, "session_state", {})
+    assert render._no_room_for_export(900) == ""
+
+    render.st.session_state["export-0-1"] = b"x" * 600
+    # Unrelated state is not mistaken for a held download.
+    render.st.session_state["chat"] = ["a question"]
+    assert render._no_room_for_export(300) == ""
+    refusal = render._no_room_for_export(500)
+    assert "already held" in refusal and "narrow the query" in refusal
+
+
 def test_an_evicted_workspace_clears_the_tab_instead_of_failing_later(monkeypatch, tmp_path):
     """Eviction closes the connection from whichever thread noticed. The tab went
     on rendering panels over a closed workspace and only found out at the next
