@@ -10,7 +10,7 @@ from pathlib import Path
 VERSION = "0.1.0"
 # Bumped whenever the analyst prompt changes, so a logged answer can be traced to
 # the instructions that produced it.
-PROMPT_VERSION = "2026-08-18.3"
+PROMPT_VERSION = "2026-08-22.1"
 
 
 def _flag(name: str, default: bool) -> bool:

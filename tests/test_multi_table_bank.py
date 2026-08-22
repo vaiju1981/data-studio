@@ -159,16 +159,29 @@ TRIO_BANK: list[tuple[int, str, list[float]]] = [
 ]
 
 
+_open: list[Dataset] = []
+
+
+def one_tier(*paths) -> Dataset:
+    """One tier's workspace at a time.
+
+    A module-scoped fixture lives until the module ends, so by the time the third
+    tier loads the first two are still holding their DuckDB connections — three
+    multi-gigabyte workspaces at once, each with its own memory budget. The third
+    segfaulted inside SUMMARIZE with the machine out of memory. The tiers never
+    need each other, so the previous one goes before the next one arrives.
+    """
+    while _open:
+        _open.pop().close()
+    dataset = Dataset.load([CsvSource.from_path(path) for path in paths])
+    _open.append(dataset)
+    return dataset
+
+
 @pytest.fixture(scope="module")
 def trio():
     """All three files. 4.8GB, so loaded once and shared by the tier."""
-    dataset = Dataset.load(
-        [
-            CsvSource.from_path(VISITS),
-            CsvSource.from_path(SESSIONS),
-            CsvSource.from_path(ASSETS),
-        ]
-    )
+    dataset = one_tier(VISITS, SESSIONS, ASSETS)
     try:
         built = DataAgent(dataset, profile_dataset(dataset))
         built.build_understanding()
@@ -179,7 +192,7 @@ def trio():
 
 @pytest.fixture(scope="module")
 def agent():
-    dataset = Dataset.load([CsvSource.from_path(SESSIONS), CsvSource.from_path(ASSETS)])
+    dataset = one_tier(SESSIONS, ASSETS)
     try:
         built = DataAgent(dataset, profile_dataset(dataset))
         built.build_understanding()
@@ -191,7 +204,7 @@ def agent():
 @pytest.fixture(scope="module")
 def players():
     """Visits and sessions: 3.8GB, so it is loaded once for the whole module."""
-    dataset = Dataset.load([CsvSource.from_path(VISITS), CsvSource.from_path(SESSIONS)])
+    dataset = one_tier(VISITS, SESSIONS)
     try:
         built = DataAgent(dataset, profile_dataset(dataset))
         built.build_understanding()
