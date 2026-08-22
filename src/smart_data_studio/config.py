@@ -192,6 +192,15 @@ MAX_VARYING_COLUMNS = 8
 # change anything.
 PER_ROW_CHANGE_SHARE = 0.95
 
+# Below this a column cannot make one group's figure rest on materially less data
+# than another's, so the coverage check is not worth its scan.
+COVERAGE_NULL_FLOOR = 5.0
+# Warn when the thinnest group is covered this much less than the best-covered
+# one. Nulls spread evenly across groups change nothing and are not worth saying.
+COVERAGE_GAP = 0.5
+# A group this small is the grain guard's business, not the coverage guard's.
+MIN_COVERAGE_ROWS = 30
+
 # A column with more levels than this is an identifier, not a dimension to sweep.
 MAX_DRIVER_LEVELS = 50
 # Iglewicz and Hoaglin's cut for the modified z-score, which is built on the median

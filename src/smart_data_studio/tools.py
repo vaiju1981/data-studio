@@ -15,10 +15,13 @@ from smart_data_studio import analysis, cohorts, joins, logs, timeseries
 from smart_data_studio.charts import ChartSpec, make_figure
 from smart_data_studio.config import (
     ANALYSIS_SAMPLE_SEED,
+    COVERAGE_GAP,
+    COVERAGE_NULL_FLOOR,
     MAX_ANALYSIS_CELLS,
     MAX_ANALYSIS_ROWS,
     MAX_CHART_ROWS,
     MAX_VALUE_MATCHES,
+    MIN_COVERAGE_ROWS,
 )
 from smart_data_studio.dataset import Dataset, QueryResult, is_sensitive, quote_identifier
 
@@ -115,6 +118,9 @@ class AnalysisTools:
         self.dimension_values: dict[str, dict[str, list[str]]] = {}
         # table -> measures another loaded table also carries under that name.
         self.shared_measures: dict[str, set[str]] = {}
+        # table -> column -> how much of it is null, from the profile. Only used to
+        # decide whether a coverage scan is worth running at all.
+        self.null_shares: dict[str, dict[str, float]] = {}
         self.question = ""
         self.chart: Figure | None = None
         self.chart_spec: ChartSpec | None = None
@@ -168,6 +174,7 @@ class AnalysisTools:
             ("grain_warning", self._grain_note),
             ("filter_warning", self._substitution_note),
             ("source_warning", self._source_note),
+            ("coverage_warning", self._coverage_note),
         )
         found = {name: note for name, check in checks if (note := check(tree))}
         if weighting:
@@ -203,6 +210,71 @@ class AnalysisTools:
                         f"joining to {owner} only for the columns {wanted} does not have."
                     )
         return None
+
+    def _coverage_note(self, tree: exp.Expression) -> str | None:
+        """Warn when a figure per group rests on very different amounts of data.
+
+        A column 8% null overall reads as unremarkable, and the profile says so.
+        Where those nulls sit in one group, that group's average covers 2% of it
+        and still leads the answer as the best region — the count is in the
+        result, below the number, and the ranking is made before anyone reaches it.
+        """
+        group = tree.args.get("group")
+        if group is None or not self.null_shares:
+            return None
+        touched = {name.lower() for name in _tables_in(tree)}
+        # One table. A joined result's coverage is the join guards' business.
+        table = next((t for t in self.dataset.tables if t.lower() in touched), None)
+        if table is None or len(touched) != 1:
+            return None
+        thin = {
+            name: share
+            for name, share in self.null_shares.get(table, {}).items()
+            if share >= COVERAGE_NULL_FLOOR
+        }
+        if not thin:
+            return None
+
+        columns = {name for name, _ in self.dataset.schema(table)}
+        selected = list(tree.expressions)
+        dimensions, measures = [], []
+        for node in tree.walk():
+            if isinstance(node, (exp.Avg, exp.Sum)):
+                measures += [c.name for c in node.find_all(exp.Column) if c.name in thin]
+        for item in group.expressions:
+            # GROUP BY 1 is as common as GROUP BY region, and points at the
+            # select list rather than naming anything.
+            if isinstance(item, exp.Literal) and item.is_int:
+                index = int(item.this) - 1
+                item = selected[index] if 0 <= index < len(selected) else item
+            found = [c.name for c in item.find_all(exp.Column) if c.name in columns]
+            dimensions += found
+        if not measures or not dimensions:
+            return None
+
+        measure, dimension = measures[0], dimensions[0]
+        try:
+            rows = self.dataset.connection.execute(
+                f"SELECT count(*) AS n, count({quote_identifier(measure)}) AS present "
+                f"FROM {quote_identifier(table)} GROUP BY {quote_identifier(dimension)} "
+                f"HAVING n >= {MIN_COVERAGE_ROWS}"
+            ).fetchall()
+        except Exception:
+            return None  # a warning must never cost the answer
+        shares = [present / total for total, present in rows if total]
+        if len(shares) < 2:
+            return None
+        worst, best = min(shares), max(shares)
+        if best - worst < COVERAGE_GAP:
+            return None
+        return (
+            f"{measure} is not filled in evenly across {dimension}: the thinnest group has it "
+            f"for {worst:.0%} of its rows where the best-covered has {best:.0%}. A figure "
+            f"averaged over {worst:.0%} of a group is not comparable with one averaged over "
+            f"{best:.0%}, so do not rank them against each other without saying which rest on "
+            f"how much. Count the non-null values per group and lead with what the coverage "
+            f"supports."
+        )
 
     def _tables_named_in_question(self) -> set[str]:
         """Tables the question points at, matched on the part of each name that

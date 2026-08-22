@@ -260,6 +260,14 @@ class DataAgent:
         self.tools.dimension_values = {
             profile.table_name: profile.values for profile in profiles if profile.values
         }
+        self.tools.null_shares = {
+            profile.table_name: {
+                str(row["column_name"]): float(row["null_percentage"] or 0)
+                for row in profile.stats.to_dict(orient="records")
+                if "null_percentage" in row
+            }
+            for profile in profiles
+        }
         self.tools.shared_measures = {
             table: measures
             for table in dataset.tables

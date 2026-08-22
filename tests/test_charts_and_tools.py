@@ -441,3 +441,84 @@ def test_a_series_tool_cannot_reach_a_result_the_turn_forgot(tool: str, argument
         assert "error" not in json.loads(getattr(tools, tool)(*arguments))
     finally:
         dataset.close()
+
+
+# --- a figure per group that rests on very different amounts of data -------------
+
+UNEVEN = (
+    b"order_id,region,revenue,delivery_days\n"
+    + b"".join(
+        # North is fastest and almost entirely unmeasured; the rest are well covered.
+        f"n{i},North,100,{'1.4' if i < 4 else ''}\n".encode()
+        for i in range(200)
+    )
+    + b"".join(
+        f"{r}{i},{r},100,5.{i % 9}\n".encode() for r in ("South", "East") for i in range(200)
+    )
+)
+
+
+def uneven_tools() -> tuple[AnalysisTools, Dataset]:
+    from smart_data_studio.profile import profile_dataset
+
+    dataset = Dataset.load([CsvSource.from_upload("orders.csv", UNEVEN)])
+    tools = AnalysisTools(dataset)
+    tools.null_shares = {
+        profile.table_name: {
+            str(row["column_name"]): float(row["null_percentage"] or 0)
+            for row in profile.stats.to_dict(orient="records")
+        }
+        for profile in profile_dataset(dataset)
+    }
+    return tools, dataset
+
+
+def test_a_group_average_over_almost_no_rows_is_flagged() -> None:
+    """The failure this exists for: delivery_days was 8% null overall, which reads
+    as unremarkable, and every one of those nulls sat in one region. That region's
+    average covered 2% of it and led five answers out of five as the fastest."""
+    tools, dataset = uneven_tools()
+    try:
+        payload = json.loads(
+            tools.run_sql("SELECT region, avg(delivery_days) FROM orders GROUP BY region")
+        )
+        warning = payload.get("coverage_warning", "")
+        assert "delivery_days" in warning and "region" in warning, payload
+        assert "2%" in warning and "100%" in warning, warning
+    finally:
+        dataset.close()
+
+
+def test_the_coverage_warning_reads_group_by_ordinals_too() -> None:
+    """GROUP BY 1 is as common as GROUP BY region and names nothing."""
+    tools, dataset = uneven_tools()
+    try:
+        payload = json.loads(
+            tools.run_sql("SELECT region, avg(delivery_days) AS d FROM orders GROUP BY 1")
+        )
+        assert "coverage_warning" in payload, payload
+    finally:
+        dataset.close()
+
+
+@pytest.mark.parametrize(
+    ("label", "sql"),
+    [
+        (
+            "a column filled in everywhere",
+            "SELECT region, avg(revenue) FROM orders GROUP BY region",
+        ),
+        ("nothing grouped, so nothing to compare", "SELECT avg(delivery_days) FROM orders"),
+        (
+            "counting, which is what you do about nulls",
+            "SELECT region, count(delivery_days) FROM orders GROUP BY region",
+        ),
+    ],
+)
+def test_the_coverage_warning_stays_quiet_when_it_has_nothing_to_say(label: str, sql: str) -> None:
+    """A warning on every grouped average would teach the model to skip them all."""
+    tools, dataset = uneven_tools()
+    try:
+        assert "coverage_warning" not in json.loads(tools.run_sql(sql)), label
+    finally:
+        dataset.close()
