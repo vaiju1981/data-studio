@@ -102,11 +102,40 @@ class TableProfile:
         )
 
 
+@dataclass
+class Allowance:
+    """Fallback queries the profile may still spend, shared by all its tables.
+
+    One allowance for the workspace, not one for every table: nine pathological
+    files each given sixty attempts spend the whole session before the first
+    question can be asked.
+
+    It counts its own attempts rather than watching the workspace's query counter,
+    which ordinary profiling advances too. Reading that counter, sixteen healthy
+    tables were enough to use the allowance up, and the one bad table after them
+    came back with nothing described at all — the common case paying for the
+    pathological one.
+    """
+
+    left: int = MAX_SUMMARIZE_QUERIES
+    exhausted: bool = False
+
+    def spend(self) -> bool:
+        if self.left <= 0:
+            self.exhausted = True
+            return False
+        self.left -= 1
+        return True
+
+
 def profile_dataset(dataset: Dataset) -> list[TableProfile]:
-    return [profile_table(dataset, table) for table in dataset.tables]
+    allowance = Allowance()
+    return [profile_table(dataset, table, allowance) for table in dataset.tables]
 
 
-def _summarize(dataset: Dataset, table_name: str) -> tuple[pd.DataFrame, list[str], bool]:
+def _summarize(
+    dataset: Dataset, table_name: str, allowance: Allowance | None = None
+) -> tuple[pd.DataFrame, list[str], bool]:
     """SUMMARIZE, falling back to column by column when one column defeats it.
 
     stddev over a NaN or infinity raises OutOfRange, which otherwise takes the
@@ -120,15 +149,15 @@ def _summarize(dataset: Dataset, table_name: str) -> tuple[pd.DataFrame, list[st
         logs.failure("summarize.per_column")
 
     names = [name for name, _ in dataset.schema(table_name)]
-    until = dataset.queries_run + MAX_SUMMARIZE_QUERIES
-    frames, refused = _summarize_in_halves(dataset, quoted, names, until)
+    allowance = allowance if allowance is not None else Allowance()
+    frames, refused = _summarize_in_halves(dataset, quoted, names, allowance)
     stats = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     # Whether every refusal was proved, or the sweep gave up with columns untried.
-    return stats, refused, dataset.queries_run >= until
+    return stats, refused, allowance.exhausted
 
 
 def _summarize_in_halves(
-    dataset: Dataset, quoted: str, names: list[str], until: int
+    dataset: Dataset, quoted: str, names: list[str], allowance: Allowance
 ) -> tuple[list[pd.DataFrame], list[str]]:
     """SUMMARIZE these columns together, halving to find whichever defeats it.
 
@@ -139,11 +168,11 @@ def _summarize_in_halves(
     was asked. Halving isolates the same column in about a dozen queries.
 
     Halving is cheap per bad column and not free: sixty-seven of them in a
-    400-column file still came to 482 queries. So the sweep runs to `until` and
-    then stops, because a workspace that can describe most of its columns and
+    400-column file still came to 482 queries. So the sweep spends an allowance
+    and then stops, because a workspace that can describe most of its columns and
     answer nothing is worse than one that describes fewer and works.
     """
-    if dataset.queries_run >= until:
+    if not allowance.spend():
         return [], list(names)
 
     projection = ", ".join(quote_identifier(name) for name in names)
@@ -160,13 +189,15 @@ def _summarize_in_halves(
         return [frame], []
 
     middle = len(names) // 2
-    left, left_refused = _summarize_in_halves(dataset, quoted, names[:middle], until)
-    right, right_refused = _summarize_in_halves(dataset, quoted, names[middle:], until)
+    left, left_refused = _summarize_in_halves(dataset, quoted, names[:middle], allowance)
+    right, right_refused = _summarize_in_halves(dataset, quoted, names[middle:], allowance)
     return left + right, left_refused + right_refused
 
 
-def profile_table(dataset: Dataset, table_name: str) -> TableProfile:
-    stats, unsummarised, gave_up = _summarize(dataset, table_name)
+def profile_table(
+    dataset: Dataset, table_name: str, allowance: Allowance | None = None
+) -> TableProfile:
+    stats, unsummarised, gave_up = _summarize(dataset, table_name, allowance)
     row_count = dataset.row_count(table_name)
     exact_distinct = _exact_distinct(dataset, table_name, stats, row_count)
     findings = _findings(stats, row_count, exact_distinct)

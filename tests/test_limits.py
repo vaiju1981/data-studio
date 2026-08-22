@@ -300,16 +300,23 @@ def test_running_out_of_queries_is_not_swallowed_column_by_column() -> None:
     budget is not that kind of failure — retried against every remaining column it
     produces a table with no statistics and no reason given — so it has its own
     type and stops the search."""
+    from smart_data_studio.config import MAX_SUMMARIZE_QUERIES
     from smart_data_studio.dataset import OutOfQueries
-    from smart_data_studio.profile import _summarize_in_halves
+    from smart_data_studio.profile import Allowance, _summarize_in_halves
 
     dataset = Dataset.load([CsvSource.from_upload("s.csv", b"a,b\n1,2\n")])
     try:
         assert isinstance(OutOfQueries("x"), RuntimeError)
         dataset.queries_run = spent = 10**9
-        frames, refused = _summarize_in_halves(dataset, '"s"', ["a", "b"], spent + 60)
+        allowance = Allowance()
+        frames, refused = _summarize_in_halves(dataset, '"s"', ["a", "b"], allowance)
         assert not frames and refused == ["a", "b"]
-        assert dataset.queries_run == spent, "it tried again for each column"
+        # How many attempts it took is not asserted: the reload above rebinds
+        # OutOfQueries, so the class profile.py caught at import time is no longer
+        # the class this dataset raises, and the count moves with the test order.
+        # That no query ran is the property, and it holds either way.
+        assert dataset.queries_run == spent, "it went back to the workspace for each column"
+        assert allowance.left < MAX_SUMMARIZE_QUERIES
     finally:
         dataset.close()
 
@@ -339,5 +346,70 @@ def test_a_file_where_most_columns_defeat_summarize_still_leaves_a_workspace() -
         assert any("the search for them was stopped" in finding for finding in findings)
         # And the workspace it hands back is one that still works.
         assert dataset.query("SELECT count(*) AS n FROM w").frame.iloc[0, 0] == 40
+    finally:
+        dataset.close()
+
+
+def test_unsummarizable_columns_share_one_budget_across_tables() -> None:
+    """The fallback allowance belongs to the workspace. Giving every table a new
+    allowance lets a valid multi-file upload spend the full session during load."""
+    from smart_data_studio.config import MAX_SUMMARIZE_QUERIES
+    from smart_data_studio.profile import profile_dataset
+
+    width = 100
+    header = ",".join(f"c{index}" for index in range(width))
+    rows = [
+        ",".join(
+            "1e400" if (column % 2 == 0 and line % 2 == 0) else str(column)
+            for column in range(width)
+        )
+        for line in range(4)
+    ]
+    body = (header + "\n" + "\n".join(rows) + "\n").encode()
+    sources = [CsvSource.from_upload(f"t{index}.csv", body) for index in range(9)]
+
+    dataset = Dataset.load(sources)
+    try:
+        before = dataset.queries_run
+        profiles = profile_dataset(dataset)
+        spent = dataset.queries_run - before
+        assert len(profiles) == len(sources)
+        assert spent <= MAX_SUMMARIZE_QUERIES + len(sources) * 5
+        assert dataset.query("SELECT count(*) AS n FROM t0").frame.iloc[0, 0] == 4
+    finally:
+        dataset.close()
+
+
+def test_one_bad_table_among_many_healthy_ones_is_still_described() -> None:
+    """The allowance counts its own attempts, not the workspace's query counter.
+
+    Watching that counter, ordinary profiling spent the allowance itself: sixteen
+    healthy tables were enough, and the one table that needed the fallback came
+    back with none of its sixty columns described — the common case paying for the
+    pathological one the bound exists to catch.
+    """
+    from smart_data_studio.profile import profile_dataset
+
+    width = 60
+    header = ",".join(f"c{index}" for index in range(width))
+
+    def body(bad: bool) -> bytes:
+        rows = [
+            ",".join(
+                "1e400" if (bad and column == 7 and line % 2 == 0) else str(column)
+                for column in range(width)
+            )
+            for line in range(6)
+        ]
+        return (header + "\n" + "\n".join(rows) + "\n").encode()
+
+    sources = [CsvSource.from_upload(f"t{index}.csv", body(False)) for index in range(15)]
+    sources.append(CsvSource.from_upload("t15.csv", body(True)))
+
+    dataset = Dataset.load(sources)
+    try:
+        last = profile_dataset(dataset)[-1]
+        assert len(last.stats) == width - 1, "the fallback never ran for the table that needed it"
+        assert any("c7 —" in finding for finding in last.findings)
     finally:
         dataset.close()
