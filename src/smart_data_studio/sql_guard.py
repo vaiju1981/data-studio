@@ -58,6 +58,7 @@ def validate_select(sql: str, allowed_tables: set[str], withheld: set[str] | Non
                 f"Column(s) withheld as sensitive on this deployment: {', '.join(named)}. "
                 "They are not in the schema and cannot be selected, filtered or grouped on."
             )
+        _refuse_whole_row_values(statement)
 
     # The timeout contains a runaway after the fact; these refuse the obvious ones
     # before any work starts. Both bounds sit well above real analytics.
@@ -74,6 +75,38 @@ def validate_select(sql: str, allowed_tables: set[str], withheld: set[str] | Non
             "Flatten it or use a CTE."
         )
     return statement.sql(dialect="duckdb")
+
+
+def _refuse_whole_row_values(statement: exp.Expression) -> None:
+    """Refuse a table used as a value, which is every column at once under one name.
+
+    DuckDB reads a bare table name in an expression as a STRUCT of the whole row,
+    so `SELECT people FROM people` returns the withheld columns inside a column
+    called `people` — naming nothing the guard above looks for, and carrying a
+    name nothing on the way out recognises. `to_json(people)` and a cast to
+    VARCHAR do the same and lose the struct type on the way, so this cannot be
+    caught by inspecting the result either.
+
+    Only reachable where the operator withheld something, and only for an
+    unqualified name matching a table in this same query. A column genuinely
+    sharing its table's name is refused with it; qualifying it says which was
+    meant, which DuckDB needs in that case anyway.
+    """
+    rows = {table.name.lower() for table in statement.find_all(exp.Table) if table.name}
+    rows |= {table.alias.lower() for table in statement.find_all(exp.Table) if table.alias}
+    used = sorted(
+        {
+            column.name
+            for column in statement.find_all(exp.Column)
+            if not column.table and column.name.lower() in rows
+        }
+    )
+    if used:
+        raise UnsafeQuery(
+            f"{', '.join(used)} names a table, not a column, and DuckDB reads that as the "
+            "whole row — including the columns withheld as sensitive. Select the columns "
+            "you want by name, or qualify it if you meant a column of the same name."
+        )
 
 
 def _depth(node: exp.Expression, level: int = 0) -> int:
