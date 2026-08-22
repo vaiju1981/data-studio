@@ -230,3 +230,15 @@ def test_a_series_with_real_negatives_keeps_them() -> None:
     swinging = [50.0 if index % 2 else -50.0 for index in range(24)]
     result = timeseries.forecast(timeseries.prepare(monthly(swinging), "month", "amount"), 6)
     assert not any("held at zero" in note for note in result["notes"])
+
+
+def test_coverage_survives_a_row_dropped_for_a_missing_value() -> None:
+    """date and value were filtered with dropna while coverage was read from the
+    original frame, so one missing value made the two different lengths and the
+    analysis raised instead of reading the periods that were complete."""
+    frame = monthly([100.0] * 7 + [None])
+    frame["days"] = [31, 29, 31, 30, 31, 30, 31, 12]
+
+    series = timeseries.prepare(frame, "month", "amount", "days")
+    assert len(series.values) == 7
+    assert "Every period is fully covered" in series.notes[0]

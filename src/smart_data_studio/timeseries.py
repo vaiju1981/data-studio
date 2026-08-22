@@ -72,11 +72,18 @@ def prepare(
     incompleteness is proved rather than inferred from the value, and a genuine
     collapse is never mistaken for a partial period.
     """
-    for column in (date_column, value_column):
+    wanted = [date_column, value_column]
+    if coverage_column is not None:
+        wanted.append(coverage_column)
+    for column in wanted:
         if column not in frame.columns:
             raise NotEnoughData(f"Column not found: {column}. Available: {list(frame.columns)}")
 
-    working = frame[[date_column, value_column]].dropna()
+    # Coverage is carried through the same dropna as the rest. Read from the
+    # original frame it kept the length it started at, so a single missing value
+    # made the two series different lengths and the analysis raised instead of
+    # reading the periods that were complete.
+    working = frame[wanted].dropna(subset=[date_column, value_column])
     dates = pd.to_datetime(working[date_column], errors="coerce")
     if dates.isna().any():
         raise NotEnoughData(f"{date_column} does not parse as dates")
@@ -100,13 +107,9 @@ def prepare(
 
     notes: list[str] = []
     if coverage_column is not None:
-        if coverage_column not in frame.columns:
-            raise NotEnoughData(
-                f"Column not found: {coverage_column}. Available: {list(frame.columns)}"
-            )
         covered = (
             pd.Series(
-                pd.to_numeric(frame[coverage_column], errors="coerce").to_numpy(),
+                pd.to_numeric(working[coverage_column], errors="coerce").to_numpy(),
                 index=pd.DatetimeIndex(dates),
             )
             .groupby(level=0)
