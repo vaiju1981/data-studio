@@ -63,6 +63,24 @@ def test_filesystem_escape_passes_shape_guard_for_duckdb_to_block() -> None:
     assert "READ_CSV_AUTO" in sql.upper()
 
 
+def test_flat_predicates_are_not_mistaken_for_nesting() -> None:
+    """A WHERE clause of ten ANDs parses as a leaning binary tree, and counting
+    every AST child read that as thirteen levels deep and refused it — an ordinary
+    filter, turned away by the guard meant for a runaway generated query."""
+    flat = "SELECT * FROM sales WHERE " + " AND ".join(f"c{index} = {index}" for index in range(10))
+    assert "c9" in validate_select(flat, {"sales"})
+
+
+def test_genuinely_nested_queries_are_still_counted() -> None:
+    """The other half: the old measure called three subqueries twelve levels and
+    let them through, so it was refusing the wrong thing in both directions."""
+    sql = "SELECT * FROM sales"
+    for _ in range(20):
+        sql = f"SELECT * FROM ({sql})"
+    with pytest.raises(UnsafeQuery, match="queries deep"):
+        validate_select(sql, {"sales"})
+
+
 def test_a_column_withheld_as_sensitive_cannot_be_named() -> None:
     """Hiding a column from the schema is not the same as refusing it in SQL, and
     an alias would carry it past any check made on the result."""

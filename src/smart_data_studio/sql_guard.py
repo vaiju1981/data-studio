@@ -70,14 +70,23 @@ def validate_select(sql: str, allowed_tables: set[str], withheld: set[str] | Non
     depth = _depth(statement)
     if depth > MAX_QUERY_DEPTH:
         raise UnsafeQuery(
-            f"This query nests {depth} levels deep; the limit is {MAX_QUERY_DEPTH}. "
+            f"This query nests {depth} queries deep; the limit is {MAX_QUERY_DEPTH}. "
             "Flatten it or use a CTE."
         )
     return statement.sql(dialect="duckdb")
 
 
 def _depth(node: exp.Expression, level: int = 0) -> int:
+    """How many queries deep the deepest branch goes.
+
+    Only a query counts as a level. Counting every AST child instead measured
+    expression shape: ten flat AND predicates parse as a leaning binary tree and
+    were refused as thirteen levels of nesting, while three genuinely nested
+    subqueries came to twelve and passed. The bound exists to refuse a generated
+    query that nests without end, so it counts the thing that nests.
+    """
+    inner = level + isinstance(node, (exp.Select, exp.SetOperation))
     children = [child for child in node.args.values() if isinstance(child, exp.Expression)]
     nested = [item for value in node.args.values() if isinstance(value, list) for item in value]
     children += [item for item in nested if isinstance(item, exp.Expression)]
-    return max((_depth(child, level + 1) for child in children), default=level)
+    return max((_depth(child, inner) for child in children), default=inner)
