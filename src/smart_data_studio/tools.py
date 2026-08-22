@@ -501,6 +501,32 @@ class AnalysisTools:
             may_sample=False,
         )
 
+    def find_outliers(self, dimension: str, measure: str) -> str:
+        """Find which individual entities stand apart from the rest on a measure.
+
+        Use this for "which machines, accounts, services or stores are behaving
+        unusually". Ranking by the biggest number answers a different question —
+        the busiest entity wins whatever it is doing — so this measures distance
+        from the rest of the population instead.
+
+        Prefer a rate or a ratio over a raw total: on a total, standing apart
+        mostly means being large. If the result says the measure is skewed, divide
+        it by whatever drives its size and call this again.
+
+        Args:
+          dimension: Column identifying the entities, such as an id or a name.
+          measure: Numeric column to judge them on. A rate reads better than a total.
+
+        Returns:
+          JSON listing the entities furthest from the population median, each with
+          a score in units of the median absolute deviation.
+        """
+        return self._on_frame(
+            "outliers",
+            f"{measure} across {dimension}",
+            lambda frame: analysis.find_outliers(frame, dimension, measure),
+        )
+
     def relate(self, target: str) -> str:
         """Rank every column by strength of association with a target column.
 

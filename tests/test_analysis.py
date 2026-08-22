@@ -224,3 +224,92 @@ def test_a_comparison_over_a_few_groups_still_lists_them_all() -> None:
 
     assert len(result["groups"]) == 3
     assert "all of them are listed" in result["note"]
+
+
+def outlier_population(seed: int = 1) -> pd.DataFrame:
+    """A population whose totals span three orders of magnitude, two genuinely
+    large members, and one member that is broken rather than big."""
+    rng = np.random.default_rng(seed)
+    size = 200
+    return pd.DataFrame(
+        {
+            "machine": [f"m{index}" for index in range(size)] + ["huge1", "huge2", "broken"],
+            "total": np.concatenate([rng.lognormal(7, 1.2, size), [400_000, 380_000], [900]]),
+            "rate": np.concatenate([rng.normal(8, 0.4, size), [8.1, 7.9], [22.0]]),
+        }
+    )
+
+
+def test_standing_apart_is_not_the_same_as_being_large() -> None:
+    """The failure this exists for: asked which machines were unusual, the model
+    ranked by the largest raw gap, so the busiest machine won whatever it was
+    doing. On the rate, the two largest are ordinary and the broken one is not."""
+    found = analysis.find_outliers(outlier_population(), "machine", "rate")
+    flagged = {item["entity"] for item in found["outliers"]}
+
+    assert "broken" in flagged, found["outliers"]
+    assert not flagged & {"huge1", "huge2"}, "the biggest entities were flagged for being big"
+    assert found["outliers"][0]["entity"] == "broken"
+    assert found["outliers"][0]["direction"] == "high"
+
+
+def test_a_skewed_total_says_so_instead_of_pretending() -> None:
+    """Statistics cannot rescue the wrong measure: on a long tail, far from the
+    median and large are the same thing. So it says so and names the fix, rather
+    than returning the head of the tail as though it were a finding."""
+    skewed = analysis.find_outliers(outlier_population(), "machine", "total")
+    assert "skew_warning" in skewed
+    assert "rate or a ratio" in skewed["skew_warning"]
+
+    # ...and stays quiet on a measure where the flagged list is not the tail.
+    clean = analysis.find_outliers(outlier_population(), "machine", "rate")
+    assert "skew_warning" not in clean, clean.get("skew_warning")
+
+
+def test_an_outlier_cannot_hide_behind_the_spread_it_creates() -> None:
+    """Mean and standard deviation are the obvious choice and the wrong one.
+
+    An outlier inflates the deviation it is then measured against, and the effect
+    has a hard ceiling: a z-score cannot exceed (n-1)/sqrt(n) however extreme the
+    value is, so at sixty entities nothing can score past about 7.8 — a million
+    against a population of tens reads the same as a mild deviation. The median
+    and the MAD are not moved by the point being tested.
+    """
+    rng = np.random.default_rng(3)
+    ordinary = rng.normal(10, 1, 60)
+    frame = pd.DataFrame(
+        {
+            "who": [f"e{index}" for index in range(61)],
+            "value": np.append(ordinary, 1_000_000.0),
+        }
+    )
+
+    found = analysis.find_outliers(frame, "who", "value")
+    # Not the only one flagged — at this threshold an ordinary draw lands past it
+    # now and then — but first, and by a distance nothing else comes near.
+    assert found["outliers"][0]["entity"] == "e60"
+
+    values = frame["value"].to_numpy()
+    plain_z = (1_000_000 - values.mean()) / values.std(ddof=1)
+    assert plain_z < np.sqrt(len(values)), "a z-score is capped by the sample size"
+    assert found["outliers"][0]["score"] > 100 * plain_z
+
+
+@pytest.mark.parametrize(
+    ("label", "frame", "because"),
+    [
+        (
+            "too few to have a population",
+            pd.DataFrame({"who": list("abcde"), "value": [1.0, 2, 3, 4, 99]}),
+            "at least",
+        ),
+        (
+            "no spread to stand apart from",
+            pd.DataFrame({"who": [f"e{i}" for i in range(40)], "value": [5.0] * 40}),
+            "no spread",
+        ),
+    ],
+)
+def test_find_outliers_refuses_what_it_cannot_answer(label, frame, because) -> None:
+    with pytest.raises(analysis.NotAnalysable, match=because):
+        analysis.find_outliers(frame, "who", "value")

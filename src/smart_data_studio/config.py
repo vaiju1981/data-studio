@@ -194,6 +194,20 @@ PER_ROW_CHANGE_SHARE = 0.95
 
 # A column with more levels than this is an identifier, not a dimension to sweep.
 MAX_DRIVER_LEVELS = 50
+# Iglewicz and Hoaglin's cut for the modified z-score, which is built on the median
+# and the median absolute deviation rather than the mean and the standard
+# deviation — an outlier inflates both of those and hides itself behind them.
+OUTLIER_SCORE = 3.5
+# Below this there is no population for an entity to be unusual against.
+MIN_OUTLIER_ENTITIES = 12
+MAX_OUTLIERS_REPORTED = 15
+# Past this the measure is a long tail. On its own that says little — one genuine
+# outlier skews an otherwise ordinary measure — so it is only worth saying when
+# the flagged list is also crowded, which is what a tail being mistaken for
+# anomalies actually looks like.
+SKEWED_ABOVE = 2.0
+CROWDED_ABOVE = 0.05
+
 # Below this a group cannot support a test: Cliff's delta from one observation is
 # 1.0, which reads as a maximal effect.
 MIN_COMPARISON_ROWS = 10

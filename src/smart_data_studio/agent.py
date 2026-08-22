@@ -585,6 +585,7 @@ class DataAgent:
             self.tools.compare_groups,
             self.tools.rank_drivers,
             self.tools.relate,
+            self.tools.find_outliers,
         ]
 
     def _chat(self, **kwargs: Any) -> Any:

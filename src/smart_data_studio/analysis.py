@@ -7,12 +7,17 @@ import pandas as pd
 from scipy import stats
 
 from smart_data_studio.config import (
+    CROWDED_ABOVE,
     MAX_COMPARISON_GROUPS,
     MAX_DRIVER_LEVELS,
+    MAX_OUTLIERS_REPORTED,
     MAX_RELATE_SAMPLE,
     MAX_TEST_SAMPLE,
     MIN_ASSOCIATION_ROWS,
     MIN_COMPARISON_ROWS,
+    MIN_OUTLIER_ENTITIES,
+    OUTLIER_SCORE,
+    SKEWED_ABOVE,
 )
 
 # Romano's conventions for Cliff's delta. Cohen's 0.2/0.5/0.8 belong to d and
@@ -302,3 +307,82 @@ def relate(frame: pd.DataFrame, target: str) -> dict[str, object]:
             "column explains — for categorical ones. It measures association, not cause."
         ),
     }
+
+
+def find_outliers(frame: pd.DataFrame, dimension: str, measure: str) -> dict[str, object]:
+    """Which entities stand apart from the rest of their population on a measure.
+
+    Asked which machines behaved unusually, the model ranked by the largest raw
+    gap — so the busiest machine won whatever it was doing, and the question went
+    unanswered. Standing apart is a question about distance from the rest, not
+    about size, and it needs the rest to be measured.
+
+    Median and median absolute deviation rather than mean and standard deviation:
+    an outlier inflates both of those, which is how it hides behind them. Each
+    entity is summarised by its mean, so a result already carrying one row per
+    entity is used as it stands.
+    """
+    _require(frame, dimension, measure)
+    values = pd.to_numeric(frame[measure], errors="coerce")
+    if values.notna().sum() == 0:
+        raise NotAnalysable(f"{measure} is not numeric")
+
+    working = pd.DataFrame({dimension: frame[dimension], measure: values}).dropna()
+    per_entity = working.groupby(dimension)[measure].mean()
+    if len(per_entity) < MIN_OUTLIER_ENTITIES:
+        raise NotAnalysable(
+            f"{dimension} has {len(per_entity)} values with data; at least "
+            f"{MIN_OUTLIER_ENTITIES} are needed before one can stand apart from the rest. "
+            "Compare them directly instead."
+        )
+
+    middle = float(per_entity.median())
+    deviation = float((per_entity - middle).abs().median())
+    if deviation == 0:
+        raise NotAnalysable(
+            f"More than half of {dimension} share the same {measure}, so there is no spread "
+            "to stand apart from. Aggregate differently, or compare the groups directly."
+        )
+    # 0.6745 is the MAD of a standard normal, so a score reads on the same scale as
+    # a z-score for data that is normal and stays meaningful for data that is not.
+    score = 0.6745 * (per_entity - middle) / deviation
+    flagged = score[score.abs() >= OUTLIER_SCORE].sort_values(key=abs, ascending=False)
+
+    skew = float(per_entity.skew()) if len(per_entity) > 2 else 0.0
+    result: dict[str, object] = {
+        "dimension": dimension,
+        "measure": measure,
+        "entities": int(len(per_entity)),
+        "median": round(middle, 4),
+        "median_absolute_deviation": round(deviation, 4),
+        "flagged": int(len(flagged)),
+        "outliers": [
+            {
+                "entity": str(name),
+                "value": round(float(per_entity[name]), 4),
+                "score": round(float(score[name]), 2),
+                "direction": "high" if score[name] > 0 else "low",
+            }
+            for name in flagged.index[:MAX_OUTLIERS_REPORTED]
+        ],
+        "reading": (
+            f"score is distance from the median of all {len(per_entity):,} in units of the "
+            f"median absolute deviation; anything past {OUTLIER_SCORE} is reported. It "
+            "measures distance from the rest, not size, so the largest entity is not "
+            "flagged for being large."
+        ),
+    }
+    if len(flagged) > MAX_OUTLIERS_REPORTED:
+        result["note"] = (
+            f"{len(flagged):,} entities passed the threshold; the {MAX_OUTLIERS_REPORTED} "
+            "furthest out are listed."
+        )
+    crowded = len(flagged) / len(per_entity) > CROWDED_ABOVE
+    if abs(skew) >= SKEWED_ABOVE and crowded:
+        result["skew_warning"] = (
+            f"{measure} is heavily skewed ({skew:.1f}), so most of what stands out is the "
+            "head of a long tail rather than anything anomalous. A rate or a ratio — the "
+            "measure divided by whatever drives its size — usually answers 'unusual' better "
+            "than a total does."
+        )
+    return result
