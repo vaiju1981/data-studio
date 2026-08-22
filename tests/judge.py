@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 
 import ollama
@@ -128,6 +129,10 @@ def _first_json_object(text: str) -> dict:
     return found if isinstance(found, dict) else {}
 
 
+class JudgeUnusable(RuntimeError):
+    """The judge returned nothing usable, which is not the same as a clean answer."""
+
+
 @dataclass(frozen=True)
 class Finding:
     dimension: str
@@ -188,32 +193,55 @@ def grade(question: str, answer_text: str, evidence: str, client=None) -> dict[s
             },
         ],
     )
-    found = _first_json_object(reply.message.content or "").get("findings", [])
+    text = reply.message.content or ""
+    found = _first_json_object(text).get("findings", [])
     graded = {
         item["dimension"]: Finding(
             dimension=item["dimension"],
-            failed=bool(item["failed"]),
+            failed=bool(item.get("failed")),
             quote=str(item.get("quote", "")),
             why=str(item.get("why", "")),
         )
         for item in found
-        if item.get("dimension") in RUBRIC
+        if isinstance(item, dict) and item.get("dimension") in RUBRIC
     }
-    # A dimension the judge skipped is not a pass. Saying so is the difference
-    # between "checked and clean" and "never looked at".
-    missing = set(RUBRIC) - set(graded)
-    for name in missing:
-        graded[name] = Finding(name, False, "", "the judge returned no verdict for this")
+    # A dimension the judge did not rule on is not a clean one. Padding it to
+    # "not failed" is how an unparseable reply reads as four passes — which is
+    # precisely what happened the first time this ran and the endpoint answered
+    # in YAML. There is no silent pass here: either every fault was ruled on or
+    # the judge is unusable for this answer and says so.
+    missing = sorted(set(RUBRIC) - set(graded))
+    if missing:
+        raise JudgeUnusable(
+            f"no verdict for {', '.join(missing)}. The judge replied: {text[:400]!r}"
+        )
     return graded
 
 
-def failures(graded: dict[str, Finding]) -> list[Finding]:
-    """Only the faults that were both found and quoted.
+def quotes(quote: str, answer_text: str) -> bool:
+    """Whether the quote was copied from the answer rather than paraphrased."""
+    squash = re.compile(r"\s+")
+    if not quote.strip():
+        return False
+    return squash.sub(" ", quote).strip().lower() in squash.sub(" ", answer_text).strip().lower()
 
-    An unquoted failure is dropped on purpose: the judge was told to copy the
-    words, and one that cannot is describing something it did not find.
+
+def failures(graded: dict[str, Finding], answer_text: str) -> list[Finding]:
+    """The faults the judge found and could point at in the answer.
+
+    A fault it cannot quote is neither counted nor dropped. Dropping it is a
+    silent pass and counting it trusts a judge that may have invented the whole
+    thing, so it raises: what it means is that this verdict needs a human, not
+    that the answer was clean.
     """
-    return [item for item in graded.values() if item.failed and item.quote.strip()]
+    found = [item for item in graded.values() if item.failed]
+    unquotable = [item for item in found if not quotes(item.quote, answer_text)]
+    if unquotable:
+        raise JudgeUnusable(
+            "found a fault it could not quote from the answer: "
+            + "; ".join(f"{item.dimension} said {item.quote[:90]!r}" for item in unquotable)
+        )
+    return found
 
 
 def describe(graded: dict[str, Finding]) -> str:

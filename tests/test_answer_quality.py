@@ -18,11 +18,10 @@ Skipped unless the CSV is present and USE_LLM=1 is set:
 from __future__ import annotations
 
 import os
-import re
 from pathlib import Path
 
 import pytest
-from judge import describe, evidence_of, failures, grade
+from judge import describe, evidence_of, failures, grade, quotes
 
 from smart_data_studio.agent import DataAgent
 from smart_data_studio.dataset import CsvSource, Dataset
@@ -61,12 +60,6 @@ CLEAN = (
     "many customers signed up in January, so the drop is measured against January's "
     "actives rather than against the cohort itself."
 )
-
-
-def _said(quote: str, answer: str) -> bool:
-    """Whether the judge quoted the answer rather than paraphrasing it."""
-    squash = lambda text: re.sub(r"\s+", " ", text).strip().lower()  # noqa: E731
-    return bool(quote.strip()) and squash(quote) in squash(answer)
 
 
 # A claim one division away from the evidence. The judge faulted this as an
@@ -124,7 +117,7 @@ def test_the_judge_catches_a_planted_fault(fault: str, answer: str) -> None:
     graded = grade("How is the January cohort doing month over month?", answer, EVIDENCE)
 
     assert graded[fault].failed, f"{fault} was planted and not found: {describe(graded)}"
-    assert _said(graded[fault].quote, answer), (
+    assert quotes(graded[fault].quote, answer), (
         f"{fault} was not quoted from the answer: {graded[fault].quote!r}"
     )
 
@@ -142,7 +135,7 @@ def test_the_judge_leaves_a_sound_answer_alone(label: str, answer: str, evidence
     figures in the evidence is supported, and a judge demanding the arithmetic be
     spelled out faults the analyst for doing their job."""
     graded = grade("How do the segments compare?", answer, evidence)
-    assert not failures(graded), f"{label}: a sound answer was faulted: {describe(graded)}"
+    assert not failures(graded, answer), f"{label}: a sound answer was faulted: {describe(graded)}"
 
 
 # --- the real thing: questions chosen because they invite the fault -------------
@@ -174,7 +167,15 @@ TEMPTING: list[tuple[str, str]] = [
 @pytest.mark.parametrize(("label", "question"), TEMPTING, ids=[item[0] for item in TEMPTING])
 def test_a_real_answer_survives_its_own_evidence(agent, label: str, question: str) -> None:
     answer = agent.ask(question, multi_turn=False, depth="never")
+
+    # Before grading. A turn that failed still returns readable prose — the
+    # explain_failure text — and prose with no claims in it grades clean, so
+    # without this an outage would show up here as five well-judged answers.
     assert answer.text.strip(), f"{label}: empty answer"
+    assert "could not finish" not in answer.text, f"{label}: ran out of tool rounds"
+    assert "could not be completed" not in answer.text, f"{label}: the turn raised"
+    assert answer.results or answer.analyses, f"{label}: answered with no evidence"
 
     graded = grade(question, answer.text, evidence_of(answer))
-    assert not failures(graded), f"{label}: {describe(graded)}\n\nANSWER:\n{answer.text}"
+    found = failures(graded, answer.text)
+    assert not found, f"{label}: {describe(graded)}\n\nANSWER:\n{answer.text}"
