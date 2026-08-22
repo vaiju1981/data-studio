@@ -8,7 +8,11 @@ import pandas as pd
 import streamlit as st
 
 from smart_data_studio.agent import Answer
-from smart_data_studio.config import MAX_EXPORT_ROWS, MAX_SESSION_EXPORT_BYTES
+from smart_data_studio.config import (
+    MAX_DISPLAY_ROWS,
+    MAX_EXPORT_ROWS,
+    MAX_SESSION_EXPORT_BYTES,
+)
 from smart_data_studio.dataset import Dataset, QueryResult
 from smart_data_studio.profile import TableProfile
 from smart_data_studio.tools import AnalysisRecord
@@ -155,11 +159,25 @@ def _no_room_for_export(size: int) -> str:
     if held + size <= MAX_SESSION_EXPORT_BYTES:
         return ""
     return (
-        f"This export is {size / 1e6:.0f}MB and would take the session past its "
+        f"This export is about {size / 1e6:.0f}MB and would take the session past its "
         f"{MAX_SESSION_EXPORT_BYTES / 1e6:.0f}MB of prepared downloads "
         f"({held / 1e6:.0f}MB is already held). Download the ones you have — or "
         "narrow the query — and try again."
     )
+
+
+def _estimated_export_bytes(result: QueryResult) -> int:
+    """What the full export will weigh, priced from the rows already on screen.
+
+    Asked before the export is built, not after. Measuring the finished bytes
+    catches the caching but not the allocation that produced them, and the
+    allocation is the part that takes the process down.
+    """
+    shown = result.frame.head(MAX_DISPLAY_ROWS)
+    if not len(shown):
+        return 0
+    per_row = len(shown.to_csv(index=False).encode("utf-8")) / len(shown)
+    return int(per_row * min(result.total_rows, MAX_EXPORT_ROWS))
 
 
 def _export(result: QueryResult, key: str, dataset: Dataset) -> None:
@@ -179,6 +197,13 @@ def _export(result: QueryResult, key: str, dataset: Dataset) -> None:
     if prepared is None:
         exportable = min(result.total_rows, MAX_EXPORT_ROWS)
         if st.button(f"Prepare full export ({exportable:,} rows)", key=f"prepare-{key}"):
+            # Priced before it is built, then measured once it is: the estimate
+            # is what keeps the allocation from happening, and the measurement
+            # covers a result that turns out wider than the page suggested.
+            refusal = _no_room_for_export(_estimated_export_bytes(result))
+            if refusal:
+                st.error(refusal)
+                return
             with st.spinner("Building the export…"):
                 full = dataset.query(result.sql, row_limit=MAX_EXPORT_ROWS)
             payload = full.frame.to_csv(index=False).encode("utf-8")

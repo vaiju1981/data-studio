@@ -160,3 +160,23 @@ def test_an_evicted_workspace_clears_the_tab_instead_of_failing_later(monkeypatc
         assert any("released after sitting idle" in item.value for item in app.warning)
     finally:
         dataset.close()
+
+
+def test_an_export_is_priced_before_it_is_built() -> None:
+    """Measuring the finished bytes catches the caching but not the allocation
+    that produced them, and the allocation is what takes the process down. The
+    estimate comes off the rows already on screen, so it costs nothing."""
+    import pandas as pd
+
+    from smart_data_studio.dataset import QueryResult
+    from smart_data_studio.ui import render
+
+    frame = pd.DataFrame({f"c{index}": ["abcdefghij"] * 500 for index in range(20)})
+    result = QueryResult(sql="SELECT 1", frame=frame, total_rows=250_000)
+
+    per_row = len(frame.to_csv(index=False).encode("utf-8")) / len(frame)
+    estimate = render._estimated_export_bytes(result)
+    assert abs(estimate - per_row * 250_000) < per_row, "the estimate misprices the full export"
+
+    # An empty result prices at nothing rather than dividing by zero.
+    assert render._estimated_export_bytes(QueryResult("SELECT 1", frame.head(0), 0)) == 0
