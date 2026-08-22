@@ -203,6 +203,9 @@ MIN_COVERAGE_ROWS = 30
 
 # A column with more levels than this is an identifier, not a dimension to sweep.
 MAX_DRIVER_LEVELS = 50
+# Associations listed per kind. Numeric and categorical are ranked apart, so this
+# is the cap on each list rather than on the two together.
+MAX_ASSOCIATIONS = 15
 # Iglewicz and Hoaglin's cut for the modified z-score, which is built on the median
 # and the median absolute deviation rather than the mean and the standard
 # deviation — an outlier inflates both of those and hides itself behind them.
@@ -238,7 +241,7 @@ MAX_COHORT_HORIZON = 24
 # A forecast cannot reach further ahead than the history it was built from.
 MAX_FORECAST_PERIODS = 120
 
-# Eight tools means longer chains than six rounds can finish.
+# Eleven tools means longer chains than six rounds can finish.
 MAX_TOOL_ROUNDS = 10
 MAX_EXPLORE_ROUNDS = 8
 # A judgement question is worked as a few sub-questions, each on a short leash.
