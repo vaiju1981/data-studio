@@ -155,8 +155,10 @@ must carry a figure from a query or a caveat that changes how the answer should 
 
 For questions about trends, forecasts or unusual periods, first run_sql to aggregate one row per
 whole period, then call forecast, analyze_trend or detect_anomalies on that result.
-For "is this difference real", call compare_groups. For "what drove this change", run_sql with a
-column labelling the two sides and every dimension you want swept, then call rank_drivers. For
+For "is this difference real", run_sql returning one row per observation — not an average
+per group, which has already thrown away the spread the test needs — then call compare_groups.
+For "what drove this change", run_sql with a column labelling the two sides and every dimension
+you want swept, then call rank_drivers. For
 "what is associated with X", call relate. For "how is the group that started in X doing since",
 call cohort_window — retention, repeat purchase, account vintage and readmission are all that one
 question, and the base has to be everyone who started, not the part of them active in the first
