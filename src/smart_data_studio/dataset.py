@@ -551,12 +551,18 @@ class Dataset:
                 f"{source.name} has a column name longer than {MAX_HEADER_LENGTH} characters: "
                 f"{overlong[0][:60]}… — the first row is probably data, not a header."
             )
-        duplicates = sorted({name for name in names if names.count(name) > 1 and name})
+        # Compared case-insensitively because DuckDB is: a file with both `a` and
+        # `A` passed this check and then arrived as `a` and `A_1`, which is the
+        # silent rename the check exists to prevent.
+        folded = [name.casefold() for name in names]
+        duplicates = sorted(
+            {name for name, key in zip(names, folded, strict=True) if key and folded.count(key) > 1}
+        )
         if duplicates:
             raise ValueError(
                 f"{source.name} repeats column name(s): {', '.join(duplicates[:5])}. "
-                "DuckDB would rename the second to name_1 without saying so — rename "
-                "them yourself so the right one is read."
+                "DuckDB matches names without regard to case and would rename the second "
+                "to name_1 without saying so — rename them yourself so the right one is read."
             )
 
     @staticmethod

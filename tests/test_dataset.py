@@ -206,3 +206,10 @@ def test_repairing_a_column_type_leaves_the_column_order_alone() -> None:
         assert dict(dataset.schema("t"))["price"] == "DOUBLE"
     finally:
         dataset.close()
+
+
+def test_headers_differing_only_in_case_are_refused() -> None:
+    """DuckDB matches names without regard to case and renames the second to A_1.
+    Comparing them exactly let through the one collision the check exists for."""
+    with pytest.raises(ValueError, match="repeats column name"):
+        Dataset.load([CsvSource.from_upload("d.csv", b"a,A,b\n1,2,3\n")])
