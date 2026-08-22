@@ -9,7 +9,7 @@ import streamlit as st
 
 from smart_data_studio.agent import Answer
 from smart_data_studio.config import MAX_EXPORT_ROWS, MAX_SESSION_EXPORT_BYTES
-from smart_data_studio.dataset import Dataset, QueryResult
+from smart_data_studio.dataset import Dataset, QueryResult, csv_size
 from smart_data_studio.profile import TableProfile
 from smart_data_studio.tools import AnalysisRecord
 
@@ -162,24 +162,32 @@ def _no_room_for_export(size: int) -> str:
 
 def _export(result: QueryResult, key: str, dataset: Dataset) -> None:
     """Small results download straight away; large ones are rebuilt only on request."""
+    state_key = f"export-{key}"
     if not result.truncated:
+        prepared = st.session_state.get(state_key)
+        if prepared is None:
+            refusal = _no_room_for_export(csv_size(result.frame))
+            if refusal:
+                st.error(refusal)
+                return
+            prepared = result.frame.to_csv(index=False).encode("utf-8")
+            st.session_state[state_key] = prepared
         st.download_button(
             "Download CSV",
-            result.frame.to_csv(index=False).encode("utf-8"),
+            prepared,
             file_name=f"query-{key}.csv",
             mime="text/csv",
             key=f"download-{key}",
         )
         return
 
-    state_key = f"export-{key}"
     prepared = st.session_state.get(state_key)
     if prepared is None:
         exportable = min(result.total_rows, MAX_EXPORT_ROWS)
         if st.button(f"Prepare full export ({exportable:,} rows)", key=f"prepare-{key}"):
-            # Priced before it is built, then weighed once it is. The price is
-            # what keeps the allocation from happening; the weight covers the
-            # quoting the price does not model.
+            # Counted before it is built, then weighed once it is. The first pass
+            # prevents an oversized allocation; the second protects the cache if
+            # serialization ever changes between the two passes.
             refusal = _no_room_for_export(dataset.export_size(result.sql))
             if refusal:
                 st.error(refusal)

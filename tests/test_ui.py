@@ -176,7 +176,7 @@ def test_an_export_is_priced_over_every_row_before_it_is_built(monkeypatch) -> N
         result = dataset.query("SELECT * FROM t")
         priced = dataset.export_size(result.sql)
         weighed = len(result.frame.to_csv(index=False).encode("utf-8"))
-        assert abs(priced - weighed) < weighed * 0.01, f"priced {priced}, weighs {weighed}"
+        assert priced == weighed
 
         # The page alone would have said something far smaller.
         page = result.frame.head(200)
@@ -191,3 +191,61 @@ def test_an_export_is_priced_over_every_row_before_it_is_built(monkeypatch) -> N
         assert "would take the session past" in render._no_room_for_export(priced)
     finally:
         dataset.close()
+
+
+def test_export_price_bounds_csv_quoting_and_only_prices_the_row_cap() -> None:
+    from smart_data_studio.dataset import CsvSource, Dataset
+
+    quoted = '"' * 100
+    csv_value = '"' + quoted.replace('"', '""') + '"'
+    dataset = Dataset.load(
+        [CsvSource.from_upload("t.csv", ("note\n" + (csv_value + "\n") * 100).encode())]
+    )
+    try:
+        result = dataset.query("SELECT a.note FROM t a CROSS JOIN t b")
+        # More than DuckDB's 2,048-row vector, so chunk boundaries cannot repeat
+        # the header or omit a row from the count.
+        row_limit = 5_000
+        priced = dataset.export_size(result.sql, row_limit=row_limit)
+        capped = dataset.query(result.sql, row_limit=row_limit)
+        weighed = len(capped.frame.to_csv(index=False).encode("utf-8"))
+
+        assert result.total_rows == 10_000
+        assert len(capped.frame) == row_limit
+        assert priced == weighed
+
+        blob = dataset.query("SELECT encode(note) AS payload FROM t LIMIT 1")
+        blob_price = dataset.export_size(blob.sql)
+        blob_weight = len(blob.frame.to_csv(index=False).encode("utf-8"))
+        assert blob_price == blob_weight
+    finally:
+        dataset.close()
+
+
+def test_a_small_export_is_counted_before_its_bytes_are_allocated(monkeypatch) -> None:
+    import pandas as pd
+
+    from smart_data_studio.dataset import QueryResult
+    from smart_data_studio.ui import render
+
+    result = QueryResult(
+        sql="SELECT note FROM t",
+        frame=pd.DataFrame({"note": ['"' * 100]}),
+        total_rows=1,
+    )
+    errors: list[str] = []
+    downloads: list[bytes] = []
+    monkeypatch.setattr(render, "MAX_SESSION_EXPORT_BYTES", 100)
+    monkeypatch.setattr(render.st, "session_state", {})
+    monkeypatch.setattr(render.st, "error", errors.append)
+    monkeypatch.setattr(
+        render.st,
+        "download_button",
+        lambda _label, payload, **_kwargs: downloads.append(payload),
+    )
+
+    render._export(result, "small", object())
+
+    assert errors and "would take the session past" in errors[0]
+    assert not downloads
+    assert "export-small" not in render.st.session_state
