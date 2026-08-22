@@ -13,6 +13,7 @@ from smart_data_studio.config import (
     MAX_SHARED_COLUMNS,
     MAX_VARYING_COLUMNS,
     MIN_SENTINEL_ROWS,
+    PER_ROW_CHANGE_SHARE,
     SENSITIVE_COLUMNS,
     SENTINEL_GAP_RATIO,
     SENTINEL_SHARE,
@@ -231,25 +232,28 @@ def _entity_grain(
         for index in range(len(others))
     )
     try:
+        # repeated rides along on the same pass: a single-row entity cannot change
+        # anything, so it is the wrong denominator for how widely a column moves.
         row = dataset.connection.execute(
-            f"SELECT count(*) AS entities, {outer} FROM ("
-            f"SELECT {quote_identifier(key)}, {inner} "
+            f"SELECT count(*) AS entities, count_if(n > 1) AS repeated, {outer} FROM ("
+            f"SELECT {quote_identifier(key)}, count(*) AS n, {inner} "
             f"FROM {quote_identifier(table_name)} GROUP BY 1)"
         ).fetchone()
     except Exception:
         return None, None  # a profiling nicety must never stop the data from loading
 
-    entities = int(row[0])
-    # Two values per column now, so the stride is two.
-    stable = [others[index] for index in range(len(others)) if _number(row[1 + index * 2]) <= 1]
-    # Only dimensions: a per-row id or timestamp varies by definition, and listing
-    # those buries the one that carries meaning.
-    dimensions = _dimension_columns(stats, row_count)
+    entities, repeated = int(row[0]), int(row[1])
+    # Two values per column, after the two scalars in front of them.
+    stable = [others[index] for index in range(len(others)) if _number(row[2 + index * 2]) <= 1]
+    # Attributes only: a per-row id, timestamp or measure varies by definition, and
+    # listing those buries the one that carries meaning.
+    dimensions = _attribute_columns(stats, row_count, facts.measure_columns(dataset, table_name))
+    ceiling = repeated * PER_ROW_CHANGE_SHARE
     moving = sorted(
         (
-            (int(_number(row[2 + index * 2])), others[index])
+            (int(_number(row[3 + index * 2])), others[index])
             for index in range(len(others))
-            if _number(row[2 + index * 2]) > 0 and others[index] in dimensions
+            if 0 < _number(row[3 + index * 2]) < ceiling and others[index] in dimensions
         ),
         reverse=True,
     )
@@ -265,7 +269,7 @@ def _entity_grain(
 
     listed = ", ".join(stable[:12]) + (", …" if len(stable) > 12 else "") if stable else "none"
     changes = ", ".join(
-        f"{name} for {count:,} ({_share(count, entities)})" for count, name in moving
+        f"{name} for {count:,} ({_share(count, repeated)})" for count, name in moving
     )
     return (
         f"{key} repeats: {entities:,} values across {row_count:,} rows "
@@ -273,10 +277,10 @@ def _entity_grain(
         f"column varies, so adding one to GROUP BY {key} splits a single {key} across several "
         f"rows — aggregate those with MAX or SUM instead."
         + (
-            f" Changes within a single {key}: {changes}. One that changes for most of them "
-            f"is a per-row value; one that changes for a few reads everywhere else as a "
-            f"property of the {key} and is not, so filtering or grouping on it will not do "
-            f"what it appears to."
+            f" Changes within a single {key}, as a share of the {repeated:,} with more "
+            f"than one row: {changes}. One that changes for a few reads everywhere else as "
+            f"a property of the {key} and is not, so filtering or grouping on it will not "
+            f"do what it appears to."
             if changes
             else ""
         )
@@ -400,22 +404,48 @@ def _distinct_by_column(stats: pd.DataFrame) -> dict[str, float]:
     }
 
 
-def _dimension_columns(stats: pd.DataFrame, row_count: int) -> dict[str, float]:
-    """Text columns that describe an entity rather than identify or measure it.
+def _attribute_columns(
+    stats: pd.DataFrame, row_count: int, measures: set[str] = frozenset()
+) -> dict[str, float]:
+    """Columns that describe an entity rather than identify or measure it.
 
     Two ends are useless: a constant says nothing, and a value unique to nearly
-    every row is an identifier, whose commonest values mean nothing.
+    every row identifies rather than describes. Type is not part of it — a tier or
+    a store number stored as an integer describes an entity exactly as one stored
+    as text does, and reading text alone made those invisible.
+
+    Which leaves the measures, which vary per row by their nature and drown the
+    rest. They go by name, because §8 of the plan settled that snapshot and
+    measure cannot be told apart by cardinality: a numeric attribute whose name
+    says nothing — a credit limit, a target — still reads here as a measure.
     """
     found = {}
     for row in stats.to_dict(orient="records"):
         name = str(row["column_name"])
-        if "VARCHAR" not in str(row["column_type"]).upper() or is_sensitive(name):
+        if is_sensitive(name) or name in measures:
             continue
         distinct = _number(row.get("approx_unique"))
         if distinct < 2 or distinct > max(row_count * 0.9, 2):
             continue
         found[name] = distinct
     return found
+
+
+def _dimension_columns(stats: pd.DataFrame, row_count: int) -> dict[str, float]:
+    """Attribute columns whose values are worth listing, which means the text ones.
+
+    The dictionary quotes values back; a numeric attribute's commonest values say
+    nothing a reader cannot get from min, max and the quartiles already shown.
+    """
+    kinds = {
+        str(row["column_name"]): str(row["column_type"]).upper()
+        for row in stats.to_dict(orient="records")
+    }
+    return {
+        name: distinct
+        for name, distinct in _attribute_columns(stats, row_count).items()
+        if "VARCHAR" in kinds.get(name, "")
+    }
 
 
 def _dictionary(

@@ -396,3 +396,32 @@ def test_a_column_that_changes_for_a_handful_of_entities_is_still_named() -> Non
         assert "attr_4" not in finding, finding
     finally:
         dataset.close()
+
+
+def test_a_numeric_attribute_is_named_and_per_row_values_are_not() -> None:
+    """Reading only text columns hid a tier or a store number stored as an integer.
+    Reading every column instead let per-row values and measures drown the list, so
+    both are excluded: one by how widely it changes, the other by name.
+    """
+    rows = ["customer_id,tier_code,status,seen_at,amount"]
+    for customer in range(50):
+        for visit in range(3):
+            rows.append(
+                f"c{customer},{2 if customer < 3 and visit else 1},"
+                f"{'open' if visit else 'new'},2024-01-0{visit + 1},{100 + customer * visit}"
+            )
+    csv = ("\n".join(rows) + "\n").encode()
+
+    dataset = Dataset.load([CsvSource.from_upload("accounts.csv", csv)])
+    try:
+        assert dict(dataset.schema("accounts"))["tier_code"] == "BIGINT"
+        finding = next(
+            item for item in profile_table(dataset, "accounts").findings if "repeats" in item
+        )
+        assert "tier_code for 3" in finding, f"the numeric attribute was hidden: {finding}"
+        # status and seen_at change for every customer that has more than one row,
+        # so they are per-row values; amount is a measure by name.
+        for per_row in ("status", "seen_at", "amount"):
+            assert f"{per_row} for" not in finding, f"{per_row} should not be named: {finding}"
+    finally:
+        dataset.close()

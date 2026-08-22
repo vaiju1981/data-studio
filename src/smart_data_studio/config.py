@@ -184,6 +184,13 @@ MAX_SHARED_COLUMNS = 5
 # entity and is not, and only the second is something a reader cannot infer. The
 # middle is the least informative part, so that is what the cap drops.
 MAX_VARYING_COLUMNS = 8
+# A column that changes for virtually every entity holding more than one row is a
+# per-row value, not something the entity carries — a timestamp or a measurement.
+# "Every other column varies" already covers those, and naming them buries the
+# ones that change for a minority, which are the informative ones. Measured
+# against entities that have more than one row, since a single-row entity cannot
+# change anything.
+PER_ROW_CHANGE_SHARE = 0.95
 
 # A column with more levels than this is an identifier, not a dimension to sweep.
 MAX_DRIVER_LEVELS = 50
