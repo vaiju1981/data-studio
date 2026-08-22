@@ -273,3 +273,30 @@ def test_a_wide_separated_header_is_not_read_as_one_over_long_name() -> None:
     names = ";".join(f"column_number_{n}" for n in range(30))
     notes, _, _ = warnings_for("w.csv", f"{names}\n{';'.join('1' for _ in range(30))}\n".encode())
     assert not any("longer than" in note or "looks like data" in note for note in notes), notes
+
+
+def test_the_word_lists_a_header_is_written_in_can_be_replaced(monkeypatch) -> None:
+    """A header is written in somebody's language. The English defaults cover the
+    common case; a deployment whose columns are not English needs the lists
+    themselves, not a longer hardcoded version of them.
+    """
+    import smart_data_studio.dataset as module
+
+    # plz is a German postal code: digits, and emphatically not a quantity.
+    assert not module._looks_like_code("plz")
+    monkeypatch.setattr(module, "CODE_COLUMN_WORDS", ("plz", "kennnummer"))
+    assert module._looks_like_code("plz")
+    assert module._looks_like_code("kunden_kennnummer")
+
+    monkeypatch.setattr(module, "MISSING_VALUE_MARKERS", ("ohne", "k.a."))
+    assert module._markers() == "'ohne', 'k.a.'"
+
+
+def test_a_database_export_marks_its_nulls_with_backslash_n() -> None:
+    """What MySQL and Postgres write on export. Left unflagged it counts as a value."""
+    null_marker = "\\N"
+    lines = ["id,state"] + [
+        f"r{index},{null_marker if index % 3 == 0 else 'ok'}" for index in range(120)
+    ]
+    found, _rows, _table = warnings_for("dump.csv", ("\n".join(lines) + "\n").encode())
+    assert any(item.startswith("state holds values that mean 'missing'") for item in found), found

@@ -36,6 +36,7 @@ from smart_data_studio.config import (
     MAX_LOCAL_FILE_BYTES,
     MAX_SESSION_QUERIES,
     MAX_UPLOAD_BYTES,
+    MISSING_VALUE_MARKERS,
     QUERY_TIMEOUT_SECONDS,
     SAMPLE_ROWS,
     SENSITIVE_COLUMNS,
@@ -203,6 +204,16 @@ def decode_csv(name: str, content: bytes) -> tuple[str, str]:
         f"{name} is not readable as UTF-8 or Windows-1252. Re-save it as UTF-8 — "
         "most spreadsheets offer 'CSV UTF-8'."
     )
+
+
+def _markers() -> str:
+    """The missing-value markers as a SQL list, each literal escaped.
+
+    Backslash-N is what MySQL and Postgres write on export, and DuckDB reads a
+    backslash in a plain string literally, so it needs no unescaping — only the
+    quote does.
+    """
+    return ", ".join("'" + marker.replace("'", "''") + "'" for marker in MISSING_VALUE_MARKERS)
 
 
 def transcode_to_utf8(source: Path) -> Path:
@@ -409,8 +420,9 @@ class Dataset:
                     f"'^[-+]?[0-9]{{1,3}}([.,][0-9]{{3}})+([.,][0-9]+)?$') OR "
                     f"regexp_matches({column}, '^[-+]?[0-9]+,[0-9]+$')"
                     f") AS decorated_{index}",
-                    f"count_if(lower(trim({column})) IN "
-                    f"('na','n/a','nan','null','none','-','--','?','.','#n/a')) AS missing_{index}",
+                    # Markers, not values: a column really holding "-" as a category
+                    # is rarer than one where "-" means nobody filled it in.
+                    f"count_if(lower(trim({column})) IN ({_markers()})) AS missing_{index}",
                     # A leading zero marks a code, not a quantity. Casting it away
                     # is the bug, not the fix.
                     f"count_if(regexp_matches({column}, '^0[0-9]+$')) AS coded_{index}",
