@@ -73,6 +73,33 @@ SENSITIVE_COLUMNS = tuple(
     if part.strip()
 )
 
+
+def _words(name: str, default: str) -> tuple[str, ...]:
+    """A comma-separated word list from the environment, or the default."""
+    return tuple(
+        part.strip().lower() for part in os.environ.get(name, default).split(",") if part.strip()
+    )
+
+
+# Words that say a column identifies rather than measures. Configurable rather
+# than fixed because a header is written in somebody's language, and an English
+# list silently turns every other one into a measure.
+IDENTIFIER_WORDS = _words(
+    "SDS_IDENTIFIER_WORDS", "id,key,code,no,num,number,ref,uuid,guid,sku,isbn,ean"
+)
+
+# Names whose values are digits but not quantities, so a cast would strip the
+# leading zero that makes them correct. Same reasoning, same escape hatch.
+CODE_COLUMN_WORDS = _words(
+    "SDS_CODE_COLUMN_WORDS", "id,code,zip,postal,phone,account,number,no,ref"
+)
+
+# Text that means "missing" inside a column that stayed text. The backslash-N is
+# what MySQL and Postgres write on export; the rest are spreadsheet conventions.
+MISSING_VALUE_MARKERS = _words(
+    "SDS_MISSING_VALUE_MARKERS", r"na,n/a,n.a.,nan,null,nil,none,-,--,?,.,#n/a,\N"
+)
+
 # Per-session ceilings, so one conversation cannot consume the host.
 MAX_SESSION_QUERIES = _number("SDS_MAX_SESSION_QUERIES", 500)
 MAX_SESSION_EXPORT_BYTES = _number("SDS_MAX_SESSION_EXPORT_BYTES", 500 * 1024 * 1024)

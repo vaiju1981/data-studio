@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 
 from smart_data_studio.config import MAX_KEY_CANDIDATES, MAX_KEY_SEARCH_COLUMNS
-from smart_data_studio.dataset import Dataset, quote_identifier
+from smart_data_studio.dataset import Dataset, looks_like_identifier, quote_identifier
 from smart_data_studio.proposals import JoinCandidate, Ref
 
 
@@ -83,12 +83,6 @@ def _measure_keys(
     ]
 
 
-def _looks_like_identifier(name: str) -> bool:
-    """id, playerId, movie_id — an integer with a name like this is not a measure."""
-    lowered = name.lower()
-    return lowered == "id" or lowered.endswith(("id", "_id", "key", "code", "number", "no"))
-
-
 def verify_key(dataset: Dataset, ref: Ref) -> KeyFacts:
     """Measure whether these columns identify a row, counting nulls apart."""
     key, non_null = _key_sql(ref)
@@ -114,7 +108,7 @@ def measure_columns(dataset: Dataset, table: str) -> set[str]:
         upper = kind.upper()
         if any(part in upper for part in ("DOUBLE", "FLOAT", "DECIMAL", "REAL")):
             found.add(name)  # a float is never an identifier
-        elif any(part in upper for part in ("INT", "HUGEINT")) and not _looks_like_identifier(name):
+        elif any(part in upper for part in ("INT", "HUGEINT")) and not looks_like_identifier(name):
             # An integer can be either: orderId identifies, quantity measures.
             found.add(name)
     return found
@@ -145,7 +139,7 @@ def discover_keys(
     # excluding integers outright hides composite keys made of them.
     ranked = sorted(
         ((name, count) for name, count in distinct_by_column.items() if name not in measures),
-        key=lambda item: (not _looks_like_identifier(item[0]), -item[1]),
+        key=lambda item: (not looks_like_identifier(item[0]), -item[1]),
     )
     if not ranked:
         return []
@@ -156,7 +150,7 @@ def discover_keys(
     # A unique identifier is a key; a unique measure is a coincidence of the rows
     # loaded today. So a composite of identifiers is looked for first, and the
     # coincidence kept only as a fallback.
-    named = [facts for facts in exact if _looks_like_identifier(facts.ref.columns[0])]
+    named = [facts for facts in exact if looks_like_identifier(facts.ref.columns[0])]
     if named:
         return named[:MAX_KEY_CANDIDATES]
 

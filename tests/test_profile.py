@@ -5,8 +5,8 @@ import re
 import pytest
 
 from smart_data_studio.config import MAX_VARYING_COLUMNS
-from smart_data_studio.dataset import CsvSource, Dataset
-from smart_data_studio.profile import _looks_like_key, profile_table
+from smart_data_studio.dataset import CsvSource, Dataset, looks_like_identifier
+from smart_data_studio.profile import profile_table
 
 ROW_COUNT = 5000
 
@@ -94,10 +94,23 @@ def test_no_grain_finding_when_the_key_is_the_grain() -> None:
         ("valid", False),
         ("void", False),
         ("grid", False),
+        # Breadth the narrow version lacked: a file need not spell its key "id".
+        ("customer_ref", True),
+        ("member_key", True),
+        ("order_no", True),
+        ("sku", True),
+        # ...without the naive suffix match that called these identifiers.
+        ("casino", False),
+        ("pyramid", False),
+        ("turkey", False),
+        ("turnover", False),
+        # An all-lowercase compound has no boundary, so a long word matches loose.
+        ("barcode", True),
+        ("accountnumber", True),
     ],
 )
 def test_only_real_key_names_are_treated_as_entity_keys(name: str, expected: bool) -> None:
-    assert _looks_like_key(name) is expected
+    assert looks_like_identifier(name) is expected
 
 
 def test_a_column_merely_ending_in_id_gets_no_grain_finding() -> None:

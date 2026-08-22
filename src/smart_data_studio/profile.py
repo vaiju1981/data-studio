@@ -17,7 +17,12 @@ from smart_data_studio.config import (
     SENTINEL_GAP_RATIO,
     SENTINEL_SHARE,
 )
-from smart_data_studio.dataset import Dataset, is_sensitive, quote_identifier
+from smart_data_studio.dataset import (
+    Dataset,
+    is_sensitive,
+    looks_like_identifier,
+    quote_identifier,
+)
 
 
 @dataclass
@@ -205,7 +210,7 @@ def _entity_grain(
     candidates = [
         (distinct(row), str(row["column_name"]))
         for row in records
-        if _looks_like_key(str(row["column_name"])) and 1 < distinct(row) < row_count
+        if looks_like_identifier(str(row["column_name"])) and 1 < distinct(row) < row_count
     ]
     if not candidates:
         return None, None
@@ -282,18 +287,6 @@ def _share(count: int, total: int) -> str:
     """A readable proportion that does not round a rare one away to 0.0%."""
     portion = count / total if total else 0.0
     return f"{portion:.1%}" if portion >= 0.001 else "under 0.1%"
-
-
-def _looks_like_key(name: str) -> bool:
-    """id, player_id, playerId, playerID — but not paid, valid, PAID or PYRAMID.
-
-    The separator is what counts, so the letter before the suffix has to be lower
-    case: the boundary is present in playerId and absent in PAID.
-    """
-    lowered = name.lower()
-    if lowered == "id" or lowered.endswith("_id"):
-        return True
-    return len(name) > 2 and name.endswith(("Id", "ID")) and name[-3].islower()
 
 
 def _exact_distinct(

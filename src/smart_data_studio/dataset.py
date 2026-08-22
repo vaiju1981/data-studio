@@ -20,9 +20,11 @@ import pandas as pd
 from smart_data_studio import logs
 from smart_data_studio.config import (
     ALLOW_LOCAL_PATHS,
+    CODE_COLUMN_WORDS,
     DIGEST_SAMPLE_ROWS,
     DUCKDB_MEMORY_LIMIT,
     DUCKDB_THREADS,
+    IDENTIFIER_WORDS,
     MAX_CELL_CHARS_TO_MODEL,
     MAX_DISPLAY_ROWS,
     MAX_HEADER_LENGTH,
@@ -56,7 +58,12 @@ def safe_name(value: str) -> str:
     return (cleaned or "upload")[:100]
 
 
-CODE_WORDS = ("id", "code", "zip", "postal", "phone", "account", "number", "no", "ref")
+# Separator or camelCase boundary — playerId, player_id and player-id all split.
+WORD_BREAK = r"[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])"
+
+
+def words_in(name: str) -> list[str]:
+    return [part for part in re.split(WORD_BREAK, name) if part]
 
 
 def _looks_like_code(name: str) -> bool:
@@ -65,8 +72,26 @@ def _looks_like_code(name: str) -> bool:
     A zip code is entirely digits and entirely not a number: casting it drops the
     leading zero that makes it correct.
     """
-    parts = re.split(r"[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])", name)
-    return any(part.lower() in CODE_WORDS for part in parts if part)
+    return any(part.lower() in CODE_COLUMN_WORDS for part in words_in(name))
+
+
+def looks_like_identifier(name: str) -> bool:
+    """Whether the name says this column identifies a row rather than measures one.
+
+    Matched on the last word, so playerId, player_id and order_no qualify while
+    PAID, VOID, PYRAMID and casino — which merely end in those letters — do not.
+    Calling a measure an identifier is the failure that matters: it offers the
+    measure as a key and withholds it from the totals.
+
+    A long word also matches unanchored, because an all-lowercase compound like
+    barcode or accountnumber has no boundary to split on. Four characters up
+    only: the short words are exactly the ones that produce paid and casino.
+    """
+    parts = words_in(name)
+    if parts and parts[-1].lower() in IDENTIFIER_WORDS:
+        return True
+    lowered = name.lower()
+    return any(lowered.endswith(word) for word in IDENTIFIER_WORDS if len(word) >= 4)
 
 
 def is_sensitive(column: str) -> bool:
