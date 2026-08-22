@@ -245,5 +245,13 @@ MAX_EXPLORE_ROUNDS = 8
 MAX_PLAN_STEPS = 5
 MAX_STEP_ROUNDS = 5
 
+# Queries the profile may spend isolating columns that defeat SUMMARIZE. Halving
+# finds one bad column in about eighteen and four in about fifty-six, so this
+# covers a wide file with a handful of them. Past that the table is pathological
+# and the sweep is the wrong thing to be spending the session on: 200 bad columns
+# in a 400-column file took every one of MAX_SESSION_QUERIES and left the
+# workspace unable to answer anything.
+MAX_SUMMARIZE_QUERIES = _number("SDS_MAX_SUMMARIZE_QUERIES", 60)
+
 # Older tool results are replaced by a placeholder once this many newer ones exist.
 KEEP_TOOL_PAYLOADS = 4

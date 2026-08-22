@@ -307,8 +307,37 @@ def test_running_out_of_queries_is_not_swallowed_column_by_column() -> None:
     try:
         assert isinstance(OutOfQueries("x"), RuntimeError)
         dataset.queries_run = spent = 10**9
-        frames, refused = _summarize_in_halves(dataset, '"s"', ["a", "b"])
+        frames, refused = _summarize_in_halves(dataset, '"s"', ["a", "b"], spent + 60)
         assert not frames and refused == ["a", "b"]
         assert dataset.queries_run == spent, "it tried again for each column"
+    finally:
+        dataset.close()
+
+
+def test_a_file_where_most_columns_defeat_summarize_still_leaves_a_workspace() -> None:
+    """Halving is cheap per bad column and not free. Sixty-seven of them in a
+    400-column file came to 482 of the session's 500 queries, and two hundred took
+    every one — profiling finished and the workspace could then answer nothing.
+    The search is bounded, and says it stopped rather than claiming the columns
+    hold an infinity nobody looked for."""
+    from smart_data_studio.config import MAX_SUMMARIZE_QUERIES
+    from smart_data_studio.profile import profile_dataset
+
+    width, bad = 200, set(range(0, 200, 2))
+    header = ",".join(f"c{index}" for index in range(width))
+    rows = [
+        ",".join(("1e400" if (col in bad and line % 2 == 0) else str(col)) for col in range(width))
+        for line in range(40)
+    ]
+    body = (header + "\n" + "\n".join(rows) + "\n").encode()
+
+    dataset = Dataset.load([CsvSource.from_upload("w.csv", body)])
+    try:
+        before = dataset.queries_run
+        findings = profile_dataset(dataset)[0].findings
+        assert dataset.queries_run - before <= MAX_SUMMARIZE_QUERIES + 5
+        assert any("the search for them was stopped" in finding for finding in findings)
+        # And the workspace it hands back is one that still works.
+        assert dataset.query("SELECT count(*) AS n FROM w").frame.iloc[0, 0] == 40
     finally:
         dataset.close()

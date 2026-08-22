@@ -11,6 +11,7 @@ from smart_data_studio.config import (
     DICTIONARY_VALUES,
     MAX_CELL_CHARS_TO_MODEL,
     MAX_SHARED_COLUMNS,
+    MAX_SUMMARIZE_QUERIES,
     MAX_VARYING_COLUMNS,
     MIN_SENTINEL_ROWS,
     PER_ROW_CHANGE_SHARE,
@@ -105,7 +106,7 @@ def profile_dataset(dataset: Dataset) -> list[TableProfile]:
     return [profile_table(dataset, table) for table in dataset.tables]
 
 
-def _summarize(dataset: Dataset, table_name: str) -> tuple[pd.DataFrame, list[str]]:
+def _summarize(dataset: Dataset, table_name: str) -> tuple[pd.DataFrame, list[str], bool]:
     """SUMMARIZE, falling back to column by column when one column defeats it.
 
     stddev over a NaN or infinity raises OutOfRange, which otherwise takes the
@@ -114,18 +115,20 @@ def _summarize(dataset: Dataset, table_name: str) -> tuple[pd.DataFrame, list[st
     """
     quoted = quote_identifier(table_name)
     try:
-        return dataset.run(f"SUMMARIZE {quoted}").fetchdf(), []
+        return dataset.run(f"SUMMARIZE {quoted}").fetchdf(), [], False
     except Exception:
         logs.failure("summarize.per_column")
 
     names = [name for name, _ in dataset.schema(table_name)]
-    frames, refused = _summarize_in_halves(dataset, quoted, names)
+    until = dataset.queries_run + MAX_SUMMARIZE_QUERIES
+    frames, refused = _summarize_in_halves(dataset, quoted, names, until)
     stats = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-    return stats, refused
+    # Whether every refusal was proved, or the sweep gave up with columns untried.
+    return stats, refused, dataset.queries_run >= until
 
 
 def _summarize_in_halves(
-    dataset: Dataset, quoted: str, names: list[str]
+    dataset: Dataset, quoted: str, names: list[str], until: int
 ) -> tuple[list[pd.DataFrame], list[str]]:
     """SUMMARIZE these columns together, halving to find whichever defeats it.
 
@@ -135,7 +138,14 @@ def _summarize_in_halves(
     in a wide file spent most of the session's budget before the first question
     was asked. Halving isolates the same column in about a dozen queries.
 
+    Halving is cheap per bad column and not free: sixty-seven of them in a
+    400-column file still came to 482 queries. So the sweep runs to `until` and
+    then stops, because a workspace that can describe most of its columns and
+    answer nothing is worse than one that describes fewer and works.
     """
+    if dataset.queries_run >= until:
+        return [], list(names)
+
     projection = ", ".join(quote_identifier(name) for name in names)
     try:
         frame = dataset.run(f"SUMMARIZE (SELECT {projection} FROM {quoted})").fetchdf()
@@ -150,13 +160,13 @@ def _summarize_in_halves(
         return [frame], []
 
     middle = len(names) // 2
-    left, left_refused = _summarize_in_halves(dataset, quoted, names[:middle])
-    right, right_refused = _summarize_in_halves(dataset, quoted, names[middle:])
+    left, left_refused = _summarize_in_halves(dataset, quoted, names[:middle], until)
+    right, right_refused = _summarize_in_halves(dataset, quoted, names[middle:], until)
     return left + right, left_refused + right_refused
 
 
 def profile_table(dataset: Dataset, table_name: str) -> TableProfile:
-    stats, unsummarised = _summarize(dataset, table_name)
+    stats, unsummarised, gave_up = _summarize(dataset, table_name)
     row_count = dataset.row_count(table_name)
     exact_distinct = _exact_distinct(dataset, table_name, stats, row_count)
     findings = _findings(stats, row_count, exact_distinct)
@@ -177,9 +187,14 @@ def profile_table(dataset: Dataset, table_name: str) -> TableProfile:
         findings.insert(0, grain)
     if unsummarised:
         # Said rather than silently missing, or the column reads as one the file
-        # does not have.
+        # does not have. Two different reasons, and claiming the wrong one would
+        # tell the reader a column holds an infinity when nobody ever looked.
         findings.append(
-            f"No statistics could be computed for {', '.join(unsummarised)} — the values "
+            f"No statistics could be computed for {len(unsummarised)} column(s) — so many "
+            "columns here defeat SUMMARIZE that the search for them was stopped. They are "
+            "still queryable."
+            if gave_up
+            else f"No statistics could be computed for {', '.join(unsummarised)} — the values "
             "include NaN or infinity, which DuckDB cannot summarise. The column is still "
             "queryable."
         )
