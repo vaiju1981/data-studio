@@ -51,7 +51,7 @@ BANK: list[tuple[int, str, list[float]]] = [
     # Tier 1 — simple
     (1, "How many unique players visited, and what was total coin in?", [460_442]),
     (2, "What is the split of visits by club level?", [3_652_373]),
-    (3, "Which 10 cities send the most players?", []),
+    (3, "Which 10 cities send the most players?", [154_541]),
     (4, "What is the average theo win per visit by geo type?", [55.04]),
     (5, "How many visits had zero coin in?", [5_332_339]),
     # Tier 2 — moderate
@@ -62,8 +62,8 @@ BANK: list[tuple[int, str, list[float]]] = [
     ),
     (7, "Monthly coin in for the last 12 months with month-over-month change.", []),
     (8, "Which hosts manage the most players, and what is their total theo win?", []),
-    (9, "Average theo win per visit by club level and geo type together.", []),
-    (10, "What share of total coin in comes from the top 1% of players?", []),
+    (9, "Average theo win per visit by club level and geo type together.", [1_050.15]),
+    (10, "What share of total coin in comes from the top 1% of players?", [69.8]),
     # Tier 3 — multi-step
     (
         11,
@@ -73,7 +73,7 @@ BANK: list[tuple[int, str, list[float]]] = [
     (
         12,
         "Which club level has the largest gap between theo win and actual net win? Then show that tier's monthly trend.",
-        [],
+        [40_821_555],
     ),
     (
         13,
@@ -88,7 +88,7 @@ BANK: list[tuple[int, str, list[float]]] = [
     (
         15,
         "Find the day of week with the lowest theo win per visit, then check whether that pattern holds within each club level.",
-        [],
+        [57.96],
     ),
     # Tier 4 — very complex
     (
@@ -127,8 +127,13 @@ BANK: list[tuple[int, str, list[float]]] = [
     (
         22,
         "What was the worst full calendar month for net win? Ignore any partial months at the start or end.",
-        [],
+        [16_353_518],
     ),
+    # Not anchored, and the reason is worth keeping: market holds one value for
+    # every row, so the total is unambiguous — and a good answer never states it.
+    # Asked this, the model queried market, found the single value, said so, and
+    # broke down by geoType instead while naming the substitution. Anchoring the
+    # total would fail exactly the answer the trap is here to reward.
     (23, "Break down theo win by market segment.", []),
     (24, "Which players do we need for a win-back campaign? Use a 90 day lapse.", []),
     # Tier 6 — analytics tools
@@ -170,6 +175,35 @@ BANK: list[tuple[int, str, list[float]]] = [
         [],
     ),
 ]
+
+
+# The SQL each anchor was read off, so a number in the bank can be re-derived
+# rather than trusted. `{table}` is filled in from the loaded dataset.
+DERIVATIONS: dict[int, str] = {
+    1: "SELECT count(DISTINCT playerId) FROM {table}",
+    2: "SELECT count(*) FROM {table} WHERE clubLevel = 'GOLD'",
+    3: "SELECT count(DISTINCT playerId) FROM {table} WHERE city = 'LAS VEGAS'",
+    4: "SELECT avg(theoWin) FROM {table} WHERE geoType = 'LOCAL'",
+    5: "SELECT count(*) FROM {table} WHERE coinIn = 0",
+    9: "SELECT avg(theoWin) FROM {table} WHERE clubLevel = 'CHAIRMAN' AND geoType = 'NATIONAL'",
+    10: (
+        "WITH per AS (SELECT playerId, sum(coinIn) AS c FROM {table} GROUP BY 1), "
+        "ranked AS (SELECT c, ntile(100) OVER (ORDER BY c DESC) AS pct FROM per) "
+        "SELECT sum(c) FILTER (WHERE pct = 1) / sum(c) * 100 FROM ranked"
+    ),
+    12: "SELECT sum(theoWin) - sum(netWin) FROM {table} WHERE clubLevel = 'CHAIRMAN'",
+    15: "SELECT avg(theoWin) FROM {table} WHERE dayname(day) = 'Monday'",
+    22: "SELECT sum(netWin) FROM {table} WHERE day >= '2024-10-01' AND day < '2024-11-01'",
+    37: (
+        "SELECT abs((SELECT sum(theoWin) FROM {table} WHERE day BETWEEN '2026-01-01' AND '2026-06-23')"
+        " - (SELECT sum(theoWin) FROM {table} WHERE day BETWEEN '2025-01-01' AND '2025-06-23'))"
+    ),
+}
+
+# q25 anchors the forecast's own level, which is an ETS fit rather than a fact in
+# the file. It is the one anchor no query can reproduce, and it is named here so
+# the gap is deliberate rather than an oversight.
+NOT_FROM_SQL = {25}
 
 
 @pytest.fixture(scope="module")
@@ -378,4 +412,26 @@ def test_a_judgement_question_is_investigated_at_the_right_grain(agent) -> None:
     sql = " ".join(result.sql for result in answer.results).lower()
     assert "per player" in steps or "playerid" in sql, (
         f"never reached the entity grain: {answer.plan}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("number", "expected"),
+    [(item[0], value) for item in BANK for value in item[2] if item[0] not in NOT_FROM_SQL],
+    ids=[f"q{item[0]:02d}" for item in BANK for _ in item[2] if item[0] not in NOT_FROM_SQL],
+)
+def test_every_anchor_is_still_true_of_the_file(agent, number: int, expected: float) -> None:
+    """An anchor is a number somebody typed once. Read it off the file again.
+
+    A stale anchor fails every question carrying it, and the failure looks like
+    the model got worse — the most expensive kind of wrong to be, because the next
+    hour goes into the prompt. Tighter than the 1% answers are matched with: this
+    compares a constant against its own query, and the only slack it needs is the
+    rounding in the constant.
+    """
+    table = agent.dataset.tables[0]
+    assert number in DERIVATIONS, f"q{number} carries an anchor with no derivation beside it"
+    measured = float(agent.dataset.query(DERIVATIONS[number].format(table=table)).frame.iloc[0, 0])
+    assert abs(measured - expected) <= abs(expected) * 0.001, (
+        f"q{number}: the bank says {expected:,.2f}, the file says {measured:,.2f}"
     )
