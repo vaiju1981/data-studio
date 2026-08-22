@@ -215,6 +215,38 @@ def test_question_bank(agent, number, question, anchors) -> None:
         assert mentions(answer.text, value), f"q{number}: expected {value:,.2f} in the answer"
 
 
+def test_a_cohort_is_measured_against_the_cohort(agent) -> None:
+    """The retention curve whose every figure was right and whose base was wrong.
+
+    7,349 players registered in January 2026; 6,780 of them visited that month.
+    Dividing the later months by 6,780 counts the 569 who first appeared later in
+    the numerators and leaves them out of the base, which reads as a steeper fall
+    than happened. The anchor is the cohort, because that is the number a hand
+    written query never asks for.
+    """
+    answer = agent.ask(
+        "How are the players who first registered in January 2026 doing month over month?",
+        multi_turn=False,
+        depth="never",
+    )
+    assert answer.results or answer.analyses, "answered with no evidence"
+    assert mentions(answer.text, 7_349), (
+        f"the cohort is 7,349; the answer never states it:\n{answer.text[:600]}"
+    )
+
+
+def test_unusual_is_answered_as_distance_not_as_size(agent) -> None:
+    """Asked which players were unusual, ranking by the largest number answers a
+    different question: the busiest wins whatever it is doing."""
+    answer = agent.ask(
+        "Which individual players are behaving unusually compared with the rest?",
+        multi_turn=False,
+        depth="never",
+    )
+    kinds = [record.kind for record in answer.analyses]
+    assert "outliers" in kinds, f"ranked by hand instead of measuring: {kinds}"
+
+
 def test_win_back_groups_by_player_alone(agent) -> None:
     """The original bug: GROUP BY playerId, lastVisit split one player across rows."""
     answer = agent.ask(

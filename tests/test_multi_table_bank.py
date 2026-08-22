@@ -255,6 +255,23 @@ def test_a_join_that_is_not_needed_is_not_made(agent) -> None:
     assert mentions(answer.text, 549_331_469), answer.text[:300]
 
 
+def test_an_unusual_machine_is_measured_against_the_estate(agent) -> None:
+    """Asked which machines behaved unusually, the model ranked by the largest raw
+    gap, so the busiest machine won whatever it was doing. Standing apart is a
+    question about distance from the other 3,050, and it has to be measured."""
+    answer = agent.ask(
+        "Which individual machines are behaving unusually compared with the rest of the estate?",
+        multi_turn=False,
+        depth="never",
+    )
+    kinds = [record.kind for record in answer.analyses]
+    assert "outliers" in kinds, f"ranked by hand instead of measuring: {kinds}"
+    measured = next(record for record in answer.analyses if record.kind == "outliers")
+    # Every flagged machine carries how many days it was seen, because two of them
+    # came back at 35 and -29 deviations on one day of data apiece.
+    assert all("observations" in item for item in measured.result["outliers"])
+
+
 def test_the_bank_needs_no_guard_refusals(agent) -> None:
     """The point of stating the grain in the profile: the model should write a
     correctly-grained join first time, leaving the guard as a backstop.
@@ -291,6 +308,22 @@ def test_player_bank(players, number, question, anchors) -> None:
         assert mentions(answer.text, anchor), (
             f"p{number}: expected ~{anchor:,} in:\n{answer.text[:400]}"
         )
+
+
+def test_a_cohort_across_two_files_is_measured_against_the_cohort(players) -> None:
+    """The same base error the single-file bank guards, with a join in the way:
+    7,349 players registered in January 2026 and 6,780 of them visited that
+    month, so the later months divided by the smaller number read as a steeper
+    fall than happened."""
+    answer = players.ask(
+        "How are the players who first registered in January 2026 doing month over month?",
+        multi_turn=False,
+        depth="never",
+    )
+    assert answer.results or answer.analyses, "answered with no evidence"
+    assert mentions(answer.text, 7_349), (
+        f"the cohort is 7,349; the answer never states it:\n{answer.text[:600]}"
+    )
 
 
 def test_visits_and_sessions_are_not_joined_on_the_player_alone(players) -> None:
