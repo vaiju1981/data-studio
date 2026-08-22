@@ -17,7 +17,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-from judge import RUBRIC, Finding, JudgeUnusable, failures, grade, quotes
+from judge import RUBRIC, Finding, JudgeUnusable, describe, failures, grade, quotes
 
 ANSWER = "Revenue rose to $4.2M in March, driven by the new pricing tier."
 
@@ -101,3 +101,19 @@ def test_a_fault_quoted_from_the_answer_counts() -> None:
 )
 def test_a_quote_must_come_from_the_answer(quote: str, expected: bool) -> None:
     assert quotes(quote, ANSWER) is expected
+
+
+def test_describe_never_throws_while_a_test_is_already_failing() -> None:
+    """It runs inside assertion messages, so a describe() that raises replaces the
+    finding you needed to read with a TypeError — and only when something failed,
+    which is the one moment it matters."""
+    graded = {name: Finding(name, False, "", "") for name in RUBRIC}
+    assert describe(graded, ANSWER) == "clean"
+
+    graded["invented_cause"] = Finding("invented_cause", True, "driven by the new pricing tier", "")
+    assert "invented_cause" in describe(graded, ANSWER)
+
+    # An unquotable fault would raise in failures(); describe still has to render.
+    graded["unstated_base"] = Finding("unstated_base", True, "something never written", "")
+    rendered = describe(graded, ANSWER)
+    assert "NOT QUOTED" in rendered, rendered

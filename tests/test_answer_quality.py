@@ -116,7 +116,7 @@ def test_the_judge_catches_a_planted_fault(fault: str, answer: str) -> None:
     """
     graded = grade("How is the January cohort doing month over month?", answer, EVIDENCE)
 
-    assert graded[fault].failed, f"{fault} was planted and not found: {describe(graded)}"
+    assert graded[fault].failed, f"{fault} was planted and not found: {describe(graded, answer)}"
     assert quotes(graded[fault].quote, answer), (
         f"{fault} was not quoted from the answer: {graded[fault].quote!r}"
     )
@@ -135,7 +135,9 @@ def test_the_judge_leaves_a_sound_answer_alone(label: str, answer: str, evidence
     figures in the evidence is supported, and a judge demanding the arithmetic be
     spelled out faults the analyst for doing their job."""
     graded = grade("How do the segments compare?", answer, evidence)
-    assert not failures(graded, answer), f"{label}: a sound answer was faulted: {describe(graded)}"
+    assert not failures(graded, answer), (
+        f"{label}: a sound answer was faulted: {describe(graded, answer)}"
+    )
 
 
 # --- the real thing: questions chosen because they invite the fault -------------
@@ -178,4 +180,4 @@ def test_a_real_answer_survives_its_own_evidence(agent, label: str, question: st
 
     graded = grade(question, answer.text, evidence_of(answer))
     found = failures(graded, answer.text)
-    assert not found, f"{label}: {describe(graded)}\n\nANSWER:\n{answer.text}"
+    assert not found, f"{label}: {describe(graded, answer.text)}\n\nANSWER:\n{answer.text}"

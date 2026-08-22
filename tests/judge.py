@@ -244,8 +244,18 @@ def failures(graded: dict[str, Finding], answer_text: str) -> list[Finding]:
     return found
 
 
-def describe(graded: dict[str, Finding]) -> str:
-    found = failures(graded)
+def describe(graded: dict[str, Finding], answer_text: str) -> str:
+    """A one-line summary for a failure message.
+
+    Takes the answer for the same reason failures() does, and never raises: this
+    runs while a test is already failing, and a describe() that throws replaces
+    the finding you need to read with a TypeError.
+    """
+    found = [item for item in graded.values() if item.failed]
     if not found:
         return "clean"
-    return "; ".join(f"{item.dimension}: {item.quote[:120]!r}" for item in found)
+    return "; ".join(
+        f"{item.dimension}: {item.quote[:120]!r}"
+        + ("" if quotes(item.quote, answer_text) else " (NOT QUOTED FROM THE ANSWER)")
+        for item in found
+    )
