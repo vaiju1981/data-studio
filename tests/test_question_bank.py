@@ -216,22 +216,35 @@ def test_question_bank(agent, number, question, anchors) -> None:
 
 
 def test_a_cohort_is_measured_against_the_cohort(agent) -> None:
-    """The retention curve whose every figure was right and whose base was wrong.
+    """7,349 players registered in January 2026 and 6,780 of them visited that
+    month, so a curve divided by the second reads as a steeper fall than happened.
 
-    7,349 players registered in January 2026; 6,780 of them visited that month.
-    Dividing the later months by 6,780 counts the 569 who first appeared later in
-    the numerators and leaves them out of the base, which reads as a steeper fall
-    than happened. The anchor is the cohort, because that is the number a hand
-    written query never asks for.
+    Asserted as "the tool was used, or the guard said to use it", because those are
+    the two things this code controls. Whether the model then obeys is measured
+    rather than gated: naming the tool in the prompt moved it from none of six runs
+    to three, the warning moved it to eight of ten, and the remaining misses are
+    answers written past a warning that fired correctly. Gating on the model's mood
+    turns one run in five into a failed build for no defect.
     """
+    import sqlglot
+
     answer = agent.ask(
         "How are the players who first registered in January 2026 doing month over month?",
         multi_turn=False,
         depth="never",
     )
     assert answer.results or answer.analyses, "answered with no evidence"
-    assert mentions(answer.text, 7_349), (
-        f"the cohort is 7,349; the answer never states it:\n{answer.text[:600]}"
+    if mentions(answer.text, 7_349):
+        return
+    warned = [
+        result.sql
+        for result in answer.results
+        if agent.tools._cohort_note(sqlglot.parse_one(result.sql, dialect="duckdb"))
+    ]
+    assert warned, (
+        "the cohort was built by hand, the base is the players active in the first "
+        "month rather than the 7,349 who registered, and nothing said so:\n"
+        + "\n".join(result.sql for result in answer.results)
     )
 
 

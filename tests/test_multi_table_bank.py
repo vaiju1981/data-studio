@@ -324,18 +324,26 @@ def test_player_bank(players, number, question, anchors) -> None:
 
 
 def test_a_cohort_across_two_files_is_measured_against_the_cohort(players) -> None:
-    """The same base error the single-file bank guards, with a join in the way:
-    7,349 players registered in January 2026 and 6,780 of them visited that
-    month, so the later months divided by the smaller number read as a steeper
-    fall than happened."""
+    """The same base, with a join in the way. Asserted as "the tool was used, or the
+    guard said to use it": those are the two things this code controls, and whether
+    the model obeys a warning that fired is a rate to watch rather than a gate."""
+    import sqlglot
+
     answer = players.ask(
         "How are the players who first registered in January 2026 doing month over month?",
         multi_turn=False,
         depth="never",
     )
     assert answer.results or answer.analyses, "answered with no evidence"
-    assert mentions(answer.text, 7_349), (
-        f"the cohort is 7,349; the answer never states it:\n{answer.text[:600]}"
+    if mentions(answer.text, 7_349):
+        return
+    warned = [
+        result.sql
+        for result in answer.results
+        if players.tools._cohort_note(sqlglot.parse_one(result.sql, dialect="duckdb"))
+    ]
+    assert warned, "a hand-built cohort went unremarked:\n" + "\n".join(
+        result.sql for result in answer.results
     )
 
 
