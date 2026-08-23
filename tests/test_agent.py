@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 import ollama
@@ -647,3 +648,57 @@ def test_a_failing_progress_sink_does_not_lose_the_answer() -> None:
         assert agent.ask("How much?", progress=broken).text == "North totals 25."
     finally:
         dataset.close()
+
+
+def test_arguments_arriving_as_a_string_are_the_models_mistake_not_the_turns_end() -> None:
+    """Some endpoints hand tool arguments back as a JSON string rather than a
+    mapping. Read outside the guard, that took the whole turn down — while every
+    other malformed call came back as an error the model corrects next round."""
+    agent = object.__new__(DataAgent)
+    agent._report = lambda _message: None
+
+    def run_sql(sql: str) -> str:
+        return json.dumps({"rows": [], "sql": sql})
+
+    call = SimpleNamespace(
+        function=SimpleNamespace(name="run_sql", arguments='{"sql": "SELECT 1"}')
+    )
+    assert "SELECT 1" in agent._invoke(call, [run_sql])
+
+    broken = SimpleNamespace(function=SimpleNamespace(name="run_sql", arguments="not json at all"))
+    answer = json.loads(agent._invoke(broken, [run_sql]))
+    assert "could not be read" in answer["error"], answer
+
+
+def test_a_turn_that_raises_still_leaves_the_history_on_a_reply() -> None:
+    """A user message placed straight after a tool result, with no reply between,
+    is a shape the model refuses. The out-of-rounds path guarded that and said so;
+    the exception path did not, so one failed turn poisoned every turn after it in
+    multi-turn mode."""
+    agent = object.__new__(DataAgent)
+    agent._report = lambda _message: None
+
+    rounds = {"n": 0}
+
+    def chat(**_kwargs):
+        rounds["n"] += 1
+        if rounds["n"] == 1:
+            return SimpleNamespace(
+                message=SimpleNamespace(
+                    tool_calls=[
+                        SimpleNamespace(function=SimpleNamespace(name="run_sql", arguments={}))
+                    ],
+                    model_dump=lambda **_: {"role": "assistant", "tool_calls": [{}]},
+                    content=None,
+                )
+            )
+        raise RuntimeError("the endpoint fell over mid-turn")
+
+    agent._chat = chat
+    messages: list[dict] = [{"role": "user", "content": "how many rows?"}]
+    with pytest.raises(RuntimeError):
+        agent._run_loop(messages, 5, [lambda **_kwargs: "{}"])
+
+    assert messages[-1]["role"] == "assistant", (
+        f"history left on a {messages[-1]['role']} message: the next question would follow it"
+    )

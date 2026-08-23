@@ -645,21 +645,30 @@ class DataAgent:
     def _run_loop(
         self, messages: list[dict[str, Any]], max_rounds: int, tools: list[Callable[..., str]]
     ) -> str:
-        for round_number in range(1, max_rounds + 1):
-            with logs.timed("model.call", round=round_number, tools=len(tools)):
-                response = self._chat(messages=messages, tools=tools)
-            message = response.message
-            messages.append(message.model_dump(exclude_none=True))
-            if not message.tool_calls:
-                return message.content or "Analysis complete."
-            for call in message.tool_calls:
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_name": call.function.name,
-                        "content": self._invoke(call, tools),
-                    }
-                )
+        try:
+            for round_number in range(1, max_rounds + 1):
+                with logs.timed("model.call", round=round_number, tools=len(tools)):
+                    response = self._chat(messages=messages, tools=tools)
+                message = response.message
+                messages.append(message.model_dump(exclude_none=True))
+                if not message.tool_calls:
+                    return message.content or "Analysis complete."
+                for call in message.tool_calls:
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_name": call.function.name,
+                            "content": self._invoke(call, tools),
+                        }
+                    )
+        except Exception:
+            # The rule below holds however the loop ends, not only when it runs out
+            # of rounds. An exception escaping here left the history finishing on a
+            # tool result, and in multi-turn that history is kept — so the next
+            # question landed straight after it and every turn afterwards failed on
+            # a shape the model will not accept.
+            self._close_history(messages)
+            raise
 
         # Out of rounds. Ask once more with no tools, so the model answers from what
         # it gathered rather than the user getting nothing after a dozen queries.
@@ -668,10 +677,18 @@ class DataAgent:
             text = final.message.content or EXHAUSTED_MESSAGE
         except Exception:
             text = EXHAUSTED_MESSAGE
-        # Never leave the history ending on a tool message: the next turn would then
-        # place a user message straight after a tool result, with no reply between.
-        messages.append({"role": "assistant", "content": text})
+        self._close_history(messages, text)
         return text
+
+    def _close_history(self, messages: list[dict[str, Any]], text: str = "") -> None:
+        """Leave the history on an assistant reply, whatever happened.
+
+        A user message placed straight after a tool result, with no reply between,
+        is a shape the model refuses — so one bad turn would otherwise poison every
+        turn after it.
+        """
+        if text or (messages and messages[-1].get("role") == "tool"):
+            messages.append({"role": "assistant", "content": text or EXHAUSTED_MESSAGE})
 
     def _invoke(self, call: Any, offered: list[Callable[..., str]]) -> str:
         """Run one tool call, from the tools this loop actually offered.
@@ -686,7 +703,16 @@ class DataAgent:
         function = available.get(name)
         if function is None:
             return json.dumps({"error": f"Unknown tool: {name}"})
-        arguments = dict(call.function.arguments)
+        try:
+            # Some endpoints hand the arguments back as a JSON string rather than a
+            # mapping. Read outside the guard below it took the whole turn down,
+            # while every other malformed call came back as an error the model
+            # could correct on the next round.
+            raw = call.function.arguments
+            arguments = dict(json.loads(raw) if isinstance(raw, str) else raw)
+        except Exception as error:
+            return json.dumps({"error": f"Arguments for {name} could not be read: {error}"})
+
         # The other tools are named after what they do, so their name is enough.
         sql = arguments.get("sql")
         self._report(" ".join(str(sql).split()) if sql else f"Running {name}")
