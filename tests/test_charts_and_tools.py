@@ -619,3 +619,40 @@ def test_a_rate_worked_out_by_hand_says_a_rate_tool_exists() -> None:
         assert "rate_warning" not in amount
     finally:
         dataset.close()
+
+
+def test_the_rate_note_catches_a_rate_written_as_a_division_across_a_join() -> None:
+    """The first version of the note looked for avg() over a 0/1 column in a single
+    table, which is not how the model writes a rate whenever the outcome lives
+    somewhere else: it left-joins and divides one count by another. Measured on the
+    domain fixtures, that shape was two of the four the note has to cover, and the
+    two it missed were the two that mattered.
+    """
+    accounts = "account_id,segment\n" + "".join(
+        f"{index},{'subprime' if index % 3 else 'prime'}\n" for index in range(60)
+    )
+    defaults = "account_id\n" + "".join(f"{index}\n" for index in range(0, 60, 4))
+    dataset = Dataset.load(
+        [
+            CsvSource.from_upload("accounts.csv", accounts.encode()),
+            CsvSource.from_upload("defaults.csv", defaults.encode()),
+        ]
+    )
+    try:
+        tools = AnalysisTools(dataset)
+        divided = json.loads(
+            tools.run_sql(
+                "SELECT a.segment, count(d.account_id) * 1.0 / count(*) AS rate "
+                "FROM accounts a LEFT JOIN defaults d USING (account_id) GROUP BY 1"
+            )
+        )
+        assert "rate_warning" in divided
+        assert "compare_rates" in divided["rate_warning"]
+
+        # A count that is not divided by anything is just a count.
+        counted = json.loads(
+            tools.run_sql("SELECT segment, count(*) AS n FROM accounts GROUP BY 1")
+        )
+        assert "rate_warning" not in counted
+    finally:
+        dataset.close()

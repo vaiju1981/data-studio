@@ -137,22 +137,33 @@ def test_typical_latency_is_not_answered_with_an_average(agents) -> None:
 def test_a_yes_or_no_outcome_is_compared_as_a_rate(agents) -> None:
     """Measured before this tool existed: the model got the denominator right and
     cautioned in prose — "small sample size, which typically implies lower
-    precision" — and had no way to say 14 of 32 is anywhere from 28% to 61%.
+    precision" — with no way to say 14 of 32 is anywhere from 28% to 61%. What it
+    reached for was compare_groups, which reports Cliff's delta for a 0/1 column
+    and called a sixfold difference in default risk medium.
 
-    What it reached for instead was compare_groups, which reported Cliff's delta
-    for a 0/1 column and called a sixfold difference in default risk medium.
+    Asked three times, because one run is a coin toss: selection measured about
+    four times in five, and a single-run assertion turns that into a test that
+    fails one week in five for no reason. The fixtures are small enough that three
+    runs cost seconds.
     """
     agent = agent_for(agents, "finance")
-    answer = agent.ask(
-        "What is the default rate for subprime accounts, and how precise is that estimate?",
-        multi_turn=False,
-        depth="never",
-    )
-    rates = [record for record in answer.analyses if record.kind == "rates"]
-    assert rates, f"the rate was worked out by hand:\n{answer.text}"
+    question = "What is the default rate for subprime accounts, and how precise is that estimate?"
 
-    subprime = next(group for group in rates[0].result["groups"] if group["group"] == "subprime")
-    assert (subprime["events"], subprime["observed"]) == (14, 32)
-    low, high = subprime["interval_95_pct"]
-    assert low < 30 and high > 58, f"the interval {low}-{high} does not carry the uncertainty"
-    assert mentions(answer.text, 43.75), answer.text
+    used, seen = 0, []
+    for _ in range(3):
+        answer = agent.ask(question, multi_turn=False, depth="never")
+        assert mentions(answer.text, 43.75), f"the rate itself is wrong:\n{answer.text}"
+        rates = [record for record in answer.analyses if record.kind == "rates"]
+        if not rates:
+            seen.append("worked out by hand")
+            continue
+        used += 1
+        subprime = next(
+            group for group in rates[0].result["groups"] if group["group"] == "subprime"
+        )
+        assert (subprime["events"], subprime["observed"]) == (14, 32)
+        low, high = subprime["interval_95_pct"]
+        assert low < 30 and high > 58, f"the interval {low}-{high} carries no uncertainty"
+        seen.append(f"compare_rates, {low}-{high}%")
+
+    assert used >= 2, "compare_rates was reached for at most once in three: " + "; ".join(seen)
