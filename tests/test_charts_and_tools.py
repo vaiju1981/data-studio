@@ -656,3 +656,24 @@ def test_the_rate_note_catches_a_rate_written_as_a_division_across_a_join() -> N
         assert "rate_warning" not in counted
     finally:
         dataset.close()
+
+
+def test_a_histogram_keeps_the_measure_it_was_given() -> None:
+    """y carries through: given one, plotly weighs each bar by it instead of
+    counting rows. Dropped, a chart captioned "spend by band" showed how many rows
+    fell in each band — a different claim from the one the answer made.
+
+    Read off the trace rather than the rendered bars, because plotly bins at draw
+    time: what matters is that the measure reached the figure at all.
+    """
+    frame = pd.DataFrame({"band": ["a", "a", "b"], "spend": [10.0, 30.0, 5.0]})
+
+    weighted = make_figure(frame, ChartSpec(kind="histogram", x="band", y="spend"))
+    carried = sorted(
+        float(value) for trace in weighted.data if trace.y is not None for value in trace.y
+    )
+    assert carried == [5.0, 10.0, 30.0], f"the measure never reached the chart: {carried}"
+
+    # And with no measure it still counts rows, which is what a histogram is for.
+    counted = make_figure(frame, ChartSpec(kind="histogram", x="band"))
+    assert all(trace.y is None for trace in counted.data)

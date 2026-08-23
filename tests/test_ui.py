@@ -280,3 +280,24 @@ def test_a_workspace_is_closed_when_the_host_fills_between_check_and_register(
     assert not app.exception
     assert app.session_state.dataset is None, "a workspace that was refused was adopted anyway"
     assert closed, "the refused workspace was dropped without closing its connection"
+
+
+def test_money_is_escaped_in_prose_and_left_alone_in_code() -> None:
+    """The escape exists because Streamlit reads $...$ as LaTeX and ate an answer
+    quoting two amounts. Inside a fence it shows what it is given, so the backslash
+    is not consumed but printed: a WHERE clause on '$US' came out as '\\$US', which
+    is neither the query that ran nor one that would."""
+    from smart_data_studio.ui.render import as_text
+
+    answer = (
+        "Revenue was $4.2M against $3.1M.\n\n"
+        "```sql\nSELECT sum(x) FROM t WHERE tag = '$US'\n```\n"
+        "Inline `cost > $100` too, and $50 outside it."
+    )
+    shown = as_text(answer)
+
+    assert "\\$4.2M" in shown and "\\$3.1M" in shown, "prose is what the escape is for"
+    assert "\\$50" in shown
+    fenced = shown.split("```")[1]
+    assert "'$US'" in fenced and "\\$" not in fenced, f"a backslash reached the code: {fenced!r}"
+    assert "`cost > $100`" in shown, "an inline span is code too"

@@ -13,6 +13,9 @@ from smart_data_studio.dataset import Dataset, QueryResult, csv_size
 from smart_data_studio.profile import TableProfile
 from smart_data_studio.tools import AnalysisRecord
 
+# A fenced block or an inline span, kept whole so nothing is escaped inside it.
+_CODE = re.compile(r"(```.*?```|`[^`\n]*`)", re.S)
+
 
 def as_text(markdown: str) -> str:
     """Escape dollar signs so a money figure is not rendered as mathematics.
@@ -22,8 +25,15 @@ def as_text(markdown: str) -> str:
     between **$509k" came out as one equation with the spaces stripped. Every
     answer here is about data and some of that data is money, so the delimiter is
     worth more as a currency symbol than as maths.
+
+    Code is left alone. Inside a fence Streamlit shows what it is given, so the
+    backslash is not consumed — it is printed, and a WHERE clause on '$US' came
+    out as '\\$US', which is neither the query that ran nor one that would.
     """
-    return re.sub(r"(?<!\\)\$", r"\\$", markdown)
+    return "".join(
+        part if _CODE.fullmatch(part) else re.sub(r"(?<!\\)\$", r"\\$", part)
+        for part in _CODE.split(markdown)
+    )
 
 
 def answer(item: Answer, key: str, dataset: Dataset) -> None:

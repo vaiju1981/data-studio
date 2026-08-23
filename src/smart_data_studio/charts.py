@@ -62,7 +62,10 @@ def make_figure(frame: pd.DataFrame, spec: ChartSpec) -> Figure:
     }
 
     if kind == "histogram":
-        figure = px.histogram(**common, color=spec.color)
+        # y carries through: given one, plotly weighs each bar by it instead of
+        # counting rows. Dropped, a chart captioned "spend by band" showed how many
+        # rows fell in each band, which is a different claim from the answer's.
+        figure = px.histogram(**common, y=spec.y, color=spec.color)
     elif kind == "box":
         figure = px.box(**common, y=spec.y, color=spec.color)
     elif kind == "pie":
@@ -72,6 +75,7 @@ def make_figure(frame: pd.DataFrame, spec: ChartSpec) -> Figure:
             values=spec.y,
             color=spec.color,
             title=spec.title,
+            labels=labels,
             hole=0.45,
             color_discrete_sequence=PALETTE,
         )
