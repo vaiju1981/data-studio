@@ -6,6 +6,12 @@ instead of retyped, and it is the one thing the app writes to disk.
 
 A path that no longer exists is dropped on the way out rather than offered and
 then failed on, which also means a mistyped path removes itself.
+
+The list belongs to the machine, not to a person: one file, and every tab of a
+hosted instance reads it. That is only ever reached where server paths are
+enabled, which is the same setting the config already calls disqualifying for a
+shared deployment and which the container turns off — so the two are tied
+together here rather than left to line up by luck.
 """
 
 from __future__ import annotations
@@ -13,6 +19,8 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+
+from smart_data_studio.config import ALLOW_LOCAL_PATHS
 
 # Enough to cover the files someone actually works with, short enough to stay a
 # list rather than a search problem.
@@ -26,6 +34,8 @@ def _store() -> Path:
 
 def recall() -> list[str]:
     """Remembered paths, newest first, minus any that have since gone away."""
+    if not ALLOW_LOCAL_PATHS:
+        return []
     try:
         saved = json.loads(_store().read_text())
     except (OSError, ValueError):
@@ -37,7 +47,7 @@ def recall() -> list[str]:
 
 def remember(paths: list[Path]) -> None:
     """Move these to the front of the list, keeping it deduplicated and bounded."""
-    if not paths:
+    if not paths or not ALLOW_LOCAL_PATHS:
         return
     fresh = [str(Path(path).expanduser().resolve()) for path in paths]
     combined = fresh + [item for item in recall() if item not in fresh]

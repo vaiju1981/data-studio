@@ -84,3 +84,29 @@ def test_only_paths_are_written_never_contents(state_dir) -> None:
     written = Path(recent._store()).read_text()
     assert "111-22-3333" not in written and "Ada" not in written
     assert json.loads(written) == [str(path.resolve())]
+
+
+def test_the_list_is_empty_where_server_paths_are_disabled(monkeypatch, tmp_path) -> None:
+    """The file belongs to the machine, so every tab of a hosted instance reads
+    one list — and one user's "Delete my data" clears everyone's.
+
+    That is only reachable where server paths are enabled, the setting the config
+    already calls disqualifying for a shared deployment and the container turns
+    off. Tied together here rather than left to line up by luck.
+    """
+    import importlib
+
+    from smart_data_studio import config
+
+    monkeypatch.setenv("SDS_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("SDS_ALLOW_LOCAL_PATHS", "false")
+    importlib.reload(config)
+    module = importlib.reload(importlib.import_module("smart_data_studio.recent"))
+    try:
+        module.remember([tmp_path / "sales.csv"])
+        assert module.recall() == []
+        assert not (tmp_path / "recent.json").exists(), "a hosted instance wrote a path list"
+    finally:
+        monkeypatch.delenv("SDS_ALLOW_LOCAL_PATHS", raising=False)
+        importlib.reload(config)
+        importlib.reload(module)

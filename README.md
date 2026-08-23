@@ -135,14 +135,16 @@ python tools/lock.py
 Two settings in `src/smart_data_studio/config.py` decide what you run against:
 
 ```python
-OLLAMA_HOST = "http://localhost:11434"  # whichever Ollama endpoint you use
-MODEL_ID = "your-model-here"  # any tool-calling model it serves
+MODEL_ID = os.environ.get("SDS_MODEL_ID", "gemma4:31b-cloud")
+OLLAMA_HOST = os.environ.get("SDS_OLLAMA_HOST", "http://localhost:11434")
 ```
 
-Point `OLLAMA_HOST` wherever your Ollama runs — this machine, a server you host,
-or a hosted Ollama endpoint — and pick any model that endpoint serves. Those two
-lines are the only place a model or provider is named; nothing else in the code
-depends on either.
+Set `SDS_OLLAMA_HOST` to wherever your Ollama runs — this machine, a server you
+host, or a hosted Ollama endpoint — and `SDS_MODEL_ID` to any model that endpoint
+serves, or edit the defaults above. The prefix matters: the ollama client reads
+`OLLAMA_HOST` itself, so the unprefixed name would leave two things reading one
+variable. Those two lines are the only place a model or provider is named;
+nothing else in the code depends on either.
 
 **Tool calling is the one requirement**, because the agent is a tool loop and
 cannot run a query without it. Ollama lists tool-capable models at
