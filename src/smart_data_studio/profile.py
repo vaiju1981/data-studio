@@ -143,12 +143,16 @@ def _summarize(
     profile. One bad column costs its own statistics and nothing else.
     """
     quoted = quote_identifier(table_name)
+    names = [name for name, _ in dataset.schema(table_name)]
     try:
         return dataset.run(f"SUMMARIZE {quoted}").fetchdf(), [], False
+    except OutOfQueries:
+        # Named apart from the rest: nothing below will succeed either, and logging
+        # this as a table SUMMARIZE refused reports a cause that is not the one.
+        return pd.DataFrame(), names, True
     except Exception:
         logs.failure("summarize.per_column")
 
-    names = [name for name, _ in dataset.schema(table_name)]
     allowance = allowance if allowance is not None else Allowance()
     frames, refused = _summarize_in_halves(dataset, quoted, names, allowance)
     stats = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()

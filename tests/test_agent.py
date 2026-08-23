@@ -702,3 +702,32 @@ def test_a_turn_that_raises_still_leaves_the_history_on_a_reply() -> None:
     assert messages[-1]["role"] == "assistant", (
         f"history left on a {messages[-1]['role']} message: the next question would follow it"
     )
+
+
+def test_a_plan_that_merely_starts_with_nonetheless_is_not_cancelled() -> None:
+    """The trigger read "NONE" as a substring of the first forty characters, so a
+    plan opening "Nonetheless, check the grain first" cancelled itself and the
+    question was answered in one pass when it had asked for several."""
+    agent = object.__new__(DataAgent)
+    agent.dataset = SimpleNamespace(schema_text=lambda: 'Table "visits" ("a" INTEGER)')
+    replies = {
+        "NONE": [],
+        "  none  ": [],
+        "NONE — one query settles it": [],
+        (
+            "Nonetheless, start by checking the grain of the visits table\n"
+            "Then compare theo win per visit between the two segments\n"
+            "Finally look at how that gap moved by month"
+        ): 3,
+    }
+    for reply, expected in replies.items():
+
+        def answer_with(reply=reply, **_kwargs):
+            return SimpleNamespace(message=SimpleNamespace(content=reply))
+
+        agent._chat = answer_with
+        steps = agent._plan("does the gap matter?")
+        if expected == []:
+            assert steps == [], f"{reply!r} should cancel the plan, got {steps}"
+        else:
+            assert len(steps) == expected, f"{reply!r} should plan {expected} steps, got {steps}"

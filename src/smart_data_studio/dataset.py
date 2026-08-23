@@ -813,7 +813,13 @@ class Dataset:
         so quoting, nested values, blobs and Unicode are measured exactly without
         first allocating the full DataFrame or CSV.
         """
-        capped = f"SELECT * FROM ({sql}) AS export_rows LIMIT {int(row_limit)}"
+        # Validated here too. Callers pass a result's own SQL, which was validated
+        # on the way in, but a method that interpolates whatever it is handed is one
+        # refactor away from being the way round the guard.
+        capped = (
+            f"SELECT * FROM ({validate_select(sql, set(self.tables), self._withheld_columns())}) "
+            f"AS export_rows LIMIT {int(row_limit)}"
+        )
         cursor = self.run(capped)
         total = 0
         first = True

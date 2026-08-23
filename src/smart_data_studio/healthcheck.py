@@ -40,7 +40,10 @@ def check_model(timeout: float = 3.0) -> tuple[bool, str]:
             served = {model["name"] for model in json.load(response).get("models", [])}
     except (urllib.error.URLError, TimeoutError, ValueError, KeyError) as error:
         return False, f"{OLLAMA_HOST} unreachable: {error}"
-    if MODEL_ID not in served:
+    # Ollama answers with the tag it stored, so a model pulled and asked for as
+    # "llama3" comes back as "llama3:latest" and an exact match calls a healthy
+    # deployment unhealthy.
+    if MODEL_ID not in served and f"{MODEL_ID}:latest" not in served:
         return False, f"{MODEL_ID} is not served by {OLLAMA_HOST}"
     return True, f"{MODEL_ID} available"
 

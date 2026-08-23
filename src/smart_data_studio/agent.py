@@ -452,7 +452,12 @@ class DataAgent:
         except Exception:
             logs.failure("plan.failed")
             return []
-        if "NONE" in reply.upper()[:40]:
+        # The first word, not a substring of the first forty characters: a plan
+        # opening "Nonetheless, check the grain first" cancelled itself. Still the
+        # word rather than the whole line, because the model does say "NONE — one
+        # query settles it" and means it.
+        head = next((line.strip(" .*-") for line in reply.splitlines() if line.strip()), "")
+        if re.split(r"[^A-Za-z]+", head.upper(), maxsplit=1)[0] == "NONE":
             return []
         steps = [
             line.strip(" -*0123456789.") for line in reply.splitlines() if len(line.strip()) > 15
