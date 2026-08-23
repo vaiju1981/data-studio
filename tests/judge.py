@@ -19,11 +19,17 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from dataclasses import dataclass
 
 import ollama
 
-from smart_data_studio.config import MODEL_ID, OLLAMA_HOST
+from smart_data_studio.config import (
+    MODEL_ID,
+    MODEL_RETRIES,
+    MODEL_RETRY_SECONDS,
+    OLLAMA_HOST,
+)
 
 # A different model from the one under test would be better — a model grading its
 # own habits forgives them. One config value, so an endpoint that serves two can
@@ -177,10 +183,32 @@ def evidence_of(answer, sample_rows: int = 50, max_chars: int = 14_000) -> str:
     return joined[:max_chars] + ("\n… (evidence truncated)" if len(joined) > max_chars else "")
 
 
+def _ask(client, **kwargs):
+    """One judge call, retried when the host blips.
+
+    The agent has had this since a hosted endpoint started returning the occasional
+    500; the judge did not, and it makes one call per answer. A single 502 halfway
+    through discarded a fifteen-sample rate that had taken three minutes to gather
+    — the same waste the unquotable-verdict path was already fixed for.
+
+    A 4xx means the request itself is wrong and fails the same way twice, so only
+    5xx and dropped connections are retried.
+    """
+    for attempt in range(MODEL_RETRIES):
+        try:
+            return client.chat(**kwargs)
+        except (ollama.ResponseError, ConnectionError, TimeoutError) as error:
+            if isinstance(error, ollama.ResponseError) and error.status_code < 500:
+                raise
+            time.sleep(MODEL_RETRY_SECONDS * (attempt + 1))
+    return client.chat(**kwargs)
+
+
 def grade(question: str, answer_text: str, evidence: str, client=None) -> dict[str, Finding]:
     """Run one answer past the rubric, keyed by dimension."""
     rubric = "\n".join(f"- {name}: {description}" for name, description in RUBRIC.items())
-    reply = (client or ollama.Client(host=OLLAMA_HOST)).chat(
+    reply = _ask(
+        client or ollama.Client(host=OLLAMA_HOST),
         model=JUDGE_MODEL_ID,
         format=_SCHEMA,
         messages=[

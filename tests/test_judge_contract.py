@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import judge
+import ollama
 import pytest
 from judge import RUBRIC, Finding, JudgeUnusable, describe, failures, grade, quotes
 
@@ -117,3 +119,40 @@ def test_describe_never_throws_while_a_test_is_already_failing() -> None:
     graded["unstated_base"] = Finding("unstated_base", True, "something never written", "")
     rendered = describe(graded, ANSWER)
     assert "NOT QUOTED" in rendered, rendered
+
+
+class Flaky:
+    """A judge that blips before answering, the way a hosted endpoint does."""
+
+    def __init__(self, failures: int, then: str, status: int = 502):
+        self.left = failures
+        self.then = then
+        self.status = status
+        self.calls = 0
+
+    def chat(self, **_kwargs):
+        self.calls += 1
+        if self.left:
+            self.left -= 1
+            raise ollama.ResponseError("connection reset by peer", self.status)
+        return SimpleNamespace(message=SimpleNamespace(content=self.then))
+
+
+def test_a_blip_does_not_discard_the_run(monkeypatch) -> None:
+    """The agent has retried a 5xx since a hosted endpoint started returning them;
+    the judge did not, and it makes one call per answer. A single 502 halfway
+    through discarded a fifteen-sample rate that took three minutes to gather."""
+    monkeypatch.setattr(judge.time, "sleep", lambda _seconds: None)
+    client = Flaky(failures=1, then=clean_reply())
+    graded = judge.grade("Why did revenue rise?", ANSWER, "Query 1: ...", client=client)
+    assert set(graded) == set(RUBRIC)
+    assert client.calls == 2, "the blip was not retried"
+
+
+def test_a_request_the_judge_will_refuse_twice_is_not_retried(monkeypatch) -> None:
+    """A 4xx means the request itself is wrong and fails the same way again."""
+    monkeypatch.setattr(judge.time, "sleep", lambda _seconds: None)
+    client = Flaky(failures=3, then=clean_reply(), status=400)
+    with pytest.raises(ollama.ResponseError):
+        judge.grade("Why did revenue rise?", ANSWER, "Query 1: ...", client=client)
+    assert client.calls == 1, "a bad request was sent again"
