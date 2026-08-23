@@ -249,15 +249,19 @@ def _load(uploads: list[object], paths: str, chosen: list[str] | None = None) ->
                 # Carry existing definitions onto the new dataset, so the exploration
                 # below already knows them rather than learning them afterwards.
                 agent.set_metrics(st.session_state.get("metrics", ""))
+                recent.remember(local)
+                # Registering before adopting means a host that is already full
+                # refuses here, with the previous workspace still intact.
+                #
+                # Inside the guard, because capacity was checked before any of this
+                # was built and another tab can take the last slot in between. Left
+                # outside, the refusal dropped a fully-built workspace on the floor
+                # still holding its DuckDB connection, so a host that was briefly
+                # full stayed full.
+                sessions.register(st.session_state.session_id, dataset)
             except Exception:
                 dataset.close()
                 raise
-
-        recent.remember(local)
-
-        # Registering before adopting means a host that is already full refuses
-        # here, with the previous workspace still intact.
-        sessions.register(st.session_state.session_id, dataset)
         old_dataset = st.session_state.dataset
         if old_dataset is not None and old_dataset is not dataset:
             old_dataset.close()

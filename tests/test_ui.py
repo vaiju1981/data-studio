@@ -249,3 +249,34 @@ def test_a_small_export_is_counted_before_its_bytes_are_allocated(monkeypatch) -
     assert errors and "would take the session past" in errors[0]
     assert not downloads
     assert "export-small" not in render.st.session_state
+
+
+def test_a_workspace_is_closed_when_the_host_fills_between_check_and_register(
+    monkeypatch, tmp_path
+) -> None:
+    """Capacity is checked before the file is parsed, so the slot can be taken by
+    another tab while this one profiles. The refusal was raised outside the guard
+    that closes on failure, so a fully-built workspace was dropped still holding
+    its DuckDB connection — and a host that was briefly full stayed full."""
+    from smart_data_studio import sessions
+    from smart_data_studio.dataset import Dataset
+
+    closed: list[object] = []
+    original = Dataset.close
+    monkeypatch.setattr(
+        Dataset, "close", lambda self: (closed.append(self), original(self))[1], raising=True
+    )
+
+    def full(*_args, **_kwargs):
+        raise sessions.TooManySessions("the last slot went to another tab")
+
+    monkeypatch.setattr(sessions, "register", full)
+
+    sales = make_csv(tmp_path, "sales.csv", "region,amount\nNorth,10\nSouth,20\n")
+    app = run_app(monkeypatch, tmp_path)
+    app.text_area[0].set_value(str(sales))
+    app.button[0].click().run(timeout=60)
+
+    assert not app.exception
+    assert app.session_state.dataset is None, "a workspace that was refused was adopted anyway"
+    assert closed, "the refused workspace was dropped without closing its connection"

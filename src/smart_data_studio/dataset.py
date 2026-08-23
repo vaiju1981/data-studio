@@ -886,7 +886,10 @@ class Dataset:
         )
         with logs.timed("column.converted", table=table, column=column):
             self.run(f"CREATE OR REPLACE TABLE {quoted} AS SELECT {projection} FROM {quoted}")
-        failed = self.run(f"SELECT count(*) FROM {quoted} WHERE {source} IS NULL").fetchone()[0]
+        # Only the values the conversion could not read. Counting every NULL after
+        # the fact charges it for the blanks that were already there — a column
+        # with one empty cell and nothing wrong with it reported one failure.
+        failed = int(total) - int(self.run(f"SELECT count({source}) FROM {quoted}").fetchone()[0])
         note = f"{column} converted to a number, reading it as {convention}" + (
             f"; {failed:,} value(s) would not convert and are now empty." if failed else "."
         )
@@ -897,6 +900,10 @@ class Dataset:
                 loaded_at=item.loaded_at,
                 rows=item.rows,
                 columns=item.columns,
+                # Carried through: dropped here, one conversion stopped schema_text
+                # disclosing the withheld columns and left the guard's refusal to
+                # decay into DuckDB's "column not found", which reads like a typo.
+                withheld=item.withheld,
                 warnings=(
                     [w for w in item.warnings if not w.startswith(f"{column} ")] + [note]
                     if item.table == table
