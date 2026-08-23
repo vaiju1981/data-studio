@@ -10,7 +10,7 @@ from pathlib import Path
 VERSION = "0.1.0"
 # Bumped whenever the analyst prompt changes, so a logged answer can be traced to
 # the instructions that produced it.
-PROMPT_VERSION = "2026-08-22.2"
+PROMPT_VERSION = "2026-08-23.1"
 
 
 def _flag(name: str, default: bool) -> bool:
@@ -241,7 +241,7 @@ MAX_COHORT_HORIZON = 24
 # A forecast cannot reach further ahead than the history it was built from.
 MAX_FORECAST_PERIODS = 120
 
-# Eleven tools means longer chains than six rounds can finish.
+# Twelve tools means longer chains than six rounds can finish.
 MAX_TOOL_ROUNDS = 10
 MAX_EXPLORE_ROUNDS = 8
 # A judgement question is worked as a few sub-questions, each on a short leash.

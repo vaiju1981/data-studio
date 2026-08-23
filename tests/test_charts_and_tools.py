@@ -596,3 +596,26 @@ def test_the_cohort_warning_stays_quiet_on_what_is_not_a_cohort(label: str, sql:
         assert "cohort_warning" not in payload, label
     finally:
         dataset.close()
+
+
+def test_a_rate_worked_out_by_hand_says_a_rate_tool_exists() -> None:
+    """Averaging a 0/1 column is a proportion, and read back it looks as certain as
+    any other number. Naming the tool beside the result is what moves selection —
+    the prompt alone took cohort_window from 0/6 to 3/6, the note took it to 8/10.
+    """
+    rows = ["service,failed,latency"] + [
+        f"{'checkout' if index % 2 else 'search'},{index % 3 == 0:d},{index}" for index in range(60)
+    ]
+    dataset = Dataset.load([CsvSource.from_upload("r.csv", ("\n".join(rows) + "\n").encode())])
+    try:
+        tools = AnalysisTools(dataset)
+        rate = json.loads(tools.run_sql("SELECT service, avg(failed) AS r FROM r GROUP BY 1"))
+        assert "rate_warning" in rate
+        assert "compare_rates" in rate["rate_warning"]
+        assert "entity_column" in rate["rate_warning"]
+
+        # And it stays quiet for an average of an amount, which is just an average.
+        amount = json.loads(tools.run_sql("SELECT service, avg(latency) AS l FROM r GROUP BY 1"))
+        assert "rate_warning" not in amount
+    finally:
+        dataset.close()

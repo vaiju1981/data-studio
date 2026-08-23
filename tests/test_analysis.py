@@ -406,3 +406,91 @@ def test_every_dimension_accounts_for_the_whole_change_not_a_part_of_it() -> Non
     reading = found["reading"]
     assert "never add across dimensions" in reading
     assert "locates the change rather than explaining it" in reading
+
+
+def test_a_rate_is_compared_as_a_rate_not_as_an_amount() -> None:
+    """The failure this tool exists for, in the numbers that showed it.
+
+    Readmission of 30.19% against 6.38% is a 4.7-fold risk and 23.8 points.
+    compare_groups reports Cliff's delta for it — 0.238, which its own bands call
+    "small", because a rank-based measure on a 0/1 column is the difference in
+    proportions read against thresholds built for continuous data. Right about
+    significance, wrong about importance.
+    """
+    frame = pd.DataFrame(
+        {
+            "band": ["80+"] * 106 + ["40-64"] * 47,
+            "readmitted": [1] * 32 + [0] * 74 + [1] * 3 + [0] * 44,
+        }
+    )
+
+    old = analysis.compare_groups(frame, "band", "readmitted")
+    assert old["test"]["effect"] == "small", "the fixture no longer reproduces the misreading"
+
+    found = analysis.compare_rates(frame, "band", "readmitted")
+    assert [group["group"] for group in found["groups"]] == ["80+", "40-64"]
+    assert found["groups"][0]["events"] == 32 and found["groups"][0]["observed"] == 106
+    comparison = found["comparison"]
+    assert round(comparison["relative_risk"], 1) == 4.7
+    assert round(comparison["risk_difference_pct_points"], 1) == 23.8
+    assert comparison["p_value"] < 0.01
+    # And no band, because banding is what went wrong.
+    assert "effect" not in comparison
+
+
+def test_an_interval_is_reported_and_widens_when_the_count_is_thin() -> None:
+    """43.75% from 14 of 32 reads precise and is not: Wilson puts it near 28-61%.
+
+    The model already says "small sample size" in prose. What it cannot do without
+    this is say how small, and the answer changes with the width.
+    """
+    frame = pd.DataFrame(
+        {
+            "segment": ["subprime"] * 32 + ["prime"] * 68,
+            "defaulted": [1] * 14 + [0] * 18 + [1] * 5 + [0] * 63,
+        }
+    )
+    found = analysis.compare_rates(frame, "segment", "defaulted")
+    thin = next(group for group in found["groups"] if group["group"] == "subprime")
+    low, high = thin["interval_95_pct"]
+    assert thin["rate_pct"] == 43.75
+    assert low < 30 and high > 58, f"the interval {low}-{high} does not carry the uncertainty"
+    # The wide arm is wider than the well-counted one.
+    fat = next(group for group in found["groups"] if group["group"] == "prime")
+    assert (high - low) > (fat["interval_95_pct"][1] - fat["interval_95_pct"][0])
+
+
+def test_the_unit_of_analysis_is_named_and_repeated_rows_are_collapsed() -> None:
+    """Six encounters from one patient are one patient's outcome. Counted as six,
+    both the rate and its precision are overstated, and nothing in the old output
+    said which had been counted."""
+    frame = pd.DataFrame(
+        {
+            "band": ["80+"] * 12 + ["40-64"] * 12,
+            "patient": [1, 1, 1, 2, 2, 3, 4, 5, 6, 7, 8, 9] + list(range(10, 22)),
+            "readmitted": [1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0] + [0] * 12,
+        }
+    )
+    per_row = analysis.compare_rates(frame, "band", "readmitted")
+    per_patient = analysis.compare_rates(frame, "band", "readmitted", "patient")
+
+    assert per_row["unit_of_analysis"] == "row"
+    assert "independence" in per_row, "counting rows without saying so is the old behaviour"
+    assert per_patient["unit_of_analysis"] == "patient"
+    assert per_patient["observations_counted"] == 21 < per_row["observations_counted"]
+    assert "collapsed" in per_patient
+    # One patient readmitted three times is one readmitted patient. Looked up by
+    # name, because the groups are ordered by size and collapsing changes which
+    # of them is larger — which is itself the point.
+    older = next(group for group in per_patient["groups"] if group["group"] == "80+")
+    assert older["events"] == 1 and older["observed"] == 9
+    counted_as_rows = next(group for group in per_row["groups"] if group["group"] == "80+")
+    assert counted_as_rows["events"] == 3 and counted_as_rows["observed"] == 12
+
+
+def test_a_column_that_already_holds_a_rate_is_refused_with_the_reason() -> None:
+    """The same shape of mistake compare_groups makes on an aggregate: handed a
+    percentage, the denominator is already gone and no comparison can recover it."""
+    frame = pd.DataFrame({"segment": ["a", "b"], "rate": [0.4375, 0.0735]})
+    with pytest.raises(analysis.NotAnalysable, match="denominator"):
+        analysis.compare_rates(frame, "segment", "rate")

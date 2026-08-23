@@ -194,6 +194,7 @@ class AnalysisTools:
             ("source_warning", self._source_note),
             ("coverage_warning", self._coverage_note),
             ("cohort_warning", self._cohort_note),
+            ("rate_warning", self._rate_note),
         )
         found = {name: note for name, check in checks if (note := check(tree))}
         if weighting:
@@ -337,6 +338,59 @@ class AnalysisTools:
             f"and first appear later are counted above the line and missing from below it. "
             f"Call cohort_window instead, which counts the cohort once and divides by that."
         )
+
+    def _rate_note(self, tree: exp.Expression) -> str | None:
+        """Say so when a query has worked out a rate by hand.
+
+        Averaging a yes-or-no column per group is a proportion, and read back as a
+        number it looks as certain as any other. It is not: 14 of 32 is 43.75% and
+        anywhere from 28% to 61%, and the query cannot say which. Naming the tool
+        beside the result is what actually moves the model — the prompt alone took
+        cohort_window from nought in six to three in six, and the note took it to
+        eight in ten.
+        """
+        grouped = _grouped_columns(tree)
+        if not grouped:
+            return None
+        touched = {name.lower() for name in _tables_in(tree)}
+        table = next((t for t in self.dataset.tables if t.lower() in touched), None)
+        if table is None or len(touched) != 1:
+            return None
+
+        known = {name.lower(): name for name, _ in self.dataset.schema(table)}
+        averaged = {
+            column.name.lower()
+            for node in tree.walk()
+            if isinstance(node, exp.Avg)
+            for column in node.find_all(exp.Column)
+        }
+        binary = [
+            known[name]
+            for name in sorted(averaged)
+            if name in known and self._reads_as_yes_or_no(table, known[name])
+        ]
+        if not binary:
+            return None
+        return (
+            f"{binary[0]} holds only 0 and 1, so this is a rate per "
+            f"{', '.join(grouped)} rather than an average. A rate carries a denominator "
+            "and an uncertainty the number alone does not show. Call compare_rates on the "
+            "same columns for the counts behind each rate, an interval around it, and the "
+            "risk difference between groups — and pass entity_column if several rows here "
+            "can describe the same subject."
+        )
+
+    def _reads_as_yes_or_no(self, table: str, column: str) -> bool:
+        """Whether a column holds nothing but 0 and 1, checked rather than guessed."""
+        quoted = quote_identifier(column)
+        try:
+            distinct = self.dataset.run(
+                f"SELECT count(DISTINCT {quoted}) FROM {quote_identifier(table)} "
+                f"WHERE {quoted} IS NOT NULL AND {quoted} NOT IN (0, 1)"
+            ).fetchone()
+        except Exception:
+            return False
+        return bool(distinct) and int(distinct[0]) == 0
 
     def _reads_as_a_date(self, table: str, column: str) -> bool:
         """Whether a column's values are dates, whatever type it was stored as."""
@@ -677,6 +731,35 @@ class AnalysisTools:
             "comparison",
             f"{measure} across {dimension}",
             lambda frame: analysis.compare_groups(frame, dimension, measure),
+        )
+
+    def compare_rates(self, dimension: str, outcome: str, entity_column: str = "") -> str:
+        """Compare how often something happened between groups, denominators included.
+
+        Use this for a yes-or-no outcome — readmitted, defaulted, failed, converted,
+        churned, passed — rather than compare_groups, which measures amounts and
+        describes a fourfold difference in a rate as a small effect.
+
+        Args:
+          dimension: Column holding the groups to compare.
+          outcome: Column holding 1 where the thing happened and 0 where it did not,
+            one row per observation. Not a column that already holds a percentage.
+          entity_column: Column naming who or what each row belongs to, when several
+            rows can describe the same one — a patient with many encounters, an
+            account with many transactions. Leave empty only when every row is
+            already a separate subject.
+
+        Returns:
+          JSON with each group's numerator, denominator, rate and 95% interval, plus
+          the risk difference, relative risk and odds ratio between the two largest.
+        """
+        return self._on_frame(
+            "rates",
+            f"{outcome} across {dimension}",
+            lambda frame: analysis.compare_rates(frame, dimension, outcome, entity_column or None),
+            # A sampled denominator is a wrong denominator, and the whole point of
+            # this tool is that the denominator is right.
+            may_sample=False,
         )
 
     def rank_drivers(self, measure: str, split: str) -> str:

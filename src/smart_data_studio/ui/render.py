@@ -70,6 +70,7 @@ TITLES = {
     "trend": "Trend",
     "anomalies": "Anomalies",
     "comparison": "Group comparison",
+    "rates": "Rate comparison",
     "drivers": "Drivers",
     "associations": "Associations",
     "outliers": "Outliers",

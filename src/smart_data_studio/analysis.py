@@ -162,6 +162,185 @@ def compare_groups(frame: pd.DataFrame, dimension: str, measure: str) -> dict[st
     return result
 
 
+# 95%, and stated in the result rather than assumed by whoever reads it.
+CONFIDENCE_Z = 1.96
+
+
+def _wilson(events: int, total: int) -> tuple[float, float]:
+    """A confidence interval for a proportion that still works at small counts.
+
+    The textbook p ± z·sqrt(p(1-p)/n) runs past 1 and below 0 near the ends and is
+    badly wrong when there are few observations — which is exactly when anyone
+    asks how precise a rate is. Wilson does not: 14 of 32 comes back as 28% to
+    61%, and "43.75%" alone reads far more certain than that.
+    """
+    if total <= 0:
+        return (0.0, 0.0)
+    rate = events / total
+    z2 = CONFIDENCE_Z**2
+    denominator = 1 + z2 / total
+    centre = (rate + z2 / (2 * total)) / denominator
+    spread = (
+        CONFIDENCE_Z * np.sqrt(rate * (1 - rate) / total + z2 / (4 * total * total)) / denominator
+    )
+    return (max(0.0, centre - spread), min(1.0, centre + spread))
+
+
+def compare_rates(
+    frame: pd.DataFrame, dimension: str, outcome: str, entity_column: str | None = None
+) -> dict[str, object]:
+    """Compare a binary outcome across groups, with the denominators in plain sight.
+
+    `compare_groups` can be pointed at a 0/1 column and will run, and what it
+    reports is Cliff's delta — a rank-based measure that on binary data collapses
+    to the difference in proportions and is then read against thresholds built for
+    continuous distributions. Measured on the fixtures: readmission of 30.2%
+    against 6.4%, a 4.7-fold risk, came back as effect size "small"; defaults of
+    43.8% against 7.3%, six-fold, came back "medium". Both answers were right
+    about significance and wrong about importance, which is the more expensive way
+    to be wrong.
+
+    A proportion wants proportion measures — a difference in points, a ratio of
+    risks, an odds ratio — and an interval, because the rate that prompts the
+    question is usually the one resting on the fewest observations.
+
+    `entity_column` is the unit of analysis. Given it, rows are collapsed to one
+    per entity before anything is counted, because six encounters from one patient
+    are one patient's outcome and counting them six times overstates both the rate
+    and its precision. Left out, rows are the unit and the result says so rather
+    than leaving a reader to assume.
+    """
+    _require(frame, dimension, outcome)
+    if entity_column:
+        _require(frame, entity_column)
+
+    events = pd.to_numeric(frame[outcome], errors="coerce")
+    working = pd.DataFrame({dimension: frame[dimension], outcome: events})
+    if entity_column:
+        working[entity_column] = frame[entity_column]
+    working = working.dropna(subset=[dimension, outcome])
+
+    present = set(pd.unique(working[outcome]))
+    if not present <= {0, 1}:
+        raise NotAnalysable(
+            f"{outcome} is not a yes-or-no column — it holds {sorted(present)[:5]}. This "
+            "compares how often something happened, so it needs one row per observation "
+            "with a 1 where it did and a 0 where it did not. A column that already holds "
+            "a rate has had its denominator thrown away and cannot be compared here."
+        )
+
+    rows = len(working)
+    if entity_column:
+        # Any occurrence counts once for the entity: a patient readmitted twice is
+        # one readmitted patient, and this is what makes the rate per patient
+        # differ from the rate per encounter rather than merely round differently.
+        working = working.groupby([entity_column, dimension], as_index=False)[outcome].max()
+        unit = entity_column
+    else:
+        unit = "row"
+
+    counts = working.groupby(dimension)[outcome].agg(["sum", "size"])
+    counts = counts.sort_values("size", ascending=False)
+    if len(counts) < 2:
+        raise NotAnalysable(f"{dimension} has fewer than two groups with data")
+
+    groups = []
+    for name, row in counts.head(MAX_COMPARISON_GROUPS).iterrows():
+        total, hits = int(row["size"]), int(row["sum"])
+        low, high = _wilson(hits, total)
+        groups.append(
+            {
+                "group": str(name),
+                "events": hits,
+                "observed": total,
+                "rate_pct": round(hits / total * 100, 2) if total else None,
+                "interval_95_pct": [round(low * 100, 2), round(high * 100, 2)],
+            }
+        )
+
+    result: dict[str, object] = {
+        "outcome": outcome,
+        "dimension": dimension,
+        "unit_of_analysis": unit,
+        "rows_read": rows,
+        "observations_counted": int(counts["size"].sum()),
+        "groups": groups,
+    }
+    if entity_column and rows != int(counts["size"].sum()):
+        result["collapsed"] = (
+            f"{rows:,} rows became {int(counts['size'].sum()):,} {entity_column} values. "
+            f"Every figure here is per {entity_column}; per row it would be a different "
+            "number, and neither is more correct than the other — they answer different "
+            "questions."
+        )
+    elif not entity_column:
+        result["independence"] = (
+            "Counted per row, and rows are assumed independent. If several rows describe "
+            "the same person, account or machine, pass entity_column so they are counted "
+            "once — otherwise both the rate and its interval are overstated."
+        )
+
+    first, second = counts.index[0], counts.index[1]
+    if int(counts["size"].iloc[1]) < MIN_COMPARISON_ROWS:
+        result["note"] = (
+            f"Only the rates are reported: the second largest group in {dimension} has "
+            f"{int(counts['size'].iloc[1])} observations, and a comparison from that says "
+            "more about the sample than the world."
+        )
+        return result
+
+    a, n1 = int(counts["sum"].loc[first]), int(counts["size"].loc[first])
+    c, n2 = int(counts["sum"].loc[second]), int(counts["size"].loc[second])
+    result["compared"] = [str(first), str(second)]
+    result["comparison"] = _rate_comparison(a, n1, c, n2)
+    result["reading"] = (
+        "Read the risk difference in points and the relative risk together: a rise from "
+        "1% to 3% trebles the risk and moves 2 points, and which of those matters is the "
+        "question's business, not this tool's. The intervals are Wilson, which holds at "
+        "small counts where the textbook interval runs past 0 and 1. No effect-size band "
+        "is offered on purpose — the rank-based one this replaces called a fourfold "
+        "difference in readmission small."
+    )
+    return result
+
+
+def _rate_comparison(a: int, n1: int, c: int, n2: int) -> dict[str, object]:
+    """The two-by-two table, measured the way proportions are measured."""
+    first_rate, second_rate = a / n1, c / n2
+    found: dict[str, object] = {
+        "risk_difference_pct_points": round((first_rate - second_rate) * 100, 2),
+    }
+
+    # A ratio needs both arms to have happened at least once; with a zero the log
+    # interval is undefined and a corrected estimate would be inventing data.
+    if a and c:
+        ratio = first_rate / second_rate
+        error = np.sqrt(1 / a - 1 / n1 + 1 / c - 1 / n2)
+        found["relative_risk"] = round(float(ratio), 3)
+        found["relative_risk_interval_95"] = [
+            round(float(ratio * np.exp(-CONFIDENCE_Z * error)), 3),
+            round(float(ratio * np.exp(CONFIDENCE_Z * error)), 3),
+        ]
+    else:
+        found["relative_risk"] = None
+        found["relative_risk_note"] = "One group had no events, so a ratio is undefined."
+
+    if a and c and a < n1 and c < n2:
+        odds = (a / (n1 - a)) / (c / (n2 - c))
+        found["odds_ratio"] = round(float(odds), 3)
+
+    table = [[a, n1 - a], [c, n2 - c]]
+    expected = stats.chi2_contingency(table)[3] if min(n1, n2) > 0 else None
+    if expected is not None and expected.min() >= 5:
+        chi = stats.chi2_contingency(table, correction=False)
+        found["p_value"] = float(chi[1])
+        found["method"] = "chi-square on the two-by-two table"
+    else:
+        found["p_value"] = float(stats.fisher_exact(table)[1])
+        found["method"] = "Fisher's exact test, because a cell is too thin for chi-square"
+    return found
+
+
 def rank_drivers(frame: pd.DataFrame, measure: str, split: str) -> dict[str, object]:
     """Sweep every usable dimension and rank what moved a measure between two sides.
 

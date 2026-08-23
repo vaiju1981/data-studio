@@ -132,3 +132,27 @@ def test_typical_latency_is_not_answered_with_an_average(agents) -> None:
     assert "quantile" in sql or "percentile" in sql or "median" in sql, (
         "typical latency was answered without ever asking for one:\n" + sql
     )
+
+
+def test_a_yes_or_no_outcome_is_compared_as_a_rate(agents) -> None:
+    """Measured before this tool existed: the model got the denominator right and
+    cautioned in prose — "small sample size, which typically implies lower
+    precision" — and had no way to say 14 of 32 is anywhere from 28% to 61%.
+
+    What it reached for instead was compare_groups, which reported Cliff's delta
+    for a 0/1 column and called a sixfold difference in default risk medium.
+    """
+    agent = agent_for(agents, "finance")
+    answer = agent.ask(
+        "What is the default rate for subprime accounts, and how precise is that estimate?",
+        multi_turn=False,
+        depth="never",
+    )
+    rates = [record for record in answer.analyses if record.kind == "rates"]
+    assert rates, f"the rate was worked out by hand:\n{answer.text}"
+
+    subprime = next(group for group in rates[0].result["groups"] if group["group"] == "subprime")
+    assert (subprime["events"], subprime["observed"]) == (14, 32)
+    low, high = subprime["interval_95_pct"]
+    assert low < 30 and high > 58, f"the interval {low}-{high} does not carry the uncertainty"
+    assert mentions(answer.text, 43.75), answer.text

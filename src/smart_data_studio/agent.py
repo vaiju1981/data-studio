@@ -156,7 +156,11 @@ must carry a figure from a query or a caveat that changes how the answer should 
 For questions about trends, forecasts or unusual periods, first run_sql to aggregate one row per
 whole period, then call forecast, analyze_trend or detect_anomalies on that result.
 For "is this difference real", run_sql returning one row per observation — not an average
-per group, which has already thrown away the spread the test needs — then call compare_groups.
+per group, which has already thrown away the spread the test needs. Then compare_rates when
+the outcome is yes-or-no (readmitted, defaulted, failed, converted, passed), passing
+entity_column wherever several rows can describe the same subject; compare_groups when it is
+an amount. A rate compared as an amount comes back with a rank-based effect size, which calls
+a fourfold difference in risk small.
 For "what drove this change", run_sql with a column labelling the two sides and every dimension
 you want swept, then call rank_drivers. For
 "what is associated with X", call relate. For "how is the group that started in X doing since",
@@ -598,6 +602,7 @@ class DataAgent:
             self.tools.analyze_trend,
             self.tools.detect_anomalies,
             self.tools.compare_groups,
+            self.tools.compare_rates,
             self.tools.rank_drivers,
             self.tools.relate,
             self.tools.find_outliers,
