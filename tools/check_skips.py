@@ -17,7 +17,12 @@ from pathlib import Path
 # Every opt-in bank, not one. The multi-table bank was added like the first and
 # never added here, so this gate failed CI on every commit until it was; the
 # answer-quality bank is opt-in for the same reason and belongs here too.
-ALLOWED = ("test_question_bank", "test_multi_table_bank", "test_answer_quality")
+ALLOWED = (
+    "test_question_bank",
+    "test_multi_table_bank",
+    "test_answer_quality",
+    "test_domain_bank",
+)
 
 
 def main(report: str) -> int:

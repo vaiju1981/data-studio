@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import pytest
 from corpus import DOMAINS
+from domain_bank import BANK
 
 from smart_data_studio.dataset import Dataset
 from smart_data_studio.profile import profile_dataset
@@ -155,3 +156,39 @@ def test_latency_has_a_tail_the_mean_hides() -> None:
         assert checkout > rest * 2
     finally:
         dataset.close()
+
+
+@pytest.mark.parametrize(
+    ("domain", "number", "sql", "expected"),
+    [
+        (domain, number, sql, value)
+        for domain, number, _, proofs in BANK
+        for sql, value in proofs.items()
+    ],
+    ids=[f"{domain}-{number}" for domain, number, _, proofs in BANK for _ in proofs],
+)
+def test_every_domain_anchor_is_still_true_of_its_fixture(
+    domain: str, number: int, sql: str, expected: float
+) -> None:
+    """Proved on every commit, not only on the days the bank runs.
+
+    The single-CSV bank can only check its anchors behind a 2.7GB load and a live
+    model. These rebuild in milliseconds, so a stale anchor is caught here — and a
+    stale anchor fails every question carrying it while looking exactly like the
+    model getting worse.
+    """
+    dataset = workspace(domain)
+    try:
+        measured = one(dataset, sql)
+        assert abs(measured - expected) <= max(abs(expected) * 0.0001, 0.005), (
+            f"{domain} q{number}: the bank says {expected:,.2f}, the fixture says {measured:,.2f}"
+        )
+    finally:
+        dataset.close()
+
+
+def test_every_domain_has_questions_and_every_question_names_a_real_domain() -> None:
+    asked = {domain for domain, _, _, _ in BANK}
+    assert asked == set(DOMAINS), f"domains without questions: {set(DOMAINS) - asked}"
+    numbers = [number for _, number, _, _ in BANK]
+    assert len(numbers) == len(set(numbers)), "two questions share a number"
