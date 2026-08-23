@@ -109,21 +109,35 @@ def _evict_idle_locked() -> None:
         logs.event("session.evicted", reason="idle")
 
 
-def shutdown() -> None:
-    """Close every workspace and remove the spill directory.
+def release_all() -> int:
+    """Close every registered workspace, leaving the spill directory alone.
 
-    Registered with atexit so a container stop does not leave DuckDB temp files
-    behind on a mounted volume.
+    Separate from shutdown() because the two are wanted at different moments. A
+    test releases what it registered between cases; the directory is shared with
+    every other live connection, and removing it there took the spill file out
+    from under a module-scoped dataset mid-query — DuckDB raised "Cannot open
+    file … No such file or directory" and the trio bank failed four ways at once.
     """
     with _lock:
         entries = list(_entries.values())
         _entries.clear()
     for entry in entries:
-        with contextlib.suppress(Exception):  # shutdown must not raise
+        with contextlib.suppress(Exception):  # releasing must not raise
             entry.dataset.close()
+    return len(entries)
+
+
+def shutdown() -> None:
+    """Close every workspace and remove the spill directory.
+
+    Registered with atexit so a container stop does not leave DuckDB temp files
+    behind on a mounted volume. The process is going away, so nothing else can
+    still want the directory.
+    """
+    closed = release_all()
     shutil.rmtree(Path(temp_directory()), ignore_errors=True)
-    if entries:
-        logs.event("shutdown", closed=len(entries))
+    if closed:
+        logs.event("shutdown", closed=closed)
 
 
 atexit.register(shutdown)

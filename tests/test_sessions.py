@@ -106,3 +106,30 @@ def test_an_evicted_session_says_so_rather_than_going_quiet() -> None:
     sessions.release("one")
     assert sessions.touch("one") is False
     assert sessions.touch("never-registered") is False
+
+
+def test_releasing_workspaces_leaves_the_shared_spill_directory_alone(tmp_path) -> None:
+    """The trio bank errored four ways on "Cannot open file … No such file or
+    directory", from a query that had been passing all day.
+
+    The autouse fixture called shutdown() after every test, and shutdown removes
+    the DuckDB spill directory — which every live connection shares. A
+    module-scoped dataset spilling mid-query found its own temp file gone.
+    """
+    from pathlib import Path
+
+    from smart_data_studio.config import temp_directory
+
+    spill = Path(temp_directory())
+    spill.mkdir(parents=True, exist_ok=True)
+    marker = spill / "in-use.tmp"
+    marker.write_bytes(b"a live connection's spill")
+
+    dataset = make_dataset()
+    sessions.register("one", dataset)
+    assert sessions.release_all() == 1
+    assert marker.exists(), "releasing a workspace deleted another connection's spill file"
+
+    # Shutdown still clears it, because by then the process is going away.
+    sessions.shutdown()
+    assert not marker.exists()
