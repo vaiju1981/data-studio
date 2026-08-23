@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 import pandas as pd
@@ -553,6 +554,17 @@ def _dictionary(
     return lines, held
 
 
+def _numeric_literal(raw: object, fallback: float) -> str:
+    """The number as DuckDB wrote it, when that is safe to put back in a query.
+
+    SUMMARIZE returns min and max as text, and the text is exact where a float is
+    not. Only digits, sign, point and exponent are accepted, so nothing else can
+    ride along; anything stranger falls back to the float and its precision.
+    """
+    text = str(raw).strip()
+    return text if re.fullmatch(r"[-+]?[0-9]*\.?[0-9]+([eE][-+]?[0-9]+)?", text) else repr(fallback)
+
+
 def _sentinels(dataset: Dataset, table_name: str, stats: pd.DataFrame) -> dict[str, str]:
     """Extreme values that repeat, which are codes rather than measurements.
 
@@ -578,28 +590,41 @@ def _sentinels(dataset: Dataset, table_name: str, stats: pd.DataFrame) -> dict[s
             distinct = float(row["approx_unique"])
         except (TypeError, ValueError):
             continue
+        # The float is for the arithmetic below; the equality goes back to DuckDB
+        # as the text SUMMARIZE gave. A BIGINT sentinel of 999999999999999999
+        # becomes 1000000000000000000 through a float and then matches nothing —
+        # the code stays in the column and the average keeps quietly including it.
         if low < high and distinct > 2:
-            candidates.append((str(row["column_name"]), low, high, distinct))
+            candidates.append(
+                (
+                    str(row["column_name"]),
+                    low,
+                    high,
+                    distinct,
+                    _numeric_literal(row["min"], low),
+                    _numeric_literal(row["max"], high),
+                )
+            )
     if not candidates:
         return {}
 
     table = quote_identifier(table_name)
     projections = []
-    for index, (name, low, high, _) in enumerate(candidates):
+    for index, (name, _low, _high, _distinct, low_sql, high_sql) in enumerate(candidates):
         column = quote_identifier(name)
         projections += [
             f"count({column}) AS present_{index}",
-            f"count_if({column} = {low!r}) AS lon_{index}",
-            f"count_if({column} = {high!r}) AS hin_{index}",
-            f"min({column}) FILTER (WHERE {column} > {low!r}) AS lo2_{index}",
-            f"max({column}) FILTER (WHERE {column} < {high!r}) AS hi2_{index}",
+            f"count_if({column} = {low_sql}) AS lon_{index}",
+            f"count_if({column} = {high_sql}) AS hin_{index}",
+            f"min({column}) FILTER (WHERE {column} > {low_sql}) AS lo2_{index}",
+            f"max({column}) FILTER (WHERE {column} < {high_sql}) AS hi2_{index}",
         ]
     values = (
         dataset.run(f"SELECT {', '.join(projections)} FROM {table}").fetchdf().iloc[0].to_dict()
     )
 
     found: dict[str, str] = {}
-    for index, (name, low, high, distinct) in enumerate(candidates):
+    for index, (name, low, high, distinct, low_sql, high_sql) in enumerate(candidates):
         present = _number(values.get(f"present_{index}"))
         if present < MIN_SENTINEL_ROWS:
             continue
@@ -611,14 +636,18 @@ def _sentinels(dataset: Dataset, table_name: str, stats: pd.DataFrame) -> dict[s
         if spread <= 0:
             continue
         typical = spread / max(distinct - 1, 1)
-        for edge, inner, count in (
-            (low, inner_low, _number(values.get(f"lon_{index}"))),
-            (high, inner_high, _number(values.get(f"hin_{index}"))),
+        for edge, shown, inner, count in (
+            (low, low_sql, inner_low, _number(values.get(f"lon_{index}"))),
+            (high, high_sql, inner_high, _number(values.get(f"hin_{index}"))),
         ):
             gap = abs(inner - edge)
             if count / present >= SENTINEL_SHARE and gap > typical * SENTINEL_GAP_RATIO:
                 found[name] = (
-                    f"{name} holds {_trim(edge)} in {count / present:.0%} of rows, standing "
+                    # The literal, not the float it was measured through: naming
+                    # the code is the whole use of this, and 999999999999999999
+                    # rendered as 1000000000000000000 is a value to search for
+                    # that is not in the column.
+                    f"{name} holds {shown} in {count / present:.0%} of rows, standing "
                     f"{gap / typical:.0f} times further from the next value than values in this "
                     f"column normally sit apart. That is the shape of a missing-value code, not "
                     f"a measurement — exclude it before averaging, or the answer will be "

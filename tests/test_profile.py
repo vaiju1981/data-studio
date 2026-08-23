@@ -425,3 +425,25 @@ def test_a_numeric_attribute_is_named_and_per_row_values_are_not() -> None:
             assert f"{per_row} for" not in finding, f"{per_row} should not be named: {finding}"
     finally:
         dataset.close()
+
+
+def test_a_missing_value_code_beyond_float_precision_is_still_found() -> None:
+    """Mainframe exports write missing as 999999999999999999, and a BIGINT holds it
+    exactly where a float does not: through one the code becomes
+    1000000000000000000, an equality that matches nothing, and the sentinel stays
+    in the column with the average quietly including it.
+
+    The value the finding names is the one to go and search for, so it has to be
+    the code rather than the float it was measured through.
+    """
+    sentinel = 999999999999999999
+    rows = ["reading"] + [str(100 + index % 40) for index in range(200)] + [str(sentinel)] * 6
+    dataset = Dataset.load([CsvSource.from_upload("m.csv", ("\n".join(rows) + "\n").encode())])
+    try:
+        assert float(sentinel) != sentinel, "the fixture no longer exceeds float precision"
+        findings = profile_table(dataset, "m").findings
+        named = [finding for finding in findings if str(sentinel) in finding]
+        assert named, f"the code went undetected:\n{findings}"
+        assert "1000000000000000000" not in named[0], "reported the float, not the code"
+    finally:
+        dataset.close()
