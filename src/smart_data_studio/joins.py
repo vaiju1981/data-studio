@@ -18,9 +18,44 @@ from smart_data_studio.facts import Verified, verify, verify_key
 from smart_data_studio.proposals import JoinCandidate, Ref
 
 # DuckDB names some aggregates that sqlglot parses as ordinary functions, so a
-# class test alone lets total() past and skips the guard entirely.
+# class test alone lets total() past and skips the guard entirely. Twenty-three of
+# DuckDB's eighty-eight aggregates land here, and the list was written by hand at
+# eight — mean, fsum, favg and sum_no_overflow among the missing, every one of
+# them a way to total a fanned-out join with no refusal and no note.
+#
+# Enumerated from duckdb_functions() rather than remembered; test_relating_tables
+# re-derives it and fails when a DuckDB upgrade adds one.
 ANONYMOUS_AGGREGATES = frozenset(
-    {"total", "list", "histogram", "arg_max", "arg_min", "product", "geomean", "entropy"}
+    {
+        "arbitrary",
+        "arg_max",
+        "arg_max_null",
+        "arg_max_nulls_last",
+        "arg_min",
+        "arg_min_null",
+        "arg_min_nulls_last",
+        "bitstring_agg",
+        "count_star",
+        "entropy",
+        "favg",
+        "fill",
+        "fsum",
+        "geomean",
+        "histogram",
+        "histogram_exact",
+        "kahan_sum",
+        "kurtosis_pop",
+        "list",
+        "mad",
+        "mean",
+        "product",
+        "rank_dense",
+        "reservoir_quantile",
+        "sem",
+        "sum_no_overflow",
+        "sumkahan",
+        "total",
+    }
 )
 
 
@@ -310,7 +345,7 @@ def _join_multiplication(
         if not using:
             return None
         # USING names the same column on both sides.
-        left, right = _using_sides(join, sources, using)
+        left, right = _using_sides(join, sources, using, dataset)
         if left is None or right is None:
             return None
         pairs = {left: using, right: using}
@@ -389,13 +424,17 @@ def _join_multiplication(
 def _dropped_note(
     dataset: Dataset, joins: list, sources: dict[str, Source], cache: dict | None
 ) -> str | None:
-    """Say when an inner join silently leaves rows out.
+    """Say when a join silently leaves rows out.
 
     Nothing multiplies, so nothing double counts — but a total over what matched is
     quietly short, and reads exactly as reasonable as a correct one.
+
+    LEFT and FULL keep the unmatched rows, so there is nothing to say. RIGHT drops
+    every unmatched row on the left, which is the same silence as an inner join
+    wearing a different word, and was exempted here with them.
     """
     for join in joins:
-        if (join.args.get("side") or "").upper() in {"LEFT", "RIGHT", "FULL"}:
+        if (join.args.get("side") or "").upper() in {"LEFT", "FULL"}:
             continue
         key = _cached_key(join, sources, dataset)
         measured = cache.get(key) if cache and key else None
@@ -415,7 +454,7 @@ def _cached_key(join: exp.Join, sources: dict[str, Source], dataset: Dataset):
     condition = join.args.get("on")
     if condition is None:
         using = [item.name for item in join.args.get("using") or []]
-        left, right = _using_sides(join, sources, using) if using else (None, None)
+        left, right = _using_sides(join, sources, using, dataset) if using else (None, None)
         if not using or left is None or right is None:
             return None
         pairs = {left: using, right: using}
@@ -432,12 +471,34 @@ def _cached_key(join: exp.Join, sources: dict[str, Source], dataset: Dataset):
     return (refs[0], refs[1])
 
 
-def _using_sides(join: exp.Join, sources: dict[str, Source], using: list[str]):
-    """The two aliases a USING clause relates, in query order."""
-    names = [alias for alias in sources]
+def _using_sides(join: exp.Join, sources: dict[str, Source], using: list[str], dataset: Dataset):
+    """The two aliases a USING clause relates.
+
+    The far side is whichever earlier source actually carries the column, not
+    whichever came first. In `a JOIN b USING (k) JOIN c USING (m)` the second
+    clause relates b to c whenever m lives on b, and taking the first alias
+    measured a against c — a pair with no column in common, so the grain came back
+    unknown and the whole query was refused. Fail-closed, and still the wrong
+    answer to the question that was asked.
+    """
     joined = (join.this.alias or getattr(join.this, "name", "") or "").lower()
-    others = [alias for alias in names if alias != joined]
-    return (others[0] if others else None), (joined if joined in sources else None)
+    others = [alias for alias in sources if alias != joined]
+    wanted = {column.lower() for column in using}
+
+    def carries(alias: str) -> bool:
+        table = sources[alias].table
+        if table is None:
+            return False
+        try:
+            return wanted <= {name.lower() for name, _ in dataset.schema(table)}
+        except Exception:
+            return False
+
+    # Falling back to the first keeps the old behaviour where the columns cannot be
+    # read — a derived relation whose shape was never established.
+    named = [alias for alias in others if carries(alias)]
+    far = (named or others or [None])[0]
+    return far, (joined if joined in sources else None)
 
 
 def _derived_is_unique(source: Source, columns: list[str]) -> bool:

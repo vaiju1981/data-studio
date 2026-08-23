@@ -1059,3 +1059,93 @@ def test_a_real_identifier_key_is_still_stated_plainly() -> None:
         assert found[0].describe() == "one row per (assetId, day)"
     finally:
         dataset.close()
+
+
+def test_every_duckdb_aggregate_is_visible_to_the_join_guard() -> None:
+    """The allowlist was written from memory and ran eight names long.
+
+    Twenty-three of DuckDB's aggregates parse as ordinary function calls, so a
+    class test cannot see them — mean, fsum, favg and sum_no_overflow among those
+    the hand-written list missed, each one a way to total a fanned-out join with
+    no refusal and no note. Derived here from the catalogue so a DuckDB upgrade
+    that adds one fails rather than quietly widening the gap.
+    """
+    import duckdb
+    import sqlglot
+    from sqlglot import expressions as exp
+
+    from smart_data_studio.joins import ANONYMOUS_AGGREGATES
+
+    catalogue = [
+        row[0]
+        for row in duckdb.connect()
+        .execute(
+            "SELECT DISTINCT function_name FROM duckdb_functions() "
+            "WHERE function_type = 'aggregate' ORDER BY 1"
+        )
+        .fetchall()
+    ]
+    invisible = set()
+    for name in catalogue:
+        try:
+            tree = sqlglot.parse_one(f"SELECT {name}(x) FROM t", read="duckdb")
+        except Exception:
+            continue
+        node = next(iter(tree.find_all(exp.Func)), None)
+        if isinstance(node, exp.Anonymous):
+            invisible.add(name)
+
+    missing = invisible - ANONYMOUS_AGGREGATES
+    assert not missing, f"aggregates the join guard cannot see: {sorted(missing)}"
+
+
+def test_a_using_clause_is_measured_against_the_side_that_carries_the_column() -> None:
+    """`a JOIN b USING (k) JOIN c USING (m)` relates b to c when m lives on b.
+
+    Taking the first other alias measured a against c — a pair sharing no column,
+    so the grain came back unknown and the query was refused for the wrong reason.
+    Fail-closed, and still a diagnosis nobody can act on: the message named neither
+    of the two tables that actually multiply.
+    """
+    a = "k,label\n" + "".join(f"{index},row{index}\n" for index in range(20))
+    b = "k,m,amount\n" + "".join(f"{index},{index},{100 + index}\n" for index in range(20))
+    c = "m,tag\n" + "".join(f"{index},t{copy}\n" for index in range(20) for copy in range(3))
+    dataset = Dataset.load(
+        [
+            CsvSource.from_upload("a.csv", a.encode()),
+            CsvSource.from_upload("b.csv", b.encode()),
+            CsvSource.from_upload("c.csv", c.encode()),
+        ]
+    )
+    try:
+        refusal, _ = joins.preflight(
+            dataset, "SELECT sum(b.amount) AS total FROM a JOIN b USING (k) JOIN c USING (m)", {}
+        )
+        assert refusal, "a join that triples b's rows was allowed to total them"
+        assert "b" in refusal and "c" in refusal, refusal
+        assert "cannot be established" not in refusal, (
+            "still the old diagnosis: it measured the pair with no column in common"
+        )
+    finally:
+        dataset.close()
+
+
+def test_a_right_join_that_drops_rows_says_so() -> None:
+    """LEFT and FULL keep their unmatched rows. RIGHT drops every unmatched row on
+    the left, which is an inner join's silence wearing a different word — and it
+    was exempted from the note alongside the two that deserve the exemption."""
+    left = "k,amount\n" + "".join(f"{index},{index}\n" for index in range(20))
+    right = "k,tag\n" + "".join(f"{index},t\n" for index in range(10))
+    dataset = Dataset.load(
+        [
+            CsvSource.from_upload("left.csv", left.encode()),
+            CsvSource.from_upload("right.csv", right.encode()),
+        ]
+    )
+    try:
+        _, note = joins.preflight(
+            dataset, "SELECT sum(l.amount) FROM left l RIGHT JOIN right r USING (k)", {}
+        )
+        assert note and "match nothing" in note, f"a RIGHT join dropped ten rows in silence: {note}"
+    finally:
+        dataset.close()
