@@ -63,15 +63,24 @@ def cohort_window(
             FROM {quote_identifier(table)}
             WHERE {entity} IS NOT NULL AND {started} IS NOT NULL
         ),
+        starts AS (
+            -- One cohort per entity, and the earliest one. A file carrying the
+            -- start date on every activity row can disagree with itself, and the
+            -- raw per-row value put a single entity in January and again in
+            -- February — counted in two cohort sizes and two sets of numerators,
+            -- which is the one thing a cohort must never be.
+            SELECT entity, min(cohort) AS cohort FROM base GROUP BY 1
+        ),
         sized AS (
             -- Every entity that started in the period, whether or not it ever
             -- came back. This is the base, and counting it here is the point.
-            SELECT cohort, count(DISTINCT entity) AS cohort_size FROM base GROUP BY 1
+            SELECT cohort, count(*) AS cohort_size FROM starts GROUP BY 1
         ),
         seen AS (
-            SELECT cohort, date_diff('{period}', cohort, active) AS offset,
-                   count(DISTINCT entity) AS active_entities
-            FROM base WHERE active IS NOT NULL GROUP BY 1, 2
+            SELECT starts.cohort, date_diff('{period}', starts.cohort, base.active) AS offset,
+                   count(DISTINCT base.entity) AS active_entities
+            FROM base JOIN starts USING (entity)
+            WHERE base.active IS NOT NULL GROUP BY 1, 2
         )
         SELECT sized.cohort, sized.cohort_size, seen.offset, seen.active_entities
         FROM sized JOIN seen USING (cohort)
@@ -84,13 +93,23 @@ def cohort_window(
             "Check the column, or convert it first."
         )
 
-    # Activity dated before the entity's own cohort. Reported rather than dropped
-    # in silence: it is a real property of the data, and left unexplained the
-    # answer reaches for a cause it cannot know.
-    early = dataset.run(f"""
-        SELECT count(DISTINCT {entity}) FROM {quote_identifier(table)}
-        WHERE {acted} IS NOT NULL AND {started} IS NOT NULL AND {acted} < {started}
-    """).fetchone()[0]
+    # Both measured against the cohort the entity was actually placed in — its
+    # earliest — rather than against whatever start its own row happened to carry.
+    # Reported rather than dropped in silence: each is a real property of the data,
+    # and left unexplained the answer reaches for a cause it cannot know.
+    early, conflicting = dataset.run(f"""
+        WITH per_entity AS (
+            SELECT {entity} AS entity, min({started}) AS first_start,
+                   min({acted}) AS first_activity,
+                   count(DISTINCT {started}) AS starts
+            FROM {quote_identifier(table)}
+            WHERE {entity} IS NOT NULL AND {started} IS NOT NULL
+            GROUP BY 1
+        )
+        SELECT count(*) FILTER (WHERE first_activity < first_start),
+               count(*) FILTER (WHERE starts > 1)
+        FROM per_entity
+    """).fetchone()
 
     cohorts = []
     for start, rows in frame.groupby("cohort", sort=True):
@@ -130,6 +149,17 @@ def cohort_window(
             f"{len(cohorts)} cohorts found; the most recent {MAX_COHORTS} are shown. "
             "The earlier ones are complete and unchanging."
         )
+    if conflicting:
+        result["entities_with_more_than_one_start"] = {
+            "entities": int(conflicting),
+            "note": (
+                f"{int(conflicting):,} {entity_column} value(s) carry more than one "
+                f"{cohort_column} period. Each was placed in its earliest, so it appears in "
+                f"one cohort only — but the later starts are still in the file, and if they "
+                f"mean something (a re-registration, a second account) the cohort they belong "
+                f"to is a choice this tool made rather than one the data settled."
+            ),
+        }
     if early:
         result["activity_before_the_cohort_started"] = {
             "entities": int(early),

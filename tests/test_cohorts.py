@@ -125,3 +125,29 @@ def test_cohort_window_refuses_what_it_cannot_answer(arguments, because) -> None
             cohorts.cohort_window(dataset, *arguments)
     finally:
         dataset.close()
+
+
+def test_an_entity_with_two_start_dates_belongs_to_one_cohort() -> None:
+    """A start date on every activity row can disagree with itself.
+
+    Read per row, one customer sat in January and again in February: counted in
+    both cohort sizes and both sets of numerators, which is the one thing a
+    cohort cannot be. Each entity is placed in its earliest start, and the
+    disagreement is reported rather than quietly resolved.
+    """
+    rows = ["customer_id,signed_up,ordered_on"]
+    rows.append("c1,2026-01-05,2026-01-20")
+    rows.append("c1,2026-02-05,2026-02-20")  # the same customer, a later start
+    for index in range(2, 30):
+        rows.append(f"c{index},2026-01-06,2026-01-21")
+    dataset = loaded(("\n".join(rows) + "\n").encode())
+    try:
+        found = cohorts.cohort_window(
+            dataset, "orders", "customer_id", "signed_up", "ordered_on", "month", 3
+        )
+    finally:
+        dataset.close()
+
+    starts = {cohort["cohort"]: cohort["size"] for cohort in found["cohorts"]}
+    assert starts == {"2026-01-01": 29}, "c1 was counted in a February cohort as well"
+    assert found["entities_with_more_than_one_start"]["entities"] == 1

@@ -255,3 +255,26 @@ def test_a_period_with_no_coverage_figure_is_not_called_covered() -> None:
     assert "no coverage figure" in notes
     assert "2024-03-01" in notes
     assert "Every period is fully covered" not in notes
+
+
+def test_a_masked_outlier_is_flagged_alongside_the_one_that_hid_it() -> None:
+    """Peeling is only half of Rosner's test; the other half is where to cut.
+
+    Twin spikes inflate the standard deviation for each other, so the first peel
+    fails its threshold (R=2.95 against 3.31) and the second passes (R=4.12
+    against 3.27). Scoring each step on its own reports the smaller spike and
+    calls the larger one an ordinary period — the exact masking the peeling was
+    introduced to defeat.
+    """
+    values = np.array(
+        [10, 10, 11, 9, 10, 10, 11, 9, 10, 10, 11, 9, 10, 10, 60, 61, 10, 9, 10, 11.0]
+    )
+    assert timeseries._generalized_esd(values, max_outliers=4) == [14, 15]
+
+
+def test_a_clean_series_still_flags_nothing() -> None:
+    """The counterpart: cutting through the last passing step must not invent one."""
+    values = np.array(
+        [10, 10, 11, 9, 10, 10, 11, 9, 10, 10, 11, 9, 10, 10, 10, 9, 10, 11, 10, 11.0]
+    )
+    assert timeseries._generalized_esd(values, max_outliers=4) == []

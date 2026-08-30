@@ -360,13 +360,22 @@ def decompose(series: Series) -> dict[str, object]:
 def _generalized_esd(values: np.ndarray, max_outliers: int) -> list[int]:
     """Rosner's test: remove the most extreme point, then retest.
 
-    Peeling one at a time stops two outliers hiding each other: one spike inflates
-    the standard deviation enough to mask its neighbour, which a z-score never
-    recovers from.
+    Peeling one at a time is what stops two outliers hiding each other: one spike
+    inflates the standard deviation enough to mask its neighbour, which a z-score
+    never recovers from. But peeling alone does not finish the job — the count of
+    outliers is the *largest* step whose statistic passes, and every point removed
+    up to that step is an outlier, including ones whose own step failed.
+
+    Keeping only the steps that passed individually is where masking survives the
+    peeling. Twin spikes of 60 and 61 in an otherwise flat series peel as R1=2.95
+    against lambda1=3.31 (fails) and R2=4.12 against lambda2=3.27 (passes): under
+    Rosner both are outliers, while step-by-step scoring reports the smaller one
+    and calls the larger spike a normal period.
     """
     count = len(values)
     remaining = list(range(count))
-    found: list[int] = []
+    peeled: list[int] = []
+    confirmed = 0
     for step in range(1, max_outliers + 1):
         current = values[remaining]
         spread = current.std(ddof=1)
@@ -381,10 +390,11 @@ def _generalized_esd(values: np.ndarray, max_outliers: int) -> list[int]:
         threshold = (
             (count - step) * critical / np.sqrt((degrees + critical**2) * (count - step + 1))
         )
+        peeled.append(remaining[worst])
         if statistic > threshold:
-            found.append(remaining[worst])
+            confirmed = step
         remaining.pop(worst)
-    return sorted(found)
+    return sorted(peeled[:confirmed])
 
 
 def anomalies(series: Series) -> dict[str, object]:

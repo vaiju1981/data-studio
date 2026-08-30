@@ -494,3 +494,101 @@ def test_a_column_that_already_holds_a_rate_is_refused_with_the_reason() -> None
     frame = pd.DataFrame({"segment": ["a", "b"], "rate": [0.4375, 0.0735]})
     with pytest.raises(analysis.NotAnalysable, match="denominator"):
         analysis.compare_rates(frame, "segment", "rate")
+
+
+def test_identical_rates_are_an_answer_rather_than_a_crash() -> None:
+    """An outcome nobody had, or everybody had, empties a column of the two-by-two.
+
+    chi2_contingency raises on the zero expected frequency instead of returning,
+    and the whole comparison came back to the model as an unactionable tool error
+    — for two rates that are simply the same, which is what was asked.
+    """
+    for outcome in ([0] * 20, [1] * 20):
+        frame = pd.DataFrame({"ward": ["A"] * 10 + ["B"] * 10, "readmitted": outcome})
+        comparison = analysis.compare_rates(frame, "ward", "readmitted")["comparison"]
+        assert comparison["risk_difference_pct_points"] == 0.0
+        assert comparison["p_value"] is None
+        assert "no difference to test" in comparison["method"]
+
+
+def test_an_entity_in_two_groups_is_refused_rather_than_counted_twice() -> None:
+    """Grouping by entity *and* dimension counts an entity once per group it visits.
+
+    Three patients where one moved ward reported four observations, described as
+    per-patient — and the collapsed note cannot catch it, because the row count
+    and the observation count agree.
+    """
+    frame = pd.DataFrame(
+        {
+            "patient": ["p1", "p1", "p2", "p3"],
+            "ward": ["A", "B", "A", "B"],
+            "readmitted": [1, 0, 0, 1],
+        }
+    )
+    with pytest.raises(analysis.NotAnalysable, match="more than one ward"):
+        analysis.compare_rates(frame, "ward", "readmitted", entity_column="patient")
+
+
+def test_repeated_rows_for_one_entity_still_collapse_to_one_observation() -> None:
+    """The refusal above must not cost the case entity_column exists for."""
+    patients = [f"p{index}" for index in range(20)]
+    frame = pd.DataFrame(
+        {
+            "patient": [patient for patient in patients for _ in range(3)],
+            "ward": [
+                "A" if int(patient[1:]) < 10 else "B" for patient in patients for _ in range(3)
+            ],
+            "readmitted": [1, 0, 0] * 20,
+        }
+    )
+    result = analysis.compare_rates(frame, "ward", "readmitted", entity_column="patient")
+    assert result["rows_read"] == 60
+    assert result["observations_counted"] == 20
+    assert [group["observed"] for group in result["groups"]] == [10, 10]
+
+
+def test_a_null_dimension_is_a_level_so_the_movements_still_reconcile() -> None:
+    """pivot_table drops a NaN index, and the reading promises the levels add up.
+
+    The rows carrying no region held 100 of a change of 110; the sweep showed 10
+    and said nothing about the rest.
+    """
+    frame = pd.DataFrame(
+        {
+            "period": ["before"] * 3 + ["after"] * 3,
+            "region": ["N", None, "S", "N", None, "S"],
+            "amount": [10, 100, 10, 20, 200, 10],
+        }
+    )
+    result = analysis.rank_drivers(frame, "amount", "period")
+    region = next(item for item in result["drivers"] if item["dimension"] == "region")
+    assert sum(mover["change"] for mover in region["movers"]) == result["total_change"]
+    assert analysis.MISSING_LEVEL in {mover["level"] for mover in region["movers"]}
+
+
+def test_rows_with_no_side_are_named_rather_than_quietly_dropped() -> None:
+    frame = pd.DataFrame(
+        {"period": ["before", "after", None], "region": ["N", "N", "N"], "amount": [1, 2, 99]}
+    )
+    assert "1 row(s)" in analysis.rank_drivers(frame, "amount", "period")["rows_without_a_side"]
+
+
+def test_the_missing_level_does_not_swallow_a_real_value_of_the_same_name() -> None:
+    """The fix for losing part of a dimension must not lose the whole of one.
+
+    A column holding nulls and the literal string "(missing)" collapsed into a
+    single level, became constant, and was dropped from the sweep entirely.
+    """
+    frame = pd.DataFrame(
+        {
+            "period": ["before"] * 3 + ["after"] * 3,
+            "region": ["(missing)", None, "(missing)", "(missing)", None, "(missing)"],
+            "amount": [1, 2, 3, 4, 5, 6],
+        }
+    )
+    result = analysis.rank_drivers(frame, "amount", "period")
+    region = next(item for item in result["drivers"] if item["dimension"] == "region")
+    levels = {mover["level"] for mover in region["movers"]}
+    assert len(levels) == 2, "the nulls and the real value were counted as one level"
+    assert analysis.MISSING_LEVEL in levels
+    assert sum(mover["change"] for mover in region["movers"]) == result["total_change"]
