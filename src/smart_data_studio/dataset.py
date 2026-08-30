@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import io
 import json
 import re
 import shutil
@@ -43,9 +44,14 @@ from smart_data_studio.config import (
     SENSITIVE_COLUMNS,
     temp_directory,
 )
-from smart_data_studio.sql_guard import validate_select
+from smart_data_studio.sql_guard import redact_literals, validate_select
 
 TOTAL_ROWS_COLUMN = "__total_rows"
+# Enough of the file to hold any header a load would accept: MAX_INGEST_COLUMNS
+# names of MAX_HEADER_LENGTH characters do not reach a tenth of it. A header that
+# does not end inside this much of the file is the "first row is data" case, and
+# the checks below are what say so.
+HEADER_SCAN_BYTES = 1024 * 1024
 # Enough to settle a heuristic without scanning a large file for advice.
 WARNING_SAMPLE_ROWS = 200_000
 
@@ -126,6 +132,40 @@ class _CsvByteCounter:
         return len(text)
 
 
+# A cell starting with one of these is a formula to Excel, Sheets and LibreOffice,
+# whatever the CSV quoting says. Tab and carriage return are here because both are
+# stripped before the cell is read, exposing whatever follows.
+_FORMULA_STARTERS = ("=", "+", "-", "@", "\t", "\r")
+# A negative number is not a formula, and prefixing it would corrupt an ordinary
+# column of them that happened to be read as text.
+_PLAIN_NUMBER = re.compile(r"[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?")
+
+
+def _defuse(value: object) -> object:
+    if not isinstance(value, str) or not value.startswith(_FORMULA_STARTERS):
+        return value
+    if _PLAIN_NUMBER.fullmatch(value):
+        return value
+    return "'" + value
+
+
+def defuse_formulas(frame: pd.DataFrame) -> pd.DataFrame:
+    """Stop a downloaded cell from running when the file is opened.
+
+    A cell reading `=cmd|' /C calc'!A1` in the source CSV comes back out of the
+    export unchanged, and a spreadsheet evaluates it. CSV quoting does not help:
+    the value is a formula once it is a cell. The convention for "this is text" is
+    a leading apostrophe, which spreadsheets strip on display.
+
+    Applied to the export and to the size counted for it, so the ceiling is
+    measured on the bytes that are actually written.
+    """
+    text_columns = frame.select_dtypes(include=["object", "string"]).columns
+    if text_columns.empty:
+        return frame
+    return frame.assign(**{str(name): frame[name].map(_defuse) for name in text_columns})
+
+
 def csv_size(frame: pd.DataFrame, header: bool = True) -> int:
     counter = _CsvByteCounter()
     frame.to_csv(counter, index=False, header=header)
@@ -169,32 +209,84 @@ class CsvSource:
                 )
         return cls(name=resolved.name, path=resolved)
 
-    def header_names(self) -> list[str]:
+    @contextmanager
+    def _sniffable(self):
+        """This source as a file DuckDB's sniffer can open.
+
+        An upload has no path until it is loaded, and the leading chunk is enough:
+        the sniffer reads a sample rather than the whole file.
+        """
+        if self.path is not None:
+            yield self.path
+            return
+        with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as handle:
+            handle.write(self.content[:HEADER_SCAN_BYTES])
+            temporary = Path(handle.name)
+        try:
+            yield temporary
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def dialect(self, connection: duckdb.DuckDBPyConnection) -> tuple[str, str] | None:
+        """The delimiter and quote DuckDB will actually read this file with.
+
+        Deciding separately is how the check and the reader disagree.
+        `a;b;c;d,x,x` is four fields read as semicolons and three read as commas:
+        the header check picked semicolons and saw no duplicate, DuckDB picked
+        commas, and the second `x` arrived as `x_1` without a word — the silent
+        rename the check exists to prevent, reached by a different road.
+
+        None when the file cannot be sniffed at all, which read_csv_auto then
+        reports in its own words.
+        """
+        try:
+            with self._sniffable() as path:
+                row = connection.execute(
+                    "SELECT Delimiter, Quote FROM sniff_csv(?)", [str(path)]
+                ).fetchone()
+        except duckdb.Error:
+            return None
+        if not row or not row[0]:
+            return None
+        delimiter, quote = row[0], row[1] or ""
+        return delimiter, (quote if len(quote) == 1 else '"')
+
+    def header_names(self, dialect: tuple[str, str] | None = None) -> list[str]:
         """The header row as written.
 
         Checked before loading because DuckDB silently renames a duplicate to
         `a_1`, so by the time the table exists the collision has been papered over
         and the model is reading a column nobody named.
+
+        One logical record, not one line. CSV allows a newline inside a quoted
+        field, and a header cut at the first physical newline is a different,
+        shorter header: `a,"note\nwrapped",a` came back as ['a', 'note'], the two
+        `a` columns never met each other, and DuckDB performed exactly the silent
+        rename this check exists to prevent.
         """
         if self.content is not None:
-            raw = self.content.split(b"\n", 1)[0]
+            raw = self.content[:HEADER_SCAN_BYTES]
         else:
             with self.path.open("rb") as handle:
-                raw = handle.readline()
+                raw = handle.read(HEADER_SCAN_BYTES)
         # The same ladder decode_csv applies to an upload, so an accented header is
-        # not replaced into a false duplicate. A line break cannot fall inside a
-        # multi-byte sequence, so one line decodes on its own.
-        first, _ = decode_csv(self.name, raw)
-        first = first.rstrip("\r")
-        # Split on whichever separator actually divides this line: assuming a comma
+        # not replaced into a false duplicate.
+        text, _ = decode_csv(self.name, _whole_characters(raw))
+        # The reader's own dialect where it could be sniffed. Otherwise whichever
+        # separator divides the record into the most fields — assuming a comma
         # reads a semicolon or tab file as one enormous field, which disables the
-        # duplicate check below.
+        # duplicate check below entirely.
+        candidates = [dialect] if dialect else [(mark, '"') for mark in (",", ";", "\t", "|")]
         best: list[str] = []
-        for delimiter in (",", ";", "\t", "|"):
-            fields = next(csv.reader([first], delimiter=delimiter), [])
+        for delimiter, quote in candidates:
+            try:
+                reader = csv.reader(io.StringIO(text), delimiter=delimiter, quotechar=quote)
+                fields = next(reader, [])
+            except csv.Error:
+                continue
             if len(fields) > len(best):
                 best = fields
-        return best
+        return [name.rstrip("\r") for name in best]
 
     @classmethod
     def from_upload(cls, name: str, content: bytes) -> CsvSource:
@@ -212,6 +304,25 @@ class CsvSource:
             content=text.encode("utf-8"),
             encoding=encoding,
         )
+
+
+def _whole_characters(raw: bytes) -> bytes:
+    """The prefix of a chunk that does not end mid-character.
+
+    decode_csv falls back to cp1252, which decodes every byte and never raises, so
+    a chunk cut through a multi-byte sequence would be read as Windows-1252 in its
+    entirety — turning every accented header in a UTF-8 file into mojibake, and a
+    pair of identical names into two different ones. A genuinely cp1252 file fails
+    all four trims and is handed over whole, which is correct for it.
+    """
+    for trim in range(4):
+        candidate = raw[: len(raw) - trim]
+        try:
+            candidate.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        return candidate
+    return raw
 
 
 def decode_csv(name: str, content: bytes) -> tuple[str, str]:
@@ -352,7 +463,7 @@ class Dataset:
             for source in source_list:
                 table_name = cls._unique_table_name(source.name, table_names)
                 try:
-                    cls._check_header(source)
+                    cls._check_header(connection, source)
                     with logs.timed("ingest", table=table_name) as fields:
                         cls._load_source(connection, table_name, source)
                         withheld = cls._withhold_sensitive(connection, table_name)
@@ -599,8 +710,8 @@ class Dataset:
         return warnings
 
     @staticmethod
-    def _check_header(source: CsvSource) -> None:
-        names = source.header_names()
+    def _check_header(connection: duckdb.DuckDBPyConnection, source: CsvSource) -> None:
+        names = source.header_names(source.dialect(connection))
         overlong = [name for name in names if len(name) > MAX_HEADER_LENGTH]
         if overlong:
             raise ValueError(
@@ -791,7 +902,7 @@ class Dataset:
             f"SELECT *, COUNT(*) OVER () AS {TOTAL_ROWS_COLUMN} "
             f"FROM ({clean_sql}) AS result_rows LIMIT {int(row_limit)}"
         )
-        with logs.timed("query", sql=clean_sql) as fields:
+        with logs.timed("query", sql=redact_literals(clean_sql)) as fields:
             frame = self.run(counted_sql).fetchdf()
             fields["returned"] = len(frame)
         # Positional, so a result carrying this column name of its own does not
@@ -820,17 +931,22 @@ class Dataset:
             f"SELECT * FROM ({validate_select(sql, set(self.tables), self._withheld_columns())}) "
             f"AS export_rows LIMIT {int(row_limit)}"
         )
-        cursor = self.run(capped)
-        total = 0
-        first = True
-        while True:
-            frame = cursor.fetch_df_chunk()
-            if frame.empty:
-                if first:
-                    total += csv_size(frame)
-                break
-            total += csv_size(frame, header=first)
-            first = False
+        # The deadline is opened around the fetch as well. run()'s own timer is
+        # cancelled the moment it returns, and the chunks are pulled afterwards —
+        # so without this the one path that streams is the one path with no
+        # deadline on it.
+        with self._deadline():
+            cursor = self.run(capped)
+            total = 0
+            first = True
+            while True:
+                frame = cursor.fetch_df_chunk()
+                if frame.empty:
+                    if first:
+                        total += csv_size(defuse_formulas(frame))
+                    break
+                total += csv_size(defuse_formulas(frame), header=first)
+                first = False
         return total
 
     def _withheld_columns(self) -> set[str]:

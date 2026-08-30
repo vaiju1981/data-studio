@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from itertools import count
+
 import sqlglot
 from sqlglot import expressions as exp
 
@@ -76,6 +78,45 @@ def validate_select(sql: str, allowed_tables: set[str], withheld: set[str] | Non
             "Flatten it or use a CTE."
         )
     return statement.sql(dialect="duckdb")
+
+
+def redact_literals(sql: str) -> str:
+    """The query's shape, with everything a cell value can ride in on removed.
+
+    The SQL is logged because it is the evidence behind an answer — but a
+    generated filter carries real cell values, and `WHERE email = 'ada@x.com'`
+    logged verbatim is a cell value in a stream that leaves the host, which is
+    exactly what this app promises not to do. The shape is what diagnoses a slow
+    or wrong query; the value is on the user's own screen beside the answer.
+
+    Three ways in, not one. Masking the literals alone left the other two:
+
+    - A comment is free text the model wrote, `/* ada@x.com */` included, and it
+      survives serialization untouched. It carries no shape, so it simply goes.
+    - A select alias is very often a value: `SUM(CASE WHEN region = 'North' ...)
+      AS North` is the ordinary way to write a pivot, and the label is the cell.
+      Numbered instead, which costs a name and keeps every table, column,
+      function and operator that makes the query diagnosable.
+
+    A table alias is left alone: it is the model's own short name, the column
+    references depend on it, and it never comes from the data.
+    """
+    try:
+        tree = sqlglot.parse_one(sql, read="duckdb")
+    except sqlglot.errors.ParseError:
+        return "unparseable"
+
+    labels = count()
+
+    def mask(node: exp.Expression) -> exp.Expression:
+        node.comments = None
+        if isinstance(node, exp.Literal):
+            return exp.Literal.string("?") if node.is_string else exp.Literal.number(0)
+        if isinstance(node, exp.Alias):
+            return exp.alias_(node.this, f"c{next(labels)}", quoted=False)
+        return node
+
+    return tree.transform(mask).sql(dialect="duckdb", comments=False)
 
 
 def _depth(node: exp.Expression, level: int = 0) -> int:

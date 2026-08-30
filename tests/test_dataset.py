@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 
 import duckdb
+import pandas as pd
 import pytest
 
 from smart_data_studio.config import DIGEST_SAMPLE_ROWS, MAX_LLM_PAYLOAD_CHARS
-from smart_data_studio.dataset import CsvSource, Dataset
+from smart_data_studio.dataset import CsvSource, Dataset, defuse_formulas
 from smart_data_studio.profile import profile_dataset
+from smart_data_studio.sql_guard import redact_literals
 
 SALES = b"region,amount,order_id,note\nNorth,10,1,alpha\nSouth,20,2,beta\nNorth,15,3,gamma\n"
 
@@ -213,3 +215,91 @@ def test_headers_differing_only_in_case_are_refused() -> None:
     Comparing them exactly let through the one collision the check exists for."""
     with pytest.raises(ValueError, match="repeats column name"):
         Dataset.load([CsvSource.from_upload("d.csv", b"a,A,b\n1,2,3\n")])
+
+
+def test_a_duplicate_hidden_behind_a_quoted_newline_is_still_caught() -> None:
+    """CSV allows a newline inside a quoted field; a header is a record, not a line.
+
+    Cut at the first physical newline the header came back short, the two `a`
+    columns never met each other, and DuckDB renamed the second to `a_1` without
+    saying so — which is exactly what this check exists to prevent.
+    """
+    source = CsvSource.from_upload("dup.csv", b'a,"note\nwrapped",a\n1,2,3\n')
+    assert source.header_names() == ["a", "note\nwrapped", "a"]
+    with pytest.raises(ValueError, match="repeats column name"):
+        Dataset.load([source])
+
+
+def test_an_accented_header_survives_the_wider_read() -> None:
+    """The chunk must not be decoded as cp1252, which never fails and mangles UTF-8."""
+    source = CsvSource.from_upload("acc.csv", "région,montant\nA,1\n".encode())
+    assert source.header_names() == ["région", "montant"]
+
+
+def test_a_cell_a_spreadsheet_would_run_is_defused_on_the_way_out() -> None:
+    """CSV quoting does not stop it: the value is a formula once it is a cell."""
+    frame = pd.DataFrame(
+        {"name": ["=cmd|' /C calc'!A1", "+1+1", "@SUM(A1)", "-5", "Ada"], "n": [1, 2, 3, 4, 5]}
+    )
+    defused = defuse_formulas(frame)["name"].tolist()
+    assert defused[:3] == ["'=cmd|' /C calc'!A1", "'+1+1", "'@SUM(A1)"]
+    # A negative number is not a formula, and prefixing it would corrupt the column.
+    assert defused[3:] == ["-5", "Ada"]
+
+
+def test_the_logged_query_carries_the_shape_and_not_the_values() -> None:
+    """The SQL is logged as evidence; a generated filter carries real cell values,
+    and the log is the one stream that leaves the host."""
+    masked = redact_literals("SELECT * FROM people WHERE email = 'ada@example.com' AND age > 40")
+    assert "ada@example.com" not in masked
+    assert "PEOPLE" in masked.upper() and "EMAIL" in masked.upper()
+
+
+def test_the_header_is_split_the_way_duckdb_will_split_it() -> None:
+    """Deciding the delimiter separately is how the check and the reader disagree.
+
+    `a;b;c;d,x,x` is four fields read as semicolons and three read as commas. The
+    check picked semicolons and saw no duplicate; DuckDB picked commas and renamed
+    the second `x` to `x_1` without a word.
+    """
+    ambiguous = CsvSource.from_upload("amb.csv", b"a;b;c;d,x,x\n1,2,3\n")
+    with pytest.raises(ValueError, match="repeats column name"):
+        Dataset.load([ambiguous])
+
+
+def test_a_genuine_semicolon_file_is_still_read_as_one() -> None:
+    """The counterpart: taking the reader's dialect must not break the files the
+    widest-field guess got right."""
+    for body, expected in (
+        (b"a;b;c\n1;2;3\n", ["a", "b", "c"]),
+        (b"a\tb\n1\t2\n", ["a", "b"]),
+        (b"a,b\n1,2\n", ["a", "b"]),
+    ):
+        dataset = Dataset.load([CsvSource.from_upload("f.csv", body)])
+        try:
+            assert [name for name, _ in dataset.schema("f")] == expected
+        finally:
+            dataset.close()
+
+    # And a real duplicate is still caught whatever the delimiter is.
+    with pytest.raises(ValueError, match="repeats column name"):
+        Dataset.load([CsvSource.from_upload("s.csv", b"a;b;b\n1;2;3\n")])
+
+
+def test_a_comment_or_an_alias_cannot_carry_a_value_into_the_log() -> None:
+    """Masking the literals left two other ways in.
+
+    A comment is free text the model wrote and survives serialization untouched;
+    a select alias is very often a cell value, since `SUM(CASE WHEN region =
+    'North' ...) AS North` is the ordinary way to write a pivot.
+    """
+    masked = redact_literals(
+        "SELECT sum(a) AS North, b AS region FROM t o /* ada@example.com */ WHERE x = 'y'"
+    )
+    assert "ada@example.com" not in masked and "North" not in masked
+    # The shape survives: tables, columns, functions and the table alias remain.
+    assert "SUM(a)" in masked and "FROM t AS o" in masked and "b AS c1" in masked
+
+
+def test_unparseable_sql_is_logged_as_a_word_rather_than_verbatim() -> None:
+    assert redact_literals("not sql at all (((") == "unparseable"
