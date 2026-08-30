@@ -651,20 +651,22 @@ class AnalysisTools:
         source = reachable[-1]
         frame = source.frame
         if source.truncated:
-            # The stored frame is capped for the prompt. Charting it would draw a
-            # fraction of the data and still look complete.
-            full = self.dataset.query(source.sql, row_limit=MAX_CHART_ROWS)
-            if full.truncated:
+            # Decided from the count, not by fetching and looking. The stored frame
+            # is capped for the prompt, so a bigger result has to be re-read to be
+            # charted whole — but a result past the chart ceiling can only be
+            # refused, and running the query first to learn what the row count
+            # already said spent a full scan on a refusal.
+            if source.total_rows > MAX_CHART_ROWS:
                 return json.dumps(
                     {
                         "error": (
-                            f"This result has {full.total_rows:,} rows, too many to chart. "
+                            f"This result has {source.total_rows:,} rows, too many to chart. "
                             f"Aggregate or filter it to at most {MAX_CHART_ROWS:,} rows, "
                             "then chart that."
                         )
                     }
                 )
-            frame = full.frame
+            frame = self.dataset.query(source.sql, row_limit=MAX_CHART_ROWS).frame
 
         spec = ChartSpec(kind=kind, x=x, y=y, color=color, title=title)
         try:
@@ -906,17 +908,17 @@ class AnalysisTools:
         source = reachable[-1]
         frame = source.frame
         if source.truncated:
-            full = self.dataset.query(source.sql, row_limit=MAX_CHART_ROWS)
-            if full.truncated:
+            # From the count, for the reason make_chart gives.
+            if source.total_rows > MAX_CHART_ROWS:
                 return json.dumps(
                     {
                         "error": (
-                            f"This result has {full.total_rows:,} rows. Aggregate it to one row "
+                            f"This result has {source.total_rows:,} rows. Aggregate it to one row "
                             "per period (month, week, day) before analysing it as a series."
                         )
                     }
                 )
-            frame = full.frame
+            frame = self.dataset.query(source.sql, row_limit=MAX_CHART_ROWS).frame
         try:
             outcome = analyse(
                 timeseries.prepare(frame, date_column, value_column, coverage_column or None)

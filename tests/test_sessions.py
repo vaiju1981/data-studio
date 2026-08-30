@@ -133,3 +133,31 @@ def test_releasing_workspaces_leaves_the_shared_spill_directory_alone(tmp_path) 
     # Shutdown still clears it, because by then the process is going away.
     sessions.shutdown()
     assert not marker.exists()
+
+
+def test_a_workspace_answering_a_question_is_not_evicted_as_idle(monkeypatch) -> None:
+    """Idleness is measured between page runs, and a question runs inside one.
+
+    An investigation longer than the idle window looked exactly like an abandoned
+    tab, and eviction closes the connection from whichever thread noticed — so the
+    query in flight failed with "Connection already closed" while its own tab was
+    plainly in use.
+    """
+    monkeypatch.setattr(sessions, "SESSION_IDLE_SECONDS", 0)
+    dataset = make_dataset()
+    sessions.register("busy", dataset)
+
+    with sessions.working("busy"):
+        sessions.check_capacity("other")  # evicts what it can
+        assert sessions.active() == 1, "the workspace was released mid-question"
+
+    # Once the question is done it goes idle like any other.
+    sessions.check_capacity("other")
+    assert sessions.active() == 0
+
+
+def test_the_lease_survives_a_workspace_that_is_not_registered() -> None:
+    """The exploration takes the lease straight after registering, and a load that
+    was refused has nothing to hold. It must not raise on the way past."""
+    with sessions.working("never-registered"):
+        pass

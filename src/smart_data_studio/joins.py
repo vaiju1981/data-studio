@@ -210,6 +210,17 @@ def preflight(
     except Exception:
         return None, None  # the SQL guard reports malformed SQL; this is not its job
 
+    # A name this workspace does not have cannot be reasoned about, and every
+    # shape below then reads as an unprovable grain. A typo'd table came back as
+    # "join on the full key, or reduce a side with DISTINCT" — advice about a join
+    # that is not the problem, and a steer the model spends its remaining rounds
+    # following. The SQL guard names the table; leave the message to it.
+    known = {name.lower() for name in dataset.tables}
+    ctes = {cte.alias_or_name.lower() for cte in tree.find_all(exp.CTE)}
+    named = {table.name.lower() for table in tree.find_all(exp.Table) if table.name}
+    if named - ctes - known:
+        return None, None
+
     joins = list(tree.find_all(exp.Join))
     if not joins:
         # Nothing is combined, so nothing can be multiplied.

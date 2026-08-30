@@ -30,6 +30,12 @@ OLLAMA_HOST = os.environ.get("SDS_OLLAMA_HOST", "http://localhost:11434")
 # makes six to ten calls, so a blip would otherwise discard a minute of work.
 MODEL_RETRIES = _number("SDS_MODEL_RETRIES", 2)
 MODEL_RETRY_SECONDS = _number("SDS_MODEL_RETRY_SECONDS", 2)
+# The ollama client defaults to no timeout at all, so a completion that stalls
+# never returns and never raises: the retry above cannot see it, and the session
+# holds its workspace until the process is restarted. A hung call is not a slow
+# one, and the ceiling has to be generous enough for a large model on a long
+# prompt.
+MODEL_TIMEOUT_SECONDS = _number("SDS_MODEL_TIMEOUT_SECONDS", 300)
 # A prompt past the context window is refused rather than truncated, so the
 # conversation is shed and sent again. Three rounds clears the largest history the
 # session limits allow.
@@ -51,6 +57,13 @@ QUERY_TIMEOUT_SECONDS = _number("SDS_QUERY_TIMEOUT_SECONDS", 60)
 # perfectly well, so the upload limit would refuse the case paths exist for.
 MAX_UPLOAD_BYTES = _number("SDS_MAX_UPLOAD_BYTES", 500 * 1024 * 1024)
 MAX_LOCAL_FILE_BYTES = _number("SDS_MAX_LOCAL_FILE_BYTES", 5 * 1024 * 1024 * 1024)
+# A per-file limit does not bound a batch. An upload is held as bytes, decoded to
+# a string and re-encoded before anything is admitted, so a load costs a multiple
+# of the files it carries — and all of that sits outside DUCKDB_MEMORY_LIMIT,
+# which only governs what DuckDB itself allocates. Both are checked before a byte
+# is read, so a full host refuses without paying for the refusal.
+MAX_UPLOAD_TOTAL_BYTES = _number("SDS_MAX_UPLOAD_TOTAL_BYTES", 1024 * 1024 * 1024)
+MAX_FILES_PER_LOAD = _number("SDS_MAX_FILES_PER_LOAD", 20)
 
 # Shape ceilings, necessarily measured once the table is built.
 MAX_INGEST_ROWS = _number("SDS_MAX_INGEST_ROWS", 20_000_000)

@@ -9,8 +9,8 @@ import streamlit as st
 
 from smart_data_studio.agent import Answer
 from smart_data_studio.config import MAX_EXPORT_ROWS, MAX_SESSION_EXPORT_BYTES
-from smart_data_studio.dataset import Dataset, QueryResult, csv_size
-from smart_data_studio.profile import TableProfile
+from smart_data_studio.dataset import Dataset, QueryResult, csv_size, defuse_formulas
+from smart_data_studio.profile import TableProfile, profile_dataset
 from smart_data_studio.tools import AnalysisRecord
 
 # A fenced block or an inline span, kept whole so nothing is escaped inside it.
@@ -148,6 +148,13 @@ def _analysis(analysis: AnalysisRecord, key: str) -> None:
             )
 
 
+EXPORT_HELP = (
+    "A cell that a spreadsheet would run as a formula is written with a leading "
+    "apostrophe, so it opens as the text it is. The table above shows the values as "
+    "they were loaded."
+)
+
+
 def _no_room_for_export(size: int) -> str:
     """Why one more prepared download will not fit, or empty when it will.
 
@@ -177,11 +184,12 @@ def _export(result: QueryResult, key: str, dataset: Dataset) -> None:
     if not result.truncated:
         prepared = st.session_state.get(state_key)
         if prepared is None:
-            refusal = _no_room_for_export(csv_size(result.frame))
+            safe = defuse_formulas(result.frame)
+            refusal = _no_room_for_export(csv_size(safe))
             if refusal:
                 st.error(refusal)
                 return
-            prepared = result.frame.to_csv(index=False).encode("utf-8")
+            prepared = safe.to_csv(index=False).encode("utf-8")
             st.session_state[state_key] = prepared
         st.download_button(
             "Download CSV",
@@ -189,6 +197,7 @@ def _export(result: QueryResult, key: str, dataset: Dataset) -> None:
             file_name=f"query-{key}.csv",
             mime="text/csv",
             key=f"download-{key}",
+            help=EXPORT_HELP,
         )
         return
 
@@ -205,7 +214,7 @@ def _export(result: QueryResult, key: str, dataset: Dataset) -> None:
                 return
             with st.spinner("Building the export…"):
                 full = dataset.query(result.sql, row_limit=MAX_EXPORT_ROWS)
-            payload = full.frame.to_csv(index=False).encode("utf-8")
+            payload = defuse_formulas(full.frame).to_csv(index=False).encode("utf-8")
             refusal = _no_room_for_export(len(payload))
             if refusal:
                 st.error(refusal)
@@ -225,6 +234,7 @@ def _export(result: QueryResult, key: str, dataset: Dataset) -> None:
         file_name=f"query-{key}.csv",
         mime="text/csv",
         key=f"download-{key}",
+        help=EXPORT_HELP,
     )
 
 
@@ -308,10 +318,48 @@ def _repair(dataset: Dataset) -> None:
     if st.button("Convert to number", key="repair-go"):
         table, column = choice
         try:
-            st.session_state.repair_note = dataset.convert_to_number(table, column)
+            note = dataset.convert_to_number(table, column)
+            st.session_state.repair_note = note
+            _forget_the_old_data(dataset, note)
         except ValueError as error:
             st.session_state.repair_note = str(error)
         st.rerun()
+
+
+def _forget_the_old_data(dataset: Dataset, note: str) -> None:
+    """Start the workspace again on the data as it now is.
+
+    A conversion rewrites a column underneath everything already derived from it.
+    Refreshing that table's profile is not enough and is the more dangerous
+    half-measure, because the parts left behind are the ones read as fact later:
+    the exploration write-up in the system prompt, the results a follow-up charts,
+    and the measured join facts the fan-out guard trusts. Every one of those
+    describes a column that no longer exists in that form.
+
+    Every table, not only the converted one: a profile states which columns other
+    tables share, what each key does and which measures are carried under the same
+    name, and all three read across the workspace.
+
+    Kept: the metric definitions, which are the user's own words about their data
+    and are not a measurement of it.
+    """
+    profiles = profile_dataset(dataset)
+    st.session_state.profiles = profiles
+    st.session_state.chat = []
+    st.session_state.understanding = ""
+    st.session_state.relationship_status = {}
+    for stale in [key for key in st.session_state if str(key).startswith("export-")]:
+        del st.session_state[stale]
+    # Said on screen rather than left as an empty panel: the conversation did not
+    # vanish for no reason, and the exploration is not merely unavailable.
+    st.session_state.insight_error = (
+        f"{note} The data changed, so the earlier conversation, charts and measured "
+        "relationships were cleared rather than carried over onto a column they no "
+        "longer describe. Your metric definitions were kept. Ask again to explore afresh."
+    )
+    agent = st.session_state.get("agent")
+    if agent is not None:
+        agent.reset_for_changed_data(profiles)
     if st.session_state.get("repair_note"):
         st.caption(st.session_state.pop("repair_note"))
 

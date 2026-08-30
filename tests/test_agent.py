@@ -731,3 +731,76 @@ def test_a_plan_that_merely_starts_with_nonetheless_is_not_cancelled() -> None:
             assert steps == [], f"{reply!r} should cancel the plan, got {steps}"
         else:
             assert len(steps) == expected, f"{reply!r} should plan {expected} steps, got {steps}"
+
+
+def test_the_model_client_is_built_with_a_timeout() -> None:
+    """The ollama client defaults to no deadline at all.
+
+    A stalled completion then never returns and never raises: it cannot reach the
+    retry below it, and it holds its workspace for the life of the process.
+    """
+    from smart_data_studio.config import MODEL_TIMEOUT_SECONDS
+
+    dataset = Dataset.load([CsvSource.from_upload("sales.csv", SALES)])
+    try:
+        built = DataAgent(dataset, profile_dataset(dataset))
+        assert built.client._client.timeout.read == MODEL_TIMEOUT_SECONDS
+    finally:
+        dataset.close()
+
+
+def test_adopting_a_refreshed_profile_updates_what_the_guards_read() -> None:
+    """A repaired column is a different column, and the guards read the old one.
+
+    The null share is the one that matters: converting text to a number empties
+    whatever will not cast, and a coverage guard still reading 0% skips the check
+    for precisely the column that just gained nulls.
+    """
+    from smart_data_studio.profile import profile_table
+
+    body = b"region,amount\nNorth,10\nSouth,not a number\nNorth,15\n"
+    dataset = Dataset.load([CsvSource.from_upload("sales.csv", body)])
+    try:
+        built = DataAgent(dataset, profile_dataset(dataset), client=FakeClient([]))
+        assert built.tools.null_shares["sales"]["amount"] == 0.0
+
+        dataset.convert_to_number("sales", "amount")
+        built.adopt_profiles([profile_table(dataset, "sales")])
+        assert built.tools.null_shares["sales"]["amount"] > 0.0
+        # And the prompt describes the column as it is now.
+        assert "DOUBLE" in built.messages[0]["content"]
+    finally:
+        dataset.close()
+
+
+def test_a_reset_forgets_what_was_measured_and_keeps_what_the_user_said() -> None:
+    """A repaired column is not the column that was explored, joined and queried.
+
+    Each of these is read again as fact: the write-up goes into the system prompt,
+    the results are what "chart that" reaches back into, and the join facts are
+    what the fan-out guard trusts to decide whether a total double counts.
+    """
+    from smart_data_studio.profile import profile_dataset as reprofile
+
+    dataset = Dataset.load([CsvSource.from_upload("sales.csv", SALES)])
+    try:
+        built = DataAgent(dataset, profile_dataset(dataset), client=FakeClient([]))
+        built.understanding = "amount is text"
+        built.set_metrics("margin = amount minus cost")
+        built.tools.join_facts[("left", "right")] = "measured before the change"
+        built.tools.results.append("a result from before the change")
+        built.tools.analyses.append("an analysis from before the change")
+        built.messages.append({"role": "user", "content": "an earlier question"})
+
+        built.reset_for_changed_data(reprofile(dataset))
+
+        assert built.understanding == ""
+        assert built.tools.join_facts == {} and not built.tools.results
+        assert not built.tools.analyses and built.tools.chart is None
+        assert [message["role"] for message in built.messages] == ["system"]
+        assert not built.relationships.joins and built.relationship_verdicts == {}
+        # Kept: the user's own words about their data, which the change did not touch.
+        assert built.metrics == "margin = amount minus cost"
+        assert "margin = amount minus cost" in built.messages[0]["content"]
+    finally:
+        dataset.close()

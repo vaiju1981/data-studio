@@ -677,3 +677,26 @@ def test_a_histogram_keeps_the_measure_it_was_given() -> None:
     # And with no measure it still counts rows, which is what a histogram is for.
     counted = make_figure(frame, ChartSpec(kind="histogram", x="band"))
     assert all(trace.y is None for trace in counted.data)
+
+
+def test_a_result_too_large_to_chart_is_refused_without_querying_again() -> None:
+    """The re-read could never succeed: the chart ceiling equals the display cap.
+
+    So every oversized result paid for a full scan and a five-thousand-row frame
+    on the way to a refusal the row count had already settled.
+    """
+    rows = "i,v\n" + "".join(f"{index},{index % 13}\n" for index in range(6000))
+    dataset = Dataset.load([CsvSource.from_upload("big.csv", rows.encode())])
+    try:
+        tools = AnalysisTools(dataset)
+        tools.run_sql("SELECT i, v FROM big")
+
+        spent = dataset.queries_run
+        assert "too many to chart" in tools.make_chart("line", "i", "v")
+        assert dataset.queries_run == spent
+
+        spent = dataset.queries_run
+        assert "Aggregate it to one row per period" in tools.analyze_trend("i", "v")
+        assert dataset.queries_run == spent
+    finally:
+        dataset.close()

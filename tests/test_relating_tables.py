@@ -1149,3 +1149,23 @@ def test_a_right_join_that_drops_rows_says_so() -> None:
         assert note and "match nothing" in note, f"a RIGHT join dropped ten rows in silence: {note}"
     finally:
         dataset.close()
+
+
+def test_a_table_the_workspace_does_not_have_gets_the_guard_message(data) -> None:
+    """The preflight runs before validation, so it saw the typo as a missing grain.
+
+    `custmers` came back as "join on the full key, or reduce a side with DISTINCT"
+    — advice about a join shape that is not the problem, and a steer the model
+    spends its remaining rounds following instead of fixing one letter.
+    """
+    from smart_data_studio.tools import AnalysisTools
+
+    refusal, note = joins.preflight(
+        data, "SELECT sum(s.coinIn) FROM sessions s JOIN assts a ON s.assetId = a.assetId"
+    )
+    assert refusal is None and note is None
+
+    answer = AnalysisTools(data).run_sql(
+        "SELECT sum(s.coinIn) FROM sessions s JOIN assts a ON s.assetId = a.assetId"
+    )
+    assert "Unknown table(s): assts" in answer

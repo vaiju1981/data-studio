@@ -301,3 +301,111 @@ def test_money_is_escaped_in_prose_and_left_alone_in_code() -> None:
     fenced = shown.split("```")[1]
     assert "'$US'" in fenced and "\\$" not in fenced, f"a backslash reached the code: {fenced!r}"
     assert "`cost > $100`" in shown, "an inline span is code too"
+
+
+def test_a_batch_is_refused_before_any_of_it_is_read() -> None:
+    """MAX_UPLOAD_BYTES bounds one file and nothing bounded a load.
+
+    Every upload was held as bytes, decoded to a string and re-encoded before the
+    admission check ran, so several near-limit files cost a multiple of their own
+    size — outside DuckDB's budget, and on a host that might already be full. The
+    sizes come from the widget, so a refusal costs nothing.
+    """
+    import pytest
+
+    from smart_data_studio.config import MAX_FILES_PER_LOAD, MAX_UPLOAD_BYTES
+    from smart_data_studio.ui import app
+
+    class Upload:
+        def __init__(self, size: int, name: str = "u.csv"):
+            self.size = size
+            self.name = name
+
+        def getvalue(self):  # pragma: no cover - a refused batch never reads
+            raise AssertionError("the batch was read before it was admitted")
+
+    with pytest.raises(ValueError, match="the limit is"):
+        app._check_batch([Upload(1) for _ in range(MAX_FILES_PER_LOAD + 1)], [])
+
+    # The per-file ceiling here too, from the reported size. CsvSource enforces it
+    # as well, but only once the bytes are in hand — so one oversized file was read
+    # in full and then refused, which is the cost this check exists to avoid.
+    with pytest.raises(ValueError, match="big.csv is"):
+        app._check_batch([Upload(MAX_UPLOAD_BYTES + 1, "big.csv")], [])
+
+    # Each file under the per-file limit, the batch over the aggregate one.
+    with pytest.raises(ValueError, match="These uploads total"):
+        app._check_batch([Upload(400 * 1024 * 1024) for _ in range(3)], [])
+
+    # An ordinary pair is admitted.
+    app._check_batch([Upload(1024), Upload(2048)], [Path("a.csv")])
+
+
+def test_repairing_a_column_re_describes_the_table_it_changed(monkeypatch, tmp_path) -> None:
+    """The profile is captured at load, and a conversion rewrites the column under it.
+
+    The model kept reading text statistics for a column that was now a number, and
+    the coverage guard kept reading the null share the column had *before* the
+    conversion emptied whatever would not cast — which is the one column whose
+    coverage had just become worth checking.
+    """
+    prices = make_csv(tmp_path, "prices.csv", "item,price\na,10\nb,not a price\nc,15\n")
+
+    app = run_app(monkeypatch, tmp_path)
+    app.text_area[0].set_value(str(prices))
+    app.button[0].click().run(timeout=60)
+    assert not app.exception
+
+    agent = app.session_state.agent
+    assert agent.tools.null_shares["prices"]["price"] == 0.0
+
+    app.selectbox[0].select(("prices", "price"))
+    next(button for button in app.button if button.label == "Convert to number").click()
+    app.run(timeout=60)
+
+    assert not app.exception
+    assert dict(app.session_state.dataset.schema("prices"))["price"] == "DOUBLE"
+    # The refreshed profile is what the agent and the panels now read.
+    assert app.session_state.agent.tools.null_shares["prices"]["price"] > 0.0
+    assert [profile.table_name for profile in app.session_state.profiles] == ["prices"]
+
+
+def test_a_repair_clears_everything_measured_on_the_data_as_it_was(monkeypatch, tmp_path) -> None:
+    """Refreshing the profile alone is the more dangerous half-measure.
+
+    What it leaves behind is read as fact later: the exploration write-up sits in
+    the system prompt, "chart that" reaches back into an earlier result computed
+    before the conversion, and the fan-out guard trusts join facts measured
+    against a column that was text at the time.
+    """
+    prices = make_csv(tmp_path, "prices.csv", "item,price\na,10\nb,not a price\nc,15\n")
+    app = run_app(monkeypatch, tmp_path)
+    app.text_area[0].set_value(str(prices))
+    app.button[0].click().run(timeout=60)
+    assert not app.exception
+
+    agent = app.session_state.agent
+    agent.understanding = "price is text"
+    agent.tools.join_facts[("left", "right")] = "measured against text"
+    agent.tools.results.append("a result from before the conversion")
+    agent.messages.append({"role": "user", "content": "earlier question"})
+    # Through the widget, which is where definitions actually live.
+    app.session_state.metrics = "margin = price minus cost"
+    app.session_state.chat = [{"role": "user", "content": "earlier question"}]
+
+    app.selectbox[0].select(("prices", "price"))
+    next(button for button in app.button if button.label == "Convert to number").click()
+    app.run(timeout=60)
+    assert not app.exception
+
+    agent = app.session_state.agent
+    assert agent.understanding == ""
+    assert agent.tools.join_facts == {}
+    assert agent.tools.results == []
+    assert [message["role"] for message in agent.messages] == ["system"]
+    assert app.session_state.chat == []
+    # The user's own words about their data are not a measurement of it.
+    assert agent.metrics == "margin = price minus cost"
+    assert "margin = price minus cost" in agent.messages[0]["content"]
+    # And the screen says why the conversation went, rather than showing a blank.
+    assert "cleared" in app.session_state.insight_error

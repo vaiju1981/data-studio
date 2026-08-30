@@ -8,7 +8,14 @@ import streamlit as st
 
 from smart_data_studio import logs, recent, sessions
 from smart_data_studio.agent import Answer, DataAgent, explain_failure
-from smart_data_studio.config import ALLOW_LOCAL_PATHS, MODEL_ID, OLLAMA_HOST
+from smart_data_studio.config import (
+    ALLOW_LOCAL_PATHS,
+    MAX_FILES_PER_LOAD,
+    MAX_UPLOAD_BYTES,
+    MAX_UPLOAD_TOTAL_BYTES,
+    MODEL_ID,
+    OLLAMA_HOST,
+)
 from smart_data_studio.dataset import CsvSource, Dataset
 from smart_data_studio.profile import profile_dataset
 from smart_data_studio.ui import render
@@ -230,17 +237,53 @@ def _forget() -> None:
     st.rerun()
 
 
+def _check_batch(uploads: list[object], local: list[Path]) -> None:
+    """Refuse a batch before any of it is read.
+
+    MAX_UPLOAD_BYTES bounds one file and nothing bounds a load. Every upload is
+    held as bytes, decoded into a string and re-encoded before the first table is
+    built, so a handful of near-limit files costs a multiple of their own size —
+    and none of it is inside DuckDB's memory budget, which governs only what
+    DuckDB allocates. The sizes are read from the widget rather than from the
+    bytes, so a refusal costs nothing.
+    """
+    if len(uploads) + len(local) > MAX_FILES_PER_LOAD:
+        raise ValueError(
+            f"{len(uploads) + len(local)} files chosen; the limit is "
+            f"{MAX_FILES_PER_LOAD} in one load. Load them in smaller batches."
+        )
+    sizes = [int(getattr(upload, "size", 0) or 0) for upload in uploads]
+    # The per-file ceiling too, from the same reported size. CsvSource.from_upload
+    # enforces it as well, but only once the bytes are in hand — so a single file
+    # over the limit was read in full and then refused, which is the cost this
+    # check exists to avoid.
+    for upload, size in zip(uploads, sizes, strict=True):
+        if size > MAX_UPLOAD_BYTES:
+            raise ValueError(
+                f"{getattr(upload, 'name', 'This file')} is {size / 1e6:.0f}MB; the limit is "
+                f"{MAX_UPLOAD_BYTES / 1e6:.0f}MB."
+            )
+    total = sum(sizes)
+    if total > MAX_UPLOAD_TOTAL_BYTES:
+        raise ValueError(
+            f"These uploads total {total / 1e6:.0f}MB; the limit is "
+            f"{MAX_UPLOAD_TOTAL_BYTES / 1e6:.0f}MB in one load."
+        )
+
+
 def _load(uploads: list[object], paths: str, chosen: list[str] | None = None) -> None:
     try:
         local = [Path(line.strip()) for line in paths.splitlines() if line.strip()]
         # Remembered files and a newly typed one load together, so adding a second
         # table to a set you already use does not mean retyping the first.
         local = [Path(item) for item in chosen or []] + local
+        # Both checks come before the uploads are materialised. Reading half a
+        # gigabyte into memory and then discovering the host is full is the one
+        # ordering that costs the most and admits the least.
+        sessions.check_capacity(st.session_state.session_id)
+        _check_batch(uploads, local)
         sources = [CsvSource.from_upload(upload.name, upload.getvalue()) for upload in uploads]
         sources.extend(CsvSource.from_path(path) for path in local)
-        # Before the load: refusing a large file once it is parsed and profiled
-        # wastes the time and the memory both.
-        sessions.check_capacity(st.session_state.session_id)
         with st.spinner("Loading and profiling your data…"):
             dataset = Dataset.load(sources)
             try:
@@ -278,7 +321,10 @@ def _load(uploads: list[object], paths: str, chosen: list[str] | None = None) ->
         # Verdicts describe the workspace that is going away, not the new one.
         st.session_state.relationship_status = {}
         try:
-            with st.spinner("Exploring your data…"):
+            # Under the lease, like a question: this is several model calls and a
+            # measured join per proposal, and registration has already happened —
+            # so a slow exploration was an idle workspace another tab could close.
+            with st.spinner("Exploring your data…"), sessions.working(st.session_state.session_id):
                 st.session_state.understanding = agent.build_understanding()
                 # After exploring, so the proposal sees what exploring established.
                 agent.propose_relationships()
@@ -330,12 +376,17 @@ def _answer(question: str) -> None:
     with st.chat_message("assistant"):
         with st.status("Working through it…", expanded=True) as status:
             try:
-                answer = st.session_state.agent.ask(
-                    question,
-                    multi_turn=st.session_state.mode == MULTI_TURN,
-                    depth=DEPTHS[st.session_state.depth],
-                    progress=lambda message: _progress(status, message),
-                )
+                # Held live for the whole question. touch() runs once per page
+                # run and a question runs inside one, so an investigation longer
+                # than the idle window looked abandoned and another tab could
+                # close this workspace's connection mid-query.
+                with sessions.working(st.session_state.session_id):
+                    answer = st.session_state.agent.ask(
+                        question,
+                        multi_turn=st.session_state.mode == MULTI_TURN,
+                        depth=DEPTHS[st.session_state.depth],
+                        progress=lambda message: _progress(status, message),
+                    )
                 status.update(label="Done", state="complete", expanded=False)
             except Exception as error:
                 logs.failure("answer.failed")

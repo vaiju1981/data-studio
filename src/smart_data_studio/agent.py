@@ -24,6 +24,7 @@ from smart_data_studio.config import (
     MODEL_ID,
     MODEL_RETRIES,
     MODEL_RETRY_SECONDS,
+    MODEL_TIMEOUT_SECONDS,
     OLLAMA_HOST,
 )
 from smart_data_studio.dataset import Dataset, QueryResult
@@ -58,7 +59,10 @@ def explain_failure(error: Exception) -> str:
             "`SDS_OLLAMA_HOST` at the endpoint you use."
         )
     if isinstance(error, httpx.TimeoutException):
-        return f"{MODEL_ID} did not respond in time. A smaller model answers faster."
+        return (
+            f"{MODEL_ID} did not respond within {MODEL_TIMEOUT_SECONDS}s. A smaller model "
+            "answers faster, or raise `SDS_MODEL_TIMEOUT_SECONDS`."
+        )
     status = getattr(error, "status_code", None)
     if status == 404:
         return (
@@ -261,10 +265,58 @@ class DataAgent:
     ):
         self.dataset = dataset
         self.profiles = profiles
-        self.client = client or ollama.Client(host=OLLAMA_HOST)
+        # With a timeout, always. The client's own default is None — no deadline
+        # at all — so a stalled completion never raises, never reaches the retry
+        # in _chat_once, and holds this workspace for the life of the process.
+        self.client = client or ollama.Client(host=OLLAMA_HOST, timeout=MODEL_TIMEOUT_SECONDS)
         # One toolset for the whole conversation, so "now chart that" can reach an
         # earlier turn's result.
         self.tools = AnalysisTools(dataset)
+        self.understanding = ""
+        self.metrics = ""
+        self.relationships = proposals.Proposals()
+        # Belongs to this agent, so a reloaded dataset starts with no verdicts.
+        self.relationship_verdicts: dict[str, str] = {}
+        # Set for the duration of one ask(), like tools.question. A caller with
+        # nowhere to show progress passes nothing.
+        self._progress: Callable[[str], None] | None = None
+        self.messages: list[dict[str, Any]] = [{"role": "system", "content": ""}]
+        self.adopt_profiles(profiles)
+
+    def reset_for_changed_data(self, profiles: list[TableProfile]) -> None:
+        """Forget everything that was measured on the data as it was.
+
+        A repaired column is not the column that was explored, joined, queried and
+        charted: its type changed, values that would not cast became null, and its
+        cardinality moved. Refreshing the profile alone left every other derived
+        thing describing the old table — and each of them is read again later:
+
+        - the exploration write-up, quoted into the system prompt as fact;
+        - the conversation and its tool results, which "chart that" reaches back
+          into, drawing a result computed before the change;
+        - measured join facts, which the fan-out guard trusts to decide whether a
+          total double counts, and which were measured against text.
+
+        So all of it goes, and what remains is the profile and the metric
+        definitions — the user's own words about their data, which the conversion
+        did not touch.
+        """
+        self.understanding = ""
+        self.relationships = proposals.Proposals()
+        self.relationship_verdicts = {}
+        # A fresh toolset: results, analyses, the chart and the join facts all
+        # belong to the data as it was.
+        self.tools = AnalysisTools(self.dataset)
+        self.messages = [{"role": "system", "content": ""}]
+        self.adopt_profiles(profiles)
+
+    def adopt_profiles(self, profiles: list[TableProfile]) -> None:
+        """Bind the profiles and everything the guards read out of them.
+
+        Entity keys, dimension values and null shares are each read again on every
+        query, so they are derived once here rather than at each use.
+        """
+        self.profiles = profiles
         self.tools.entity_keys = {
             profile.table_name: profile.entity_key for profile in profiles if profile.entity_key
         }
@@ -281,24 +333,16 @@ class DataAgent:
         }
         self.tools.shared_measures = {
             table: measures
-            for table in dataset.tables
-            if (measures := facts.measure_columns(dataset, table))
+            for table in self.dataset.tables
+            if (measures := facts.measure_columns(self.dataset, table))
             & {
                 name
-                for other in dataset.tables
+                for other in self.dataset.tables
                 if other != table
-                for name in facts.measure_columns(dataset, other)
+                for name in facts.measure_columns(self.dataset, other)
             }
         }
-        self.understanding = ""
-        self.metrics = ""
-        self.relationships = proposals.Proposals()
-        # Belongs to this agent, so a reloaded dataset starts with no verdicts.
-        self.relationship_verdicts: dict[str, str] = {}
-        # Set for the duration of one ask(), like tools.question. A caller with
-        # nowhere to show progress passes nothing.
-        self._progress: Callable[[str], None] | None = None
-        self.messages: list[dict[str, Any]] = [{"role": "system", "content": self._system_prompt()}]
+        self._refresh_system_prompt()
 
     def _refresh_system_prompt(self) -> None:
         """Rebuild messages[0] after anything the prompt is built from changes.

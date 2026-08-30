@@ -32,6 +32,10 @@ class TooManySessions(RuntimeError):
 class _Entry:
     dataset: Dataset
     touched: float = field(default_factory=time.monotonic)
+    # How many questions are running against this workspace right now. Idleness is
+    # measured between page runs, and a question runs inside one — so a long
+    # investigation is indistinguishable from an abandoned tab until it finishes.
+    busy: int = 0
 
 
 _entries: dict[str, _Entry] = {}
@@ -88,6 +92,31 @@ def touch(session_id: str) -> bool:
         return True
 
 
+@contextlib.contextmanager
+def working(session_id: str):
+    """Hold a workspace open for as long as a question is running against it.
+
+    touch() marks a session live once per page run. An investigation can outlast
+    the idle window inside a single run, and eviction closes the DuckDB connection
+    from whichever thread noticed — so the query in flight fails with "Connection
+    already closed" while its own tab is plainly in use.
+    """
+    _mark(session_id, +1)
+    try:
+        yield
+    finally:
+        _mark(session_id, -1)
+
+
+def _mark(session_id: str, delta: int) -> None:
+    with _lock:
+        entry = _entries.get(session_id)
+        if entry is None:
+            return
+        entry.busy = max(0, entry.busy + delta)
+        entry.touched = time.monotonic()
+
+
 def release(session_id: str) -> None:
     with _lock:
         entry = _entries.pop(session_id, None)
@@ -103,7 +132,8 @@ def active() -> int:
 
 def _evict_idle_locked() -> None:
     cutoff = time.monotonic() - SESSION_IDLE_SECONDS
-    stale = [key for key, entry in _entries.items() if entry.touched < cutoff]
+    # A busy workspace is never stale, however long it has been since a page run.
+    stale = [key for key, entry in _entries.items() if not entry.busy and entry.touched < cutoff]
     for key in stale:
         _entries.pop(key).dataset.close()
         logs.event("session.evicted", reason="idle")

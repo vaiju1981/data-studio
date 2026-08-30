@@ -87,8 +87,10 @@ is configured rather than edited.
 | `SDS_SENSITIVE_COLUMNS` | *(empty)* | Comma-separated names; matching columns are withheld from everything the model sees |
 | `SDS_DUCKDB_MEMORY_LIMIT`, `SDS_DUCKDB_THREADS` | `4GB`, `4` | Query budget, applied before the connection locks |
 | `SDS_QUERY_TIMEOUT_SECONDS` | `60` | A query past this is interrupted; the session survives |
+| `SDS_MODEL_TIMEOUT_SECONDS` | `300` | A model call past this is abandoned and retried; without one a stalled completion holds its workspace forever |
 | `SDS_MAX_UPLOAD_BYTES`, `SDS_MAX_INGEST_ROWS`, `SDS_MAX_INGEST_COLUMNS` | 500MB, 20M, 512 | Upload ceilings, checked before parsing |
-| `SDS_MAX_ACTIVE_SESSIONS`, `SDS_SESSION_IDLE_SECONDS` | `8`, `3600` | Concurrent workspaces, and when an idle one is reclaimed |
+| `SDS_MAX_UPLOAD_TOTAL_BYTES`, `SDS_MAX_FILES_PER_LOAD` | 1GB, `20` | Ceilings on a whole load, checked before a byte is read |
+| `SDS_MAX_ACTIVE_SESSIONS`, `SDS_SESSION_IDLE_SECONDS` | `8`, `3600` | Concurrent workspaces, and when an idle one is reclaimed. A workspace answering a question is never idle |
 | `SDS_LOG_FORMAT`, `SDS_LOG_LEVEL` | `json`, `INFO` | Structured logs on stdout |
 
 **Sizing.** Each session holds its own in-memory DuckDB, so a 2.7GB file is a
@@ -100,8 +102,11 @@ turned away rather than the first eight being starved.
 
 - **Logs** are one JSON object per event on stdout, carrying session and question
   ids, the app and prompt versions, and timings for ingest, queries, tool calls and
-  model calls. No cell value is logged. The SQL is, because it is already shown to
-  the user beside every answer.
+  model calls. No cell value is logged: the SQL is, because it is the evidence
+  behind an answer, but every literal, comment and select alias in it is masked
+  first — the three ways a value rides in, since `AS North` is as much a cell as
+  `WHERE region = 'North'`. The log is the one stream that leaves the host; the
+  query itself is on screen beside the answer with everything intact.
 - **Rollback** is redeploying the previous image tag; the app holds no durable
   state, so nothing migrates and nothing needs restoring. That is also the backup
   story: uploads and results live only in the running process and the mounted
