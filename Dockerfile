@@ -22,11 +22,27 @@ COPY requirements.lock /tmp/requirements.lock
 # wheel then installs with its dependencies already satisfied — resolving them
 # afresh from pyproject is how a container ends up running a release nothing was
 # ever run against.
-RUN pip install --no-cache-dir -r /tmp/requirements.lock \
+# Three things in one layer, because each is only worth a layer's cost together.
+#
+# The base image's own packages are upgraded first: it ships whatever was current
+# when the tag was cut, and Debian's openssl was three point releases behind by
+# the time this was scanned.
+#
+# The build tooling is removed last. Nothing installs packages at runtime, so
+# wheel, setuptools and pip are weight and attack surface — wheel and setuptools'
+# vendored jaraco.context were two of the three fixable vulnerabilities found in
+# this image. Nothing in the runtime stack imports pkg_resources, checked across
+# streamlit, plotly, statsmodels, duckdb and ollama, which is what makes dropping
+# setuptools safe rather than brave. pip goes last since it removes the other two.
+RUN apt-get update \
+    && apt-get -y upgrade \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir -r /tmp/requirements.lock \
     && pip install --no-cache-dir --no-deps /tmp/*.whl \
     && rm /tmp/*.whl /tmp/requirements.lock \
     && useradd --create-home --uid 10001 studio \
-    && mkdir -p /workspace/duckdb && chown -R studio:studio /workspace
+    && mkdir -p /workspace/duckdb && chown -R studio:studio /workspace \
+    && pip uninstall -y setuptools wheel pip
 
 USER studio
 WORKDIR /workspace
