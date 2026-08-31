@@ -141,29 +141,33 @@ def test_a_yes_or_no_outcome_is_compared_as_a_rate(agents) -> None:
     reached for was compare_groups, which reports Cliff's delta for a 0/1 column
     and called a sixfold difference in default risk medium.
 
-    Asked three times, because one run is a coin toss: selection measured about
-    four times in five, and a single-run assertion turns that into a test that
-    fails one week in five for no reason. The fixtures are small enough that three
-    runs cost seconds.
+    Asserted as "the tool was used, or the guard fired", because those are the two
+    things this code controls. Whether the model follows the guard is measured by
+    the bank rather than made into a probabilistic gate.
     """
+    import sqlglot
+
     agent = agent_for(agents, "finance")
     question = "What is the default rate for subprime accounts, and how precise is that estimate?"
+    answer = agent.ask(question, multi_turn=False, depth="never")
+    assert mentions(answer.text, 43.75), f"the rate itself is wrong:\n{answer.text}"
 
-    used, seen = 0, []
-    for _ in range(3):
-        answer = agent.ask(question, multi_turn=False, depth="never")
-        assert mentions(answer.text, 43.75), f"the rate itself is wrong:\n{answer.text}"
-        rates = [record for record in answer.analyses if record.kind == "rates"]
-        if not rates:
-            seen.append("worked out by hand")
-            continue
-        used += 1
+    rates = [record for record in answer.analyses if record.kind == "rates"]
+    if rates:
         subprime = next(
             group for group in rates[0].result["groups"] if group["group"] == "subprime"
         )
         assert (subprime["events"], subprime["observed"]) == (14, 32)
         low, high = subprime["interval_95_pct"]
         assert low < 30 and high > 58, f"the interval {low}-{high} carries no uncertainty"
-        seen.append(f"compare_rates, {low}-{high}%")
+        return
 
-    assert used >= 2, "compare_rates was reached for at most once in three: " + "; ".join(seen)
+    warned = [
+        result.sql
+        for result in answer.results
+        if agent.tools._rate_note(sqlglot.parse_one(result.sql, dialect="duckdb"))
+    ]
+    assert warned, (
+        "The rate was calculated manually, but neither compare_rates nor the rate guard "
+        "was reached:\n" + "\n".join(result.sql for result in answer.results)
+    )
