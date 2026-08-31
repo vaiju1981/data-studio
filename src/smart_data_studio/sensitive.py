@@ -27,9 +27,9 @@ import ollama
 from smart_data_studio import logs
 from smart_data_studio.config import (
     MODEL_ID,
-    MODEL_TIMEOUT_SECONDS,
     OLLAMA_HOST,
     PERSONAL_COLUMN_WORDS,
+    PROPOSAL_TIMEOUT_SECONDS,
 )
 from smart_data_studio.dataset import is_sensitive
 
@@ -81,7 +81,7 @@ def propose(schema: dict[str, list[tuple[str, str]]]) -> set[str]:
         for table, table_columns in schema.items()
     )
     try:
-        reply = ollama.Client(host=OLLAMA_HOST, timeout=MODEL_TIMEOUT_SECONDS).chat(
+        reply = ollama.Client(host=OLLAMA_HOST, timeout=PROPOSAL_TIMEOUT_SECONDS).chat(
             model=MODEL_ID,
             messages=[
                 {"role": "system", "content": PROMPT},

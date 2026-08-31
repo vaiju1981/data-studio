@@ -36,6 +36,11 @@ MODEL_RETRY_SECONDS = _number("SDS_MODEL_RETRY_SECONDS", 2)
 # one, and the ceiling has to be generous enough for a large model on a long
 # prompt.
 MODEL_TIMEOUT_SECONDS = _number("SDS_MODEL_TIMEOUT_SECONDS", 300)
+# The sensitive-column proposal is one short classification over column names,
+# and it sits in front of every load. Given the answering timeout it would hold a
+# load for five minutes against an endpoint that had simply hung, to arrive at the
+# same word-list answer it falls back to anyway.
+PROPOSAL_TIMEOUT_SECONDS = _number("SDS_PROPOSAL_TIMEOUT_SECONDS", 30)
 # A prompt past the context window is refused rather than truncated, so the
 # conversation is shed and sent again. Three rounds clears the largest history the
 # session limits allow.

@@ -106,6 +106,7 @@ is configured rather than edited.
 | `SDS_TIME_ZONE` | `UTC` | The zone timestamps carrying an offset are read in. Unpinned, DuckDB takes it from the host and the same question answers differently on two machines |
 | `SDS_QUERY_TIMEOUT_SECONDS` | `60` | A query past this is interrupted; the session survives |
 | `SDS_MODEL_TIMEOUT_SECONDS` | `300` | A model call past this is abandoned and retried; without one a stalled completion holds its workspace forever |
+| `SDS_PROPOSAL_TIMEOUT_SECONDS` | `30` | The sensitive-column proposal only, which sits in front of every load and falls back to a word list |
 | `SDS_MAX_UPLOAD_BYTES`, `SDS_MAX_INGEST_ROWS`, `SDS_MAX_INGEST_COLUMNS` | 500MB, 20M, 512 | Upload ceilings, checked before parsing |
 | `SDS_MAX_UPLOAD_TOTAL_BYTES`, `SDS_MAX_FILES_PER_LOAD` | 1GB, `20` | Ceilings on a whole load, checked before a byte is read |
 | `SDS_MAX_ACTIVE_SESSIONS`, `SDS_SESSION_IDLE_SECONDS` | `8`, `3600` | Concurrent workspaces, and when an idle one is reclaimed. A workspace answering a question is never idle |

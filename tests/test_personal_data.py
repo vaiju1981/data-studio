@@ -201,3 +201,21 @@ def test_a_chosen_column_is_never_loaded() -> None:
             dataset.query("SELECT birthDate FROM people")
     finally:
         dataset.close()
+
+
+def test_a_hung_endpoint_does_not_hold_the_load(monkeypatch) -> None:
+    """This runs in front of every load. On the answering timeout it would freeze
+    one for five minutes against an endpoint that had simply stopped talking, to
+    reach the word-list answer it falls back to in any case."""
+    from smart_data_studio import sensitive
+    from smart_data_studio.config import MODEL_TIMEOUT_SECONDS, PROPOSAL_TIMEOUT_SECONDS
+
+    seen = {}
+
+    def record(**kwargs):
+        seen.update(kwargs)
+        raise TimeoutError("hung")
+
+    monkeypatch.setattr(sensitive.ollama, "Client", record)
+    assert sensitive.propose({"t": [("birthDate", "")]}) == {"birthDate"}
+    assert seen["timeout"] == PROPOSAL_TIMEOUT_SECONDS < MODEL_TIMEOUT_SECONDS
