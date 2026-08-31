@@ -46,6 +46,7 @@ from smart_data_studio.config import (
     QUERY_TIMEOUT_SECONDS,
     SAMPLE_ROWS,
     SENSITIVE_COLUMNS,
+    TIME_ZONE,
     temp_directory,
 )
 from smart_data_studio.sql_guard import redact_literals, validate_select
@@ -844,6 +845,9 @@ class Dataset:
         # memory_limit refuses to hold, the disk holds instead — up to 90% of the
         # volume, which is DuckDB's default and no bound worth the name.
         connection.execute(f"SET max_temp_directory_size='{DUCKDB_TEMP_LIMIT}'")
+        # Pinned, or a timestamp carrying an offset is bucketed by the host's own
+        # zone and the same question answers differently on two machines.
+        connection.execute(f"SET TimeZone='{TIME_ZONE}'")
 
     @staticmethod
     def _withhold_sensitive(connection: duckdb.DuckDBPyConnection, table_name: str) -> list[str]:

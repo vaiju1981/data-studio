@@ -17,11 +17,13 @@ from smart_data_studio.config import (
     ANALYSIS_SAMPLE_SEED,
     COVERAGE_GAP,
     COVERAGE_NULL_FLOOR,
+    CURRENCY_COLUMN_WORDS,
     MAX_ANALYSIS_CELLS,
     MAX_ANALYSIS_ROWS,
     MAX_CHART_ROWS,
     MAX_VALUE_MATCHES,
     MIN_COVERAGE_ROWS,
+    TIME_ZONE,
 )
 from smart_data_studio.dataset import Dataset, QueryResult, quote_identifier
 
@@ -78,6 +80,43 @@ def _filtered_literals(tree: exp.Expression) -> dict[str, set[str]]:
             for item in node.expressions:
                 if isinstance(item, exp.Literal):
                     found.setdefault(node.this.name, set()).add(str(item.this))
+    return found
+
+
+def _is_filtered(column: exp.Column) -> bool:
+    """Whether this reference sits in a WHERE, which settles the column's value."""
+    node = column.parent
+    while node is not None:
+        if isinstance(node, exp.Where):
+            return True
+        node = node.parent
+    return False
+
+
+def _grouped_expressions(tree: exp.Expression) -> list[exp.Expression]:
+    """What the GROUP BY actually groups by, as expressions.
+
+    Both indirections resolved, because the model writes both: `GROUP BY 1` names
+    a position in the select list, and `GROUP BY day` very often names an alias
+    defined there rather than a column of any table.
+    """
+    group = tree.args.get("group")
+    if group is None:
+        return []
+    selected = tree.expressions
+    aliases = {item.alias.lower(): item.this for item in selected if isinstance(item, exp.Alias)}
+    found = []
+    for item in group.expressions:
+        if isinstance(item, exp.Literal) and item.is_int:
+            index = int(item.name) - 1
+            if 0 <= index < len(selected):
+                chosen = selected[index]
+                found.append(chosen.this if isinstance(chosen, exp.Alias) else chosen)
+            continue
+        if isinstance(item, exp.Column) and not item.table and item.name.lower() in aliases:
+            found.append(aliases[item.name.lower()])
+            continue
+        found.append(item)
     return found
 
 
@@ -148,6 +187,9 @@ class AnalysisTools:
         # table -> column -> how much of it is null, from the profile. Only used to
         # decide whether a coverage scan is worth running at all.
         self.null_shares: dict[str, dict[str, float]] = {}
+        # (table, column) -> what a probe found, so a column is measured once per
+        # workspace rather than once per question that mentions it.
+        self.column_facts: dict[tuple[str, str, str], bool] = {}
         self.question = ""
         self.chart: Figure | None = None
         self.chart_spec: ChartSpec | None = None
@@ -204,6 +246,8 @@ class AnalysisTools:
             ("coverage_warning", self._coverage_note),
             ("cohort_warning", self._cohort_note),
             ("rate_warning", self._rate_note),
+            ("currency_warning", self._currency_note),
+            ("timezone_warning", self._timezone_note),
         )
         found = {name: note for name, check in checks if (note := check(tree))}
         if weighting:
@@ -446,6 +490,120 @@ class AnalysisTools:
         if numerator and denominator:
             return f"{numerator} and {denominator}"
         return None
+
+    def _currency_note(self, tree: exp.Expression) -> str | None:
+        """Say so when a total adds several currencies together.
+
+        The arithmetic is valid and the number means nothing: £40 plus ¥40 is 80 of
+        no unit at all. Nothing else catches it — the amounts parse, the column is
+        numeric, and the currency sits in a second column the total never reads.
+        """
+        totalled = {
+            self._owner_of(column)
+            for node in tree.walk()
+            if isinstance(node, (exp.Sum, exp.Avg))
+            for column in node.find_all(exp.Column)
+        }
+        settled = {name.lower() for name in _grouped_columns(tree)} | {
+            column.name.lower() for column in tree.find_all(exp.Column) if _is_filtered(column)
+        }
+        for owner in sorted(filter(None, totalled)):
+            table, measure = owner
+            currency = self._currency_column(table)
+            if currency is None or currency.lower() in settled:
+                continue
+            return (
+                f"{table} records the currency of each row in {currency}, which holds more "
+                f"than one, and this totals {measure} across all of them. Group by "
+                f"{currency} as well, or filter to one, or the total has no unit."
+            )
+        return None
+
+    def _currency_column(self, table: str) -> str | None:
+        """The column saying which currency a row is in, when it holds more than one.
+
+        One currency is not a hazard: a file entirely in euros totals correctly and
+        deserves no note.
+        """
+        for name, _ in self.dataset.schema(table):
+            if not any(word in name.lower() for word in CURRENCY_COLUMN_WORDS):
+                continue
+            key = (table, name, "currency")
+            if key not in self.column_facts:
+                quoted = quote_identifier(name)
+                try:
+                    found = self.dataset.run(
+                        f"SELECT count(DISTINCT {quoted}) FROM {quote_identifier(table)}"
+                    ).fetchone()
+                except Exception:
+                    return None
+                self.column_facts[key] = bool(found) and int(found[0]) > 1
+            if self.column_facts[key]:
+                return name
+        return None
+
+    def _timezone_note(self, tree: exp.Expression) -> str | None:
+        """Say so when a day is taken from an instant recorded in UTC.
+
+        `date_trunc('day', ...)` over values ending in Z groups by the UTC day. A
+        local day starts at a different moment, so every row within the offset of
+        midnight lands in the neighbouring bucket — a difference that never looks
+        like an error, only like a slightly different number.
+        """
+        for expression in _grouped_expressions(tree):
+            # A bare instant groups the same way in every zone — each moment is its
+            # own group. The hazard is a *period* built from one, which is what any
+            # function of it is: date_trunc, a cast to a date, strftime, extract.
+            if isinstance(expression, exp.Column):
+                continue
+            column = next(iter(expression.find_all(exp.Column)), None)
+            owner = self._owner_of(column) if column is not None else None
+            if owner and self._is_an_instant(*owner):
+                return (
+                    f"{owner[1]} is an instant with an offset, not a plain date, so this "
+                    f"buckets it by the {TIME_ZONE} day this workspace is pinned to. Rows "
+                    "within the offset of midnight fall in the neighbouring bucket. The file "
+                    "does not say which local zone applies; if the question is about local "
+                    "days, that zone has to come from whoever asked."
+                )
+        return None
+
+    def _owner_of(self, column: exp.Column) -> tuple[str, str] | None:
+        """The table and column a reference names, where the workspace has one."""
+        wanted = column.name.lower()
+        named = {name.lower() for name in _tables_in(column.parent_select or column)}
+        for table in self.dataset.tables:
+            if named and table.lower() not in named:
+                continue
+            for name, _ in self.dataset.schema(table):
+                if name.lower() == wanted:
+                    return table, name
+        return None
+
+    def _is_an_instant(self, table: str, column: str) -> bool:
+        """Whether this column is a moment in time rather than a plain date.
+
+        The type settles it where DuckDB read an offset while loading, which costs
+        nothing. Only a column still stored as text has to be looked at, and then
+        only at its first rows.
+        """
+        kinds = {name.lower(): kind.upper() for name, kind in self.dataset.schema(table)}
+        if "WITH TIME ZONE" in kinds.get(column.lower(), ""):
+            return True
+        key = (table, column, "utc")
+        if key not in self.column_facts:
+            quoted = quote_identifier(column)
+            try:
+                total, marked = self.dataset.run(
+                    f"SELECT count(*), count_if(regexp_matches(CAST({quoted} AS VARCHAR), "
+                    r"'(Z|[+-]\d{2}:?\d{2})$')) FROM "
+                    f"(SELECT {quoted} FROM {quote_identifier(table)} "
+                    f"WHERE {quoted} IS NOT NULL LIMIT 200)"
+                ).fetchone()
+            except Exception:
+                return False
+            self.column_facts[key] = bool(total) and marked / total > 0.9
+        return self.column_facts[key]
 
     def _reads_as_yes_or_no(self, table: str, column: str) -> bool:
         """Whether a column holds nothing but 0 and 1, checked rather than guessed."""

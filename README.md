@@ -90,6 +90,7 @@ is configured rather than edited.
 | `SDS_SENSITIVE_COLUMNS` | *(empty)* | Comma-separated names; matching columns are withheld from everything the model sees |
 | `SDS_DUCKDB_MEMORY_LIMIT`, `SDS_DUCKDB_THREADS` | `4GB`, `4` | Query budget, applied before the connection locks |
 | `SDS_DUCKDB_TEMP_LIMIT` | `20GB` | What one workspace may spill to disk. DuckDB's own default is 90% of the volume |
+| `SDS_TIME_ZONE` | `UTC` | The zone timestamps carrying an offset are read in. Unpinned, DuckDB takes it from the host and the same question answers differently on two machines |
 | `SDS_QUERY_TIMEOUT_SECONDS` | `60` | A query past this is interrupted; the session survives |
 | `SDS_MODEL_TIMEOUT_SECONDS` | `300` | A model call past this is abandoned and retried; without one a stalled completion holds its workspace forever |
 | `SDS_MAX_UPLOAD_BYTES`, `SDS_MAX_INGEST_ROWS`, `SDS_MAX_INGEST_COLUMNS` | 500MB, 20M, 512 | Upload ceilings, checked before parsing |

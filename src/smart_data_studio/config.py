@@ -56,6 +56,13 @@ DUCKDB_TEMP_DIR = os.environ.get("SDS_DUCKDB_TEMP_DIR", "")
 # fills the volume and takes every other session down with it. Four times the
 # largest file a load will accept, which is room for the worst honest case.
 DUCKDB_TEMP_LIMIT = os.environ.get("SDS_DUCKDB_TEMP_LIMIT", "20GB")
+# The zone every timestamp with an offset is read in. DuckDB otherwise takes this
+# from the host, so `date_trunc('day', booked)` bucketed two events as two days on
+# a UTC server and as one day on a laptop in Los Angeles — the same question, the
+# same file, two answers, decided by which machine ran it. UTC because it is the
+# zone the offsets in a file are relative to; set it to the zone the business runs
+# in if its days are the ones being asked about.
+TIME_ZONE = os.environ.get("SDS_TIME_ZONE", "UTC")
 QUERY_TIMEOUT_SECONDS = _number("SDS_QUERY_TIMEOUT_SECONDS", 60)
 
 # Size ceilings, checked before parsing. A local path gets its own and a looser
@@ -115,6 +122,10 @@ CODE_COLUMN_WORDS = _words(
 
 # Text that means "missing" inside a column that stayed text. The backslash-N is
 # what MySQL and Postgres write on export; the rest are spreadsheet conventions.
+# A column holding which currency an amount is in. Summing across several of them
+# adds pounds to yen and returns a number with no unit.
+CURRENCY_COLUMN_WORDS = _words("SDS_CURRENCY_COLUMN_WORDS", "currency,ccy,curr,denomination")
+
 MISSING_VALUE_MARKERS = _words(
     "SDS_MISSING_VALUE_MARKERS", r"na,n/a,n.a.,nan,null,nil,none,-,--,?,.,#n/a,\N"
 )
