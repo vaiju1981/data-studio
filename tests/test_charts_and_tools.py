@@ -700,3 +700,45 @@ def test_a_result_too_large_to_chart_is_refused_without_querying_again() -> None
         assert dataset.queries_run == spent
     finally:
         dataset.close()
+
+
+def test_a_rate_returned_as_two_counts_is_still_a_rate() -> None:
+    """The shape the model actually writes, and the one the guard did not see.
+
+    Numerator and denominator side by side, with the division done in the prose
+    where nothing checks it. The LEFT JOIN is what makes it a rate rather than two
+    answers: rows of the joined side exist only where there was a match.
+    """
+    accounts = b"account_id,segment\n1,subprime\n2,subprime\n3,prime\n4,prime\n"
+    defaults = b"account_id,amount\n1,50\n"
+    dataset = Dataset.load(
+        [
+            CsvSource.from_upload("accounts.csv", accounts),
+            CsvSource.from_upload("defaults.csv", defaults),
+        ]
+    )
+    try:
+        tools = AnalysisTools(dataset)
+        tools.question = "What is the default rate by segment?"
+        joined = (
+            "FROM accounts a LEFT JOIN defaults d ON a.account_id = d.account_id GROUP BY a.segment"
+        )
+        for sql in (
+            f"SELECT a.segment, count(a.account_id) AS total, count(d.account_id) AS bad {joined}",
+            f"SELECT a.segment, count(*) AS total, count(d.account_id) AS bad {joined}",
+        ):
+            warning = json.loads(tools.run_sql(sql)).get("rate_warning", "")
+            assert "numerator and denominator side by side" in warning, sql
+            assert "compare_rates" in warning
+
+        # One count is not a rate, and neither are two without the LEFT JOIN that
+        # makes one a subset of the other — warning about those would put a caveat
+        # on half the queries anyone writes.
+        for sql in (
+            f"SELECT a.segment, count(d.account_id) AS bad {joined}",
+            "SELECT segment, count(account_id) AS n, count(DISTINCT segment) AS s "
+            "FROM accounts GROUP BY segment",
+        ):
+            assert "rate_warning" not in json.loads(tools.run_sql(sql)), sql
+    finally:
+        dataset.close()

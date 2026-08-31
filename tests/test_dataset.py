@@ -341,3 +341,28 @@ def test_a_windows_1252_file_still_loads_with_its_accents() -> None:
         assert dataset.query("SELECT ville FROM ok").frame.iloc[0, 0] == "Montréal"
     finally:
         dataset.close()
+
+
+def test_a_file_larger_than_the_header_scan_is_still_read_with_the_right_dialect() -> None:
+    """The rewritten copy is a prefix, and a prefix ends mid-row.
+
+    Handed a file cut in the middle of a line, DuckDB's sniffer read a wide comma
+    file as one pipe-separated field, and its header came back as a single column
+    name over a thousand characters long — which the load then refused as "the
+    first row is probably data".
+    """
+    from smart_data_studio.dataset import HEADER_SCAN_BYTES
+
+    names = [f"column_{index:02d}" for index in range(60)]
+    row = ",".join(f"value{index:02d}" for index in range(60))
+    body = ",".join(names) + "\n"
+    while len(body) <= HEADER_SCAN_BYTES:
+        body += row + "\n"
+
+    source = CsvSource.from_upload("wide.csv", body.encode())
+    assert len(body.encode()) > HEADER_SCAN_BYTES, "the fixture must exceed the scan window"
+    dataset = Dataset.load([source])
+    try:
+        assert [name for name, _ in dataset.schema("wide")] == names
+    finally:
+        dataset.close()

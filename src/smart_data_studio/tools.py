@@ -354,12 +354,14 @@ class AnalysisTools:
         A proportion read back as a number looks as certain as any other: 14 of 32
         is 43.75% and anywhere from 28% to 61%, and the query cannot say which.
 
-        Two shapes, because the model writes both and the first version of this
-        caught only one. Averaging a yes-or-no column is a rate; so is dividing one
-        count by another, which is what it writes whenever the outcome lives in a
-        second table and becomes a LEFT JOIN. Tables are not restricted here for
-        the same reason — a readmission rate per age band joins encounters to
-        patients, and requiring a single table missed every rate worth the note.
+        Three shapes, because the model writes all three and each earlier version
+        of this caught one fewer. Averaging a yes-or-no column is a rate; so is
+        dividing one count by another, which is what it writes whenever the
+        outcome lives in a second table and becomes a LEFT JOIN; and so is
+        returning those two counts side by side and doing the division in the
+        prose, where nothing can see it. Tables are not restricted here — a
+        readmission rate per age band joins encounters to patients, and requiring
+        a single table missed every rate worth the note.
         """
         if not _grouped_columns(tree):
             return None
@@ -397,6 +399,52 @@ class AnalysisTools:
             return (
                 f"This divides one count by another per {grouped}, which is a rate. " + _RATE_ADVICE
             )
+
+        side_by_side = self._counts_across_a_left_join(tree)
+        if side_by_side:
+            return (
+                f"This returns {side_by_side} per {grouped}. That is a rate with its "
+                f"numerator and denominator side by side and the division left to be done "
+                f"in the answer, where nothing checks it. " + _RATE_ADVICE
+            )
+        return None
+
+    def _counts_across_a_left_join(self, tree: exp.Expression) -> str | None:
+        """Two counts either side of a LEFT JOIN, which is a rate with no division.
+
+        The LEFT JOIN is what makes one count a subset of the other: rows of the
+        joined side exist only where there was a match, so counting its column
+        against anything from the preserved side is a numerator over a
+        denominator. Two counts without that are an ordinary question with two
+        answers, and warning about those would put a caveat on half the queries
+        anyone writes.
+        """
+        nullable = {
+            join.this.name.lower()
+            for join in tree.find_all(exp.Join)
+            if (join.args.get("side") or "").upper() == "LEFT"
+            and isinstance(join.this, exp.Table)
+            and join.this.name
+        }
+        if not nullable:
+            return None
+
+        sources = joins.sources_in(tree, {name.lower() for name in self.dataset.tables})
+        numerator, denominator = None, None
+        for node in tree.walk():
+            if not isinstance(node, exp.Count):
+                continue
+            columns = list(node.find_all(exp.Column))
+            if not columns:
+                denominator = denominator or "count(*)"  # the whole group
+                continue
+            owner = joins.column_owner(columns[0], sources, self.dataset)
+            if owner in nullable:
+                numerator = numerator or f"count({columns[0].name})"
+            else:
+                denominator = denominator or f"count({columns[0].name})"
+        if numerator and denominator:
+            return f"{numerator} and {denominator}"
         return None
 
     def _reads_as_yes_or_no(self, table: str, column: str) -> bool:

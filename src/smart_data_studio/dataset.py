@@ -209,33 +209,46 @@ class CsvSource:
                 )
         return cls(name=resolved.name, path=resolved)
 
-    def _prefix_text(self) -> str:
-        """The leading chunk of the file, decoded however it happens to be written."""
+    def _prefix(self) -> tuple[str, str, bool]:
+        """The leading chunk decoded, the encoding it was written in, and whether
+        the read stopped short of the end of the file."""
         if self.content is not None:
             raw = self.content[:HEADER_SCAN_BYTES]
+            truncated = len(self.content) > HEADER_SCAN_BYTES
         else:
             with self.path.open("rb") as handle:
                 raw = handle.read(HEADER_SCAN_BYTES)
-        text, _ = decode_csv(self.name, _whole_characters(raw))
-        return text
+            truncated = len(raw) == HEADER_SCAN_BYTES
+        text, encoding = decode_csv(self.name, _whole_characters(raw))
+        return text, encoding, truncated
 
     @contextmanager
     def _sniffable(self):
-        """The leading chunk as UTF-8 on disk — the bytes DuckDB will end up reading.
+        """The file as DuckDB will read it, for the sniffer to look at.
 
-        Always rewritten, never the original path. DuckDB reads UTF-8 only, so
-        sniffing a Windows-1252 file as it sits fails, the delimiter falls back to
-        a guess, and the load then transcodes and sniffs the *converted* file —
-        the two disagreeing again by a different route. A local cp1252 file
-        headed `a;b;c;d,x,x` was guessed as semicolons here, read as commas there,
-        and arrived as x and x_1.
+        A path already in UTF-8 is handed over as it stands, so the sniffer sees
+        the whole file exactly as the loader will. Anything else is rewritten:
+        DuckDB reads UTF-8 only, so sniffing Windows-1252 bytes as they sit
+        returns nothing, the delimiter falls back to a guess, and the load then
+        transcodes and sniffs the *converted* file — the two disagreeing by a
+        different route. A cp1252 file headed `a;b;c;d,x,x` was guessed as
+        semicolons here, read as commas there, and arrived as x and x_1.
 
-        The chunk is enough: the sniffer reads a sample rather than the whole file.
+        A rewritten copy is only the leading chunk, and it is cut back to the last
+        line break. Handed a file ending mid-row the sniffer read a 71-column
+        comma file as one pipe-separated field, and its header came back as a
+        single 1,400-character column name.
         """
+        text, encoding, truncated = self._prefix()
+        if self.path is not None and encoding.startswith("utf-8"):
+            yield self.path
+            return
+        if truncated:
+            text = text[: text.rfind("\n") + 1] or text
         with tempfile.NamedTemporaryFile(
             "w", suffix=".csv", encoding="utf-8", newline="", delete=False
         ) as handle:
-            handle.write(self._prefix_text())
+            handle.write(text)
             temporary = Path(handle.name)
         try:
             yield temporary
@@ -281,7 +294,7 @@ class CsvSource:
         """
         # Decoded with the same ladder decode_csv applies to an upload, so an
         # accented header is not replaced into a false duplicate.
-        text = self._prefix_text()
+        text, _, _ = self._prefix()
         # The reader's own dialect where it could be sniffed. Otherwise whichever
         # separator divides the record into the most fields — assuming a comma
         # reads a semicolon or tab file as one enormous field, which disables the
