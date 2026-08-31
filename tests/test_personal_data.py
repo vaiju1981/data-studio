@@ -89,3 +89,50 @@ def test_a_sprinkling_is_enough_to_be_worth_saying() -> None:
     rows = [b"1,delivered late"] * 96 + [b"2,ada@example.com"] * 4
     body = b"id,note\n" + b"\n".join(rows) + b"\n"
     assert [note for note in warnings_for(body) if "email addresses" in note]
+
+
+# --- what a name says, where a value shape says nothing -----------------------
+
+
+def test_a_date_of_birth_and_a_postcode_are_noticed_by_name() -> None:
+    """Neither has a shape to detect: a date of birth is a date and a postcode is a
+    code. Both identify somebody the moment they sit beside an id, and the real
+    file that prompted this carries both."""
+    body = b"playerId,birthDate,zipCode,coinIn\n1,1970-01-01,89101,10\n2,1980-02-02,89102,20\n"
+    found = [note for note in warnings_for(body) if "the name says personal data" in note]
+    assert found, warnings_for(body)
+    assert "birthDate" in found[0] and "zipCode" in found[0]
+    assert "SDS_SENSITIVE_COLUMNS" in found[0]
+
+
+def test_they_are_named_in_one_warning_rather_than_several() -> None:
+    """Five notes about one decision is five chances to stop reading."""
+    body = b"email,phone,birthDate,postcode,amount\na@b.com,555,1970-01-01,SW1,10\n"
+    found = [note for note in warnings_for(body) if "the name says personal data" in note]
+    assert len(found) == 1, found
+
+
+def test_a_column_already_withheld_is_not_named_again() -> None:
+    """It is already out of everything the model sees."""
+    from smart_data_studio import dataset as dataset_module
+
+    original = dataset_module.SENSITIVE_COLUMNS
+    dataset_module.SENSITIVE_COLUMNS = ("birthdate",)
+    try:
+        body = b"playerId,birthDate,zipCode\n1,1970-01-01,89101\n"
+        found = [note for note in warnings_for(body) if "the name says personal data" in note]
+        assert found and "zipCode" in found[0]
+        assert "birthDate" not in found[0]
+    finally:
+        dataset_module.SENSITIVE_COLUMNS = original
+
+
+@pytest.mark.parametrize(
+    "column", ["gameName", "machineName", "hostName", "cabinetType", "assetNumber"]
+)
+def test_ordinary_columns_that_merely_contain_a_word_are_left_alone(column: str) -> None:
+    """`name` is deliberately not on the list: this file's own data has gameName,
+    machineName and host, and a warning that fires on those is one nobody
+    finishes."""
+    body = f"{column},amount\nx,10\n".encode()
+    assert not [n for n in warnings_for(body) if "the name says personal data" in n]

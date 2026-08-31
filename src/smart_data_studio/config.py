@@ -131,6 +131,19 @@ CURRENCY_COLUMN_WORDS = _words("SDS_CURRENCY_COLUMN_WORDS", "currency,ccy,curr,d
 # is very often called notes or comment — a name no list would have on it.
 PERSONAL_DATA_SHARE = float(os.environ.get("SDS_PERSONAL_DATA_SHARE", "0.02"))
 
+# Names that say a column is about a person even when its values look ordinary. A
+# date of birth is a date and a postcode is a code: no value-shape test will ever
+# catch either, and both identify somebody when set beside an id.
+#
+# Deliberately specific. "name" is not here: gameName, machineName and hostName
+# are all common, and a warning that fires on those is one nobody finishes
+# reading.
+PERSONAL_COLUMN_WORDS = _words(
+    "SDS_PERSONAL_COLUMN_WORDS",
+    "email,phone,mobile,birth,dob,ssn,passport,nationalid,address,postcode,"
+    "zipcode,zip,postal,firstname,lastname,surname,fullname",
+)
+
 MISSING_VALUE_MARKERS = _words(
     "SDS_MISSING_VALUE_MARKERS", r"na,n/a,n.a.,nan,null,nil,none,-,--,?,.,#n/a,\N"
 )

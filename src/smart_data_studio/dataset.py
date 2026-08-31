@@ -43,6 +43,7 @@ from smart_data_studio.config import (
     MAX_SESSION_QUERIES,
     MAX_UPLOAD_BYTES,
     MISSING_VALUE_MARKERS,
+    PERSONAL_COLUMN_WORDS,
     PERSONAL_DATA_SHARE,
     QUERY_TIMEOUT_SECONDS,
     SAMPLE_ROWS,
@@ -665,6 +666,32 @@ def decode_csv(name: str, content: bytes) -> tuple[str, str]:
     )
 
 
+def _personal_by_name(names: list[str]) -> str | None:
+    """Columns whose *name* says they are about a person and which are not withheld.
+
+    The value scan reads shapes, and the two columns that matter most here have
+    no shape to read: a date of birth is a date, a postcode is a code. Both
+    identify somebody the moment they sit beside an id, and both reach a model
+    endpoint that may not be on this machine.
+
+    One warning listing them rather than one each — five separate notes about the
+    same decision is five chances to stop reading.
+    """
+    found = [
+        name
+        for name in names
+        if not is_sensitive(name) and any(word in name.lower() for word in PERSONAL_COLUMN_WORDS)
+    ]
+    if not found:
+        return None
+    return (
+        f"{', '.join(found)} — the name says personal data, and none of it is withheld. "
+        "The schema, the samples, the value dictionary and every query result are sent to "
+        "the configured model endpoint. Name these in SDS_SENSITIVE_COLUMNS if that "
+        "endpoint should not receive them."
+    )
+
+
 def _personal_data_note(name: str, present: int, emails: int, cards: int) -> str | None:
     """Say when a column's *values* are personal, whatever the column is called.
 
@@ -950,6 +977,9 @@ class Dataset:
         if not described:
             return []
 
+        named = _personal_by_name([name for name, _ in described])
+        warnings = [named] if named else []
+
         projections = ["count(*) AS total"]
         for index, (name, kind) in enumerate(described):
             column = quote_identifier(name)
@@ -1010,7 +1040,6 @@ class Dataset:
         values = row.iloc[0].to_dict()
         total = int(values["total"])
 
-        warnings: list[str] = []
         numeric_names = sum(1 for name, _ in described if re.fullmatch(r"[-+]?[0-9.,]+", name))
         # Compared rather than cast: these arrive as floats and an empty table makes
         # them NaN, which int() refuses. This runs before the no-rows guard below.
