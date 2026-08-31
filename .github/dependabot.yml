@@ -15,3 +15,13 @@ updates:
     directory: "/"
     schedule:
       interval: monthly
+    # Patch and security rebuilds of the 3.10 image, never a move off it. The
+    # development environment is Python 3.10 and the lockfile is resolved against
+    # it, so a bump to 3.14 is a pull request that cannot pass and has to be
+    # closed by hand each month — which is how a red check stops being read.
+    # Moving Python version is a decision, not a dependency update.
+    ignore:
+      - dependency-name: "python"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"

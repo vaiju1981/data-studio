@@ -11,9 +11,28 @@ on:
 
 jobs:
   bank:
-    runs-on: [self-hosted]
+    # A repository variable, so a runner can be pointed at without editing this
+    # file. It defaulted to self-hosted with no runner registered, and the effect
+    # was worse than a failure: three scheduled runs queued until GitHub cancelled
+    # them, and nothing anywhere said the bank had not run since it was written.
+    runs-on: ${{ vars.BANK_RUNNER || 'ubuntu-latest' }}
+    # A queue that never starts is invisible; a job that gives up is not.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+      # Before anything slow: every bank here needs a model, and a run that cannot
+      # reach one should say that in ten seconds rather than fail four times over
+      # an hour with four different-looking errors.
+      - name: The endpoint answers
+        env:
+          SDS_OLLAMA_HOST: ${{ vars.SDS_OLLAMA_HOST || 'http://localhost:11434' }}
+        run: |
+          if ! curl -sf --max-time 10 "$SDS_OLLAMA_HOST/api/tags" > /dev/null; then
+            echo "::error::No model endpoint at $SDS_OLLAMA_HOST. Set the"\
+                 "SDS_OLLAMA_HOST repository variable, or register a self-hosted"\
+                 "runner that can reach one and set BANK_RUNNER to its label."
+            exit 1
+          fi
       - name: Install
         run: pip install -e . pytest
       # Three steps rather than one, so a failure names which bank fell over. The
@@ -25,22 +44,26 @@ jobs:
       - name: Domain bank
         env:
           USE_LLM: "1"
+          SDS_OLLAMA_HOST: ${{ vars.SDS_OLLAMA_HOST || 'http://localhost:11434' }}
           SDS_BANK_RESULTS: bank-results.jsonl
         run: pytest tests/test_domain_bank.py -q
       - name: Single-CSV bank
         if: '!cancelled()'
         env:
           USE_LLM: "1"
+          SDS_OLLAMA_HOST: ${{ vars.SDS_OLLAMA_HOST || 'http://localhost:11434' }}
         run: pytest tests/test_question_bank.py -q
       - name: Multi-CSV bank
         if: '!cancelled()'
         env:
           USE_LLM: "1"
+          SDS_OLLAMA_HOST: ${{ vars.SDS_OLLAMA_HOST || 'http://localhost:11434' }}
         run: pytest tests/test_multi_table_bank.py -q
       - name: Answer quality
         if: '!cancelled()'
         env:
           USE_LLM: "1"
+          SDS_OLLAMA_HOST: ${{ vars.SDS_OLLAMA_HOST || 'http://localhost:11434' }}
           SDS_BANK_RESULTS: bank-results.jsonl
         run: pytest tests/test_answer_quality.py -q -s
       # Printed and kept. A rate that scrolls past in a log answers "did it pass
