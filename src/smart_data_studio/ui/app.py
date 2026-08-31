@@ -16,7 +16,13 @@ from smart_data_studio.config import (
     MODEL_ID,
     OLLAMA_HOST,
 )
-from smart_data_studio.dataset import CsvSource, Dataset
+from smart_data_studio.dataset import (
+    COMPRESSED_SUFFIXES,
+    SUPPORTED_SUFFIXES,
+    Dataset,
+    source_from_path,
+    source_from_upload,
+)
 from smart_data_studio.profile import profile_dataset
 from smart_data_studio.ui import render
 
@@ -91,10 +97,13 @@ def _initialize_state() -> None:
 def _sidebar() -> None:
     st.header("Data sources")
     uploads = st.file_uploader(
-        "Upload CSV files",
-        type=["csv"],
+        "Upload data files",
+        type=[suffix.lstrip(".") for suffix in SUPPORTED_SUFFIXES + COMPRESSED_SUFFIXES],
         accept_multiple_files=True,
-        help="Select one or more related CSV files.",
+        help=(
+            "CSV, TSV, Parquet, JSON, NDJSON or Excel, singly or zipped. "
+            "Each sheet of a workbook becomes its own table."
+        ),
     )
     chosen: list[str] = []
     if ALLOW_LOCAL_PATHS:
@@ -114,8 +123,8 @@ def _sidebar() -> None:
                 help="Pick any number. Anything typed below is loaded along with them.",
             )
         paths = st.text_area(
-            "Add a local CSV path" if known else "Or local CSV paths",
-            placeholder="/Users/me/data/sales.csv\n/Users/me/data/regions.csv",
+            "Add a local file path" if known else "Or local file paths",
+            placeholder="/Users/me/data/sales.csv\n/Users/me/data/regions.parquet",
             help="One path per line. Paths are read by the machine running this app.",
         )
     else:
@@ -253,7 +262,7 @@ def _check_batch(uploads: list[object], local: list[Path]) -> None:
             f"{MAX_FILES_PER_LOAD} in one load. Load them in smaller batches."
         )
     sizes = [int(getattr(upload, "size", 0) or 0) for upload in uploads]
-    # The per-file ceiling too, from the same reported size. CsvSource.from_upload
+    # The per-file ceiling too, from the same reported size. The source factory
     # enforces it as well, but only once the bytes are in hand — so a single file
     # over the limit was read in full and then refused, which is the cost this
     # check exists to avoid.
@@ -282,8 +291,8 @@ def _load(uploads: list[object], paths: str, chosen: list[str] | None = None) ->
         # ordering that costs the most and admits the least.
         sessions.check_capacity(st.session_state.session_id)
         _check_batch(uploads, local)
-        sources = [CsvSource.from_upload(upload.name, upload.getvalue()) for upload in uploads]
-        sources.extend(CsvSource.from_path(path) for path in local)
+        sources = [source_from_upload(upload.name, upload.getvalue()) for upload in uploads]
+        sources.extend(source_from_path(path) for path in local)
         with st.spinner("Loading and profiling your data…"):
             dataset = Dataset.load(sources)
             try:

@@ -1,7 +1,8 @@
 # Smart Data Studio
 
-Load one or more CSV files, get an automatic profile and written insights, then
-ask questions in plain English and get back tables, answers and charts.
+Load one or more data files — CSV, TSV, Parquet, JSON, NDJSON or Excel, plain or
+zipped — get an automatic profile and written insights, then ask questions in
+plain English and get back tables, answers and charts.
 
 Every data answer shows the SQL and the result row count that produced it. The
 model writes SQL against an in-memory DuckDB workspace that is locked read-only
@@ -18,13 +19,15 @@ python -m pip install -e .
 streamlit run src/smart_data_studio/ui/app.py
 ```
 
-Open the local URL Streamlit prints. Upload CSV files in the sidebar, or enter one
+Open the local URL Streamlit prints. Upload files in the sidebar, or enter one
 local path per line — paths are resolved on the machine running Streamlit. Load
-several related files and the model can join across them.
+several related files and the model can join across them, whatever mix of formats
+they arrive in. Each sheet of an Excel workbook becomes its own table.
 
 ## How it works
 
-- **Load** — CSVs become DuckDB tables, then the connection is locked
+- **Load** — files become DuckDB tables — Parquet, JSON and compressed CSV
+  through DuckDB's own readers, Excel a sheet at a time — then the connection is locked
   (`enable_external_access=false`, `lock_configuration=true`) so model-written SQL
   cannot reach the filesystem. `sqlglot` separately rejects anything that is not a
   single `SELECT` over the loaded tables.
@@ -83,7 +86,7 @@ is configured rather than edited.
 | Variable | Default | Purpose |
 |---|---|---|
 | `SDS_MODEL_ID`, `SDS_OLLAMA_HOST` | `gemma4:31b-cloud`, `localhost:11434` | Which model, served from where |
-| `SDS_ALLOW_LOCAL_PATHS` | `true` (`false` in the image) | Read CSVs from the host filesystem |
+| `SDS_ALLOW_LOCAL_PATHS` | `true` (`false` in the image) | Read data files from the host filesystem |
 | `SDS_SENSITIVE_COLUMNS` | *(empty)* | Comma-separated names; matching columns are withheld from everything the model sees |
 | `SDS_DUCKDB_MEMORY_LIMIT`, `SDS_DUCKDB_THREADS` | `4GB`, `4` | Query budget, applied before the connection locks |
 | `SDS_QUERY_TIMEOUT_SECONDS` | `60` | A query past this is interrupted; the session survives |

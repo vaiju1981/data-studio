@@ -17,6 +17,7 @@ from pathlib import Path
 RUNTIME = [
     "duckdb",
     "ollama",
+    "openpyxl",
     "pandas",
     "plotly",
     "scipy",

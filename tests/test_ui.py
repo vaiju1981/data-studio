@@ -8,7 +8,7 @@ def test_app_starts_with_csv_empty_state() -> None:
     app = AppTest.from_file(str(app_path)).run(timeout=10)
     assert not app.exception
     assert app.title[0].value == "Smart Data Studio"
-    assert app.file_uploader[0].label == "Upload CSV files"
+    assert app.file_uploader[0].label == "Upload data files"
 
 
 def test_streamlit_is_confined_to_the_ui_package() -> None:
@@ -69,7 +69,7 @@ def test_a_remembered_path_and_a_new_one_load_together(monkeypatch, tmp_path) ->
 def test_the_list_is_absent_until_something_has_been_loaded(monkeypatch, tmp_path) -> None:
     app = run_app(monkeypatch, tmp_path)
     assert not app.multiselect
-    assert app.text_area[0].label == "Or local CSV paths"
+    assert app.text_area[0].label == "Or local file paths"
 
 
 def test_the_selection_survives_a_rerun(monkeypatch, tmp_path) -> None:

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import csv
+import gzip
 import io
 import json
 import re
 import shutil
 import tempfile
 import threading
+import zipfile
 from collections.abc import Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -16,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import duckdb
+import openpyxl
 import pandas as pd
 
 from smart_data_studio import logs
@@ -117,6 +120,17 @@ def is_sensitive(column: str) -> bool:
     return any(marker in lowered for marker in SENSITIVE_COLUMNS)
 
 
+def is_text(kind: str) -> bool:
+    """Whether this column holds text, rather than something built out of it.
+
+    `"VARCHAR" in kind` reads a nested column as text: DuckDB describes a JSON
+    object as `STRUCT("name" VARCHAR)` and a list of strings as `VARCHAR[]`, so
+    the regex meant for free text was handed a struct and ingest failed on an
+    ordinary nested JSON file.
+    """
+    return kind.strip().upper() == "VARCHAR"
+
+
 def quote_identifier(value: str) -> str:
     return f'"{value.replace(chr(34), chr(34) * 2)}"'
 
@@ -170,6 +184,242 @@ def csv_size(frame: pd.DataFrame, header: bool = True) -> int:
     counter = _CsvByteCounter()
     frame.to_csv(counter, index=False, header=header)
     return counter.size
+
+
+def check_column_names(source_name: str, names: list[str]) -> None:
+    """Refuse a header that would arrive as something other than it says.
+
+    Applies to any format that names its own columns. DuckDB matches names
+    without regard to case and silently renames the second `a` to `a_1`, so by the
+    time the table exists the collision has been papered over and the model is
+    reading a column nobody named.
+    """
+    overlong = [name for name in names if len(name) > MAX_HEADER_LENGTH]
+    if overlong:
+        raise ValueError(
+            f"{source_name} has a column name longer than {MAX_HEADER_LENGTH} characters: "
+            f"{overlong[0][:60]}… — the first row is probably data, not a header."
+        )
+    folded = [name.casefold() for name in names]
+    duplicates = sorted(
+        {name for name, key in zip(names, folded, strict=True) if key and folded.count(key) > 1}
+    )
+    if duplicates:
+        raise ValueError(
+            f"{source_name} repeats column name(s): {', '.join(duplicates[:5])}. "
+            "DuckDB matches names without regard to case and would rename the second "
+            "to name_1 without saying so — rename them yourself so the right one is read."
+        )
+
+
+def _read_csv(connection: duckdb.DuckDBPyConnection, table_name: str, path: Path) -> None:
+    connection.execute(
+        f"CREATE TABLE {quote_identifier(table_name)} AS "
+        "SELECT * FROM read_csv_auto(?, header = true, sample_size = -1)",
+        [str(path)],
+    )
+
+
+# What each suffix is read as. The CSV family goes through CsvSource, which
+# carries the encoding, delimiter and header machinery that only text files need;
+# the rest name their own columns and types, so none of that applies to them.
+CSV_SUFFIXES = (".csv", ".tsv", ".txt")
+PARQUET_SUFFIXES = (".parquet", ".pq")
+JSON_SUFFIXES = (".json", ".ndjson", ".jsonl")
+EXCEL_SUFFIXES = (".xlsx", ".xlsm")
+SUPPORTED_SUFFIXES = CSV_SUFFIXES + PARQUET_SUFFIXES + JSON_SUFFIXES + EXCEL_SUFFIXES
+# Unwrapped before the suffix underneath decides the reader.
+COMPRESSED_SUFFIXES = (".gz", ".zip")
+
+
+@dataclass
+class DataFileSource:
+    """A Parquet, JSON or Excel file, as an upload or a local path.
+
+    Apart from CsvSource because none of the CSV hazards exist here: there is no
+    delimiter to sniff, no encoding to guess, and no first row that might be data
+    wearing a header's clothes. What these have instead is Excel's several sheets,
+    which is why a source yields parts rather than one table.
+    """
+
+    name: str
+    kind: str  # one of "parquet", "json", "excel"
+    path: Path | None = None
+    content: bytes | None = None
+    # A sheet parsed once and kept, because check() and create() both read it.
+    _sheets: dict[str, pd.DataFrame] = field(default_factory=dict, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if (self.path is None) == (self.content is None):
+            raise ValueError("A file source needs exactly one of path or content")
+
+    def parts(self) -> list[str]:
+        """The sheet names of a workbook, or one unnamed part for a single table.
+
+        Read with openpyxl rather than pandas because pandas parses every sheet to
+        answer this, and naming the sheets should not cost reading them.
+        """
+        if self.kind != "excel":
+            return [""]
+        book = openpyxl.load_workbook(self._excel_source(), read_only=True)
+        try:
+            return list(book.sheetnames)
+        finally:
+            book.close()
+
+    def check(self, connection: duckdb.DuckDBPyConnection, part: str = "") -> None:
+        if self.kind == "excel":
+            frame = self._sheet(part)
+            check_column_names(f"{self.name} ({part})", [str(name) for name in frame.columns])
+
+    def create(
+        self, connection: duckdb.DuckDBPyConnection, table_name: str, part: str = ""
+    ) -> None:
+        quoted = quote_identifier(table_name)
+        if self.kind == "excel":
+            frame = self._sheet(part)
+            if not len(frame.columns):
+                raise ValueError(f"{self.name} sheet {part} is empty")
+            # Registered under a name of our own rather than relied on to be found
+            # as a local variable, which is what DuckDB's replacement scan would do.
+            connection.register("_incoming", frame)
+            try:
+                connection.execute(f"CREATE TABLE {quoted} AS SELECT * FROM _incoming")
+            finally:
+                connection.unregister("_incoming")
+            return
+        reader = "read_parquet" if self.kind == "parquet" else "read_json_auto"
+        with self._on_disk() as path:
+            connection.execute(f"CREATE TABLE {quoted} AS SELECT * FROM {reader}(?)", [str(path)])
+
+    def _sheet(self, part: str) -> pd.DataFrame:
+        """One sheet as a frame. Parsed on first use, then kept, because the name
+        check and the load both read it."""
+        if part not in self._sheets:
+            # The engine is named rather than guessed, so an .xlsm is read by the
+            # one that handles it rather than refused.
+            self._sheets[part] = pd.read_excel(
+                self._excel_source(), sheet_name=part, engine="openpyxl"
+            )
+        return self._sheets[part]
+
+    def _excel_source(self):
+        """A fresh reader over the workbook, since each parse consumes one."""
+        return io.BytesIO(self.content) if self.content is not None else self.path
+
+    @contextmanager
+    def _on_disk(self):
+        """The file as a path, which is what DuckDB's readers take."""
+        if self.path is not None:
+            yield self.path
+            return
+        suffix = Path(self.name).suffix or ".dat"
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as handle:
+            handle.write(self.content)
+            temporary = Path(handle.name)
+        try:
+            yield temporary
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+def _kind_of(name: str) -> str:
+    """Which reader this filename asks for, refusing anything unsupported."""
+    suffix = Path(name).suffix.lower()
+    if suffix in CSV_SUFFIXES:
+        return "csv"
+    if suffix in PARQUET_SUFFIXES:
+        return "parquet"
+    if suffix in JSON_SUFFIXES:
+        return "json"
+    if suffix in EXCEL_SUFFIXES:
+        return "excel"
+    raise ValueError(
+        f"{safe_name(name)} is a {suffix or 'file with no'} extension, which is not one this "
+        f"reads: {', '.join(SUPPORTED_SUFFIXES)}, optionally .gz or .zip."
+    )
+
+
+def _decompressed(name: str, content: bytes) -> tuple[str, bytes]:
+    """The file inside a .gz or .zip, and the name it carries.
+
+    Bounded by the same ceiling a local file has, because the ratio between a zip
+    and what it holds is chosen by whoever made it and can be enormous.
+    """
+    suffix = Path(name).suffix.lower()
+    if suffix == ".gz":
+        inner = Path(name).stem or "data.csv"
+        with gzip.GzipFile(fileobj=io.BytesIO(content)) as handle:
+            unpacked = handle.read(MAX_LOCAL_FILE_BYTES + 1)
+    else:
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            members = [item for item in archive.infolist() if not item.is_dir()]
+            if len(members) != 1:
+                listed = ", ".join(item.filename for item in members[:5]) or "nothing"
+                raise ValueError(
+                    f"{safe_name(name)} holds {len(members)} files ({listed}); this reads a zip "
+                    "of exactly one. Extract it and load the files you want."
+                )
+            inner = Path(members[0].filename).name
+            with archive.open(members[0]) as handle:
+                unpacked = handle.read(MAX_LOCAL_FILE_BYTES + 1)
+    if len(unpacked) > MAX_LOCAL_FILE_BYTES:
+        raise ValueError(
+            f"{safe_name(name)} expands to more than "
+            f"{MAX_LOCAL_FILE_BYTES / 1e9:.1f}GB; the limit is on what it holds, not its own size."
+        )
+    if not unpacked:
+        raise ValueError(f"{safe_name(name)} is empty inside")
+    return inner, unpacked
+
+
+def source_from_upload(name: str, content: bytes):
+    """The right source for an uploaded file, unwrapping .gz and .zip first."""
+    if Path(name).suffix.lower() in COMPRESSED_SUFFIXES:
+        if len(content) > MAX_UPLOAD_BYTES:
+            raise ValueError(
+                f"{safe_name(name)} is {len(content) / 1e6:.0f}MB; the limit is "
+                f"{MAX_UPLOAD_BYTES / 1e6:.0f}MB."
+            )
+        name, content = _decompressed(name, content)
+    kind = _kind_of(name)
+    if kind == "csv":
+        return CsvSource.from_upload(name, content)
+    if not content:
+        raise ValueError(f"{safe_name(name)} is empty")
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise ValueError(
+            f"{safe_name(name)} is {len(content) / 1e6:.0f}MB; the limit is "
+            f"{MAX_UPLOAD_BYTES / 1e6:.0f}MB."
+        )
+    return DataFileSource(name=safe_name(name), kind=kind, content=content)
+
+
+def source_from_path(path: str | Path):
+    """The right source for a local path, unwrapping .gz and .zip first."""
+    if not ALLOW_LOCAL_PATHS:
+        raise PermissionError(
+            "Loading from a server path is disabled on this deployment. Upload the file."
+        )
+    resolved = Path(path).expanduser().resolve()
+    if resolved.suffix.lower() in COMPRESSED_SUFFIXES:
+        # Read as bytes because the ceiling below is on what it expands to, and a
+        # compressed file small enough to sit on disk is small enough to hold.
+        if not resolved.is_file():
+            raise FileNotFoundError(f"File not found: {resolved}")
+        return source_from_upload(resolved.name, resolved.read_bytes())
+    kind = _kind_of(resolved.name)
+    if kind == "csv":
+        return CsvSource.from_path(resolved)
+    if not resolved.is_file():
+        raise FileNotFoundError(f"File not found: {resolved}")
+    size = resolved.stat().st_size
+    if size > MAX_LOCAL_FILE_BYTES:
+        raise ValueError(
+            f"{resolved.name} is {size / 1e9:.1f}GB; the limit is "
+            f"{MAX_LOCAL_FILE_BYTES / 1e9:.1f}GB."
+        )
+    return DataFileSource(name=resolved.name, kind=kind, path=resolved)
 
 
 @dataclass(frozen=True)
@@ -310,6 +560,42 @@ class CsvSource:
             if len(fields) > len(best):
                 best = fields
         return [name.rstrip("\r") for name in best]
+
+    def parts(self) -> list[str]:
+        """One table per CSV. Excel is the format that splits; this is the answer
+        every other format gives."""
+        return [""]
+
+    def check(self, connection: duckdb.DuckDBPyConnection, part: str = "") -> None:
+        check_column_names(self.name, self.header_names(self.dialect(connection)))
+
+    def create(
+        self, connection: duckdb.DuckDBPyConnection, table_name: str, part: str = ""
+    ) -> None:
+        temporary_path: Path | None = None
+        path = self.path
+        if self.content is not None:
+            with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as temporary_file:
+                temporary_file.write(self.content)
+                temporary_path = Path(temporary_file.name)
+            path = temporary_path
+
+        try:
+            try:
+                _read_csv(connection, table_name, path)
+            except duckdb.InvalidInputException as error:
+                # An upload arrives decoded; a path is handed to DuckDB as it sits
+                # on disk. DuckDB reads UTF-8 only — its latin-1 mode refuses the
+                # 0x80-0x9F range Windows uses for quotes and dashes, and
+                # windows-1252 needs an extension — so the file is rewritten rather
+                # than refused. A path only: content is already UTF-8.
+                if temporary_path is not None or "utf-8 encoded" not in str(error):
+                    raise
+                temporary_path = transcode_to_utf8(path)
+                _read_csv(connection, table_name, temporary_path)
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
 
     @classmethod
     def from_upload(cls, name: str, content: bytes) -> CsvSource:
@@ -472,10 +758,10 @@ class Dataset:
         self.queries_run = 0
 
     @classmethod
-    def load(cls, sources: Iterable[CsvSource]) -> Dataset:
+    def load(cls, sources: Iterable[CsvSource | DataFileSource]) -> Dataset:
         source_list = list(sources)
         if not source_list:
-            raise ValueError("Choose at least one CSV file")
+            raise ValueError("Choose at least one file")
 
         connection = duckdb.connect(database=":memory:")
         table_names: list[str] = []
@@ -484,35 +770,55 @@ class Dataset:
         try:
             cls._apply_budget(connection)
             for source in source_list:
-                table_name = cls._unique_table_name(source.name, table_names)
                 try:
-                    cls._check_header(connection, source)
-                    with logs.timed("ingest", table=table_name) as fields:
-                        cls._load_source(connection, table_name, source)
-                        withheld = cls._withhold_sensitive(connection, table_name)
-                        shape = cls._check_size(connection, table_name)
-                        fields.update(shape)
+                    parts = source.parts()
                 except Exception as error:
-                    # One unreadable file should not cost the others. A half-built
-                    # table is dropped so it cannot be queried as though it loaded.
+                    # A workbook that cannot even be opened names no sheets, and
+                    # that is one rejection rather than none.
                     logs.failure("ingest.failed")
-                    connection.execute(f"DROP TABLE IF EXISTS {quote_identifier(table_name)}")
-                    # Most of these errors name the file themselves.
-                    name = safe_name(source.name)
-                    reason = str(error)
-                    rejected.append(reason if name in reason else f"{name} — {reason}")
+                    rejected.append(cls._rejection(source.name, error))
                     continue
-                table_names.append(table_name)
-                lineage.append(
-                    TableLineage(
-                        table=table_name,
-                        source=safe_name(source.name),
-                        loaded_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                        warnings=cls._column_warnings(connection, table_name),
-                        withheld=withheld,
-                        **shape,
+                for part in parts:
+                    # A sheet becomes its own table, so its name has to reach the
+                    # table name — two sheets of one workbook are not one table.
+                    # Two names for one thing. The table name is built from the
+                    # stem, because Path reads "book.xlsx Orders" as a suffix of
+                    # ".xlsx Orders" and the sheet would never survive into it. The
+                    # origin is what a person reads in the lineage panel, where the
+                    # file and the sheet are both worth seeing.
+                    stem = f"{Path(source.name).stem} {part}" if part else source.name
+                    origin = (
+                        f"{safe_name(source.name)} ({safe_name(part)})"
+                        if part
+                        else safe_name(source.name)
                     )
-                )
+                    table_name = cls._unique_table_name(stem, table_names)
+                    try:
+                        source.check(connection, part)
+                        with logs.timed("ingest", table=table_name) as fields:
+                            source.create(connection, table_name, part)
+                            withheld = cls._withhold_sensitive(connection, table_name)
+                            shape = cls._check_size(connection, table_name)
+                            fields.update(shape)
+                    except Exception as error:
+                        # One unreadable file — or one unreadable sheet — should not
+                        # cost the others. A half-built table is dropped so it cannot
+                        # be queried as though it loaded.
+                        logs.failure("ingest.failed")
+                        connection.execute(f"DROP TABLE IF EXISTS {quote_identifier(table_name)}")
+                        rejected.append(cls._rejection(origin, error))
+                        continue
+                    table_names.append(table_name)
+                    lineage.append(
+                        TableLineage(
+                            table=table_name,
+                            source=origin,
+                            loaded_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                            warnings=cls._column_warnings(connection, table_name),
+                            withheld=withheld,
+                            **shape,
+                        )
+                    )
             if not table_names:
                 raise ValueError("; ".join(rejected))
             connection.execute("SET enable_external_access = false")
@@ -601,7 +907,7 @@ class Dataset:
         projections = ["count(*) AS total"]
         for index, (name, kind) in enumerate(described):
             column = quote_identifier(name)
-            if "VARCHAR" in kind:
+            if is_text(kind):
                 projections += [
                     f"count({column}) AS present_{index}",
                     f"count(TRY_CAST({column} AS DOUBLE)) AS numeric_{index}",
@@ -687,7 +993,7 @@ class Dataset:
             )
 
         for index, (name, kind) in enumerate(described):
-            if "VARCHAR" in kind:
+            if is_text(kind):
                 present = int(values[f"present_{index}"] or 0)
                 if not present:
                     continue
@@ -733,27 +1039,12 @@ class Dataset:
         return warnings
 
     @staticmethod
-    def _check_header(connection: duckdb.DuckDBPyConnection, source: CsvSource) -> None:
-        names = source.header_names(source.dialect(connection))
-        overlong = [name for name in names if len(name) > MAX_HEADER_LENGTH]
-        if overlong:
-            raise ValueError(
-                f"{source.name} has a column name longer than {MAX_HEADER_LENGTH} characters: "
-                f"{overlong[0][:60]}… — the first row is probably data, not a header."
-            )
-        # Compared case-insensitively because DuckDB is: a file with both `a` and
-        # `A` passed this check and then arrived as `a` and `A_1`, which is the
-        # silent rename the check exists to prevent.
-        folded = [name.casefold() for name in names]
-        duplicates = sorted(
-            {name for name, key in zip(names, folded, strict=True) if key and folded.count(key) > 1}
-        )
-        if duplicates:
-            raise ValueError(
-                f"{source.name} repeats column name(s): {', '.join(duplicates[:5])}. "
-                "DuckDB matches names without regard to case and would rename the second "
-                "to name_1 without saying so — rename them yourself so the right one is read."
-            )
+    def _rejection(label: str, error: Exception) -> str:
+        """What to show for a file that could not be read. Most of these errors
+        name the file themselves, and repeating it reads as two problems."""
+        name = safe_name(label)
+        reason = str(error)
+        return reason if name in reason else f"{name} — {reason}"
 
     @staticmethod
     def _unique_table_name(filename: str, existing: list[str]) -> str:
@@ -767,43 +1058,6 @@ class Dataset:
             candidate = f"{base}_{suffix}"
             suffix += 1
         return candidate
-
-    @staticmethod
-    def _load_source(
-        connection: duckdb.DuckDBPyConnection, table_name: str, source: CsvSource
-    ) -> None:
-        temporary_path: Path | None = None
-        path = source.path
-        if source.content is not None:
-            with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as temporary_file:
-                temporary_file.write(source.content)
-                temporary_path = Path(temporary_file.name)
-            path = temporary_path
-
-        try:
-            try:
-                Dataset._read_csv(connection, table_name, path)
-            except duckdb.InvalidInputException as error:
-                # An upload arrives decoded; a path is handed to DuckDB as it sits
-                # on disk. DuckDB reads UTF-8 only — its latin-1 mode refuses the
-                # 0x80-0x9F range Windows uses for quotes and dashes, and
-                # windows-1252 needs an extension — so the file is rewritten rather
-                # than refused. A path only: content is already UTF-8.
-                if temporary_path is not None or "utf-8 encoded" not in str(error):
-                    raise
-                temporary_path = transcode_to_utf8(path)
-                Dataset._read_csv(connection, table_name, temporary_path)
-        finally:
-            if temporary_path is not None:
-                temporary_path.unlink(missing_ok=True)
-
-    @staticmethod
-    def _read_csv(connection: duckdb.DuckDBPyConnection, table_name: str, path: Path) -> None:
-        connection.execute(
-            f"CREATE TABLE {quote_identifier(table_name)} AS "
-            "SELECT * FROM read_csv_auto(?, header = true, sample_size = -1)",
-            [str(path)],
-        )
 
     def schema(self, table_name: str) -> list[tuple[str, str]]:
         self._require_table(table_name)
@@ -991,7 +1245,7 @@ class Dataset:
         kinds = dict(self.schema(table))
         if column not in kinds:
             raise ValueError(f"{table} has no column {column}.")
-        if "VARCHAR" not in kinds[column].upper():
+        if not is_text(kinds[column]):
             raise ValueError(
                 f"{column} is already {kinds[column]}, so there is nothing to convert."
             )
@@ -1060,7 +1314,7 @@ class Dataset:
         return note
 
     def text_columns(self, table: str) -> list[str]:
-        return [name for name, kind in self.schema(table) if "VARCHAR" in kind.upper()]
+        return [name for name, kind in self.schema(table) if is_text(kind)]
 
     def columns_mentioned_in(self, text: str) -> list[str]:
         """Loaded column names that appear in free text.
