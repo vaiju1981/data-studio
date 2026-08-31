@@ -12,13 +12,19 @@ is visible on every commit rather than on the days somebody runs the banks.
 from __future__ import annotations
 
 import pytest
+from domain_bank import BANK as DOMAIN_BANK
 from test_multi_table_bank import BANK as MULTI_BANK
 from test_multi_table_bank import PLAYER_BANK, TRIO_BANK
 from test_question_bank import BANK as SINGLE_BANK
 
 
 def anchored(bank: list[tuple]) -> list[tuple]:
-    return [item for item in bank if any(isinstance(part, list) and part for part in item)]
+    """Questions carrying a figure proved separately.
+
+    A dict counts as well as a list: the domain bank keeps each anchor beside the
+    SQL that proves it, so its anchors are `{sql: value}` rather than `[value]`.
+    """
+    return [item for item in bank if any(isinstance(part, list | dict) and part for part in item)]
 
 
 BANKS = [
@@ -26,6 +32,10 @@ BANKS = [
     ("multi-CSV", MULTI_BANK, 9),
     ("player", PLAYER_BANK, 7),
     ("trio", TRIO_BANK, 3),
+    # Added when this file's own complaint repeated itself: the domain bank was
+    # written, scheduled in CI, and left out of the ratchet that exists so a bank
+    # cannot quietly stop verifying. Every one of its questions carries an anchor.
+    ("domain", DOMAIN_BANK, 13),
 ]
 
 
