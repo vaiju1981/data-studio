@@ -93,6 +93,7 @@ is configured rather than edited.
 | `SDS_MODEL_ID`, `SDS_OLLAMA_HOST` | `gemma4:31b-cloud`, `localhost:11434` | Which model, served from where |
 | `SDS_ALLOW_LOCAL_PATHS` | `true` (`false` in the image) | Read data files from the host filesystem |
 | `SDS_SENSITIVE_COLUMNS` | *(empty)* | Comma-separated names; matching columns are withheld from everything the model sees |
+| `SDS_PERSONAL_DATA_SHARE` | `0.02` | How much of a column has to look like an address or a card number before the load says so. Names are matched by the setting above; values are looked at regardless of the name |
 | `SDS_DUCKDB_MEMORY_LIMIT`, `SDS_DUCKDB_THREADS` | `4GB`, `4` | Query budget, applied before the connection locks |
 | `SDS_DUCKDB_TEMP_LIMIT` | `20GB` | What one workspace may spill to disk. DuckDB's own default is 90% of the volume |
 | `SDS_TIME_ZONE` | `UTC` | The zone timestamps carrying an offset are read in. Unpinned, DuckDB takes it from the host and the same question answers differently on two machines |

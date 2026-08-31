@@ -43,6 +43,7 @@ from smart_data_studio.config import (
     MAX_SESSION_QUERIES,
     MAX_UPLOAD_BYTES,
     MISSING_VALUE_MARKERS,
+    PERSONAL_DATA_SHARE,
     QUERY_TIMEOUT_SECONDS,
     SAMPLE_ROWS,
     SENSITIVE_COLUMNS,
@@ -52,6 +53,14 @@ from smart_data_studio.config import (
 from smart_data_studio.sql_guard import redact_literals, validate_select
 
 TOTAL_ROWS_COLUMN = "__total_rows"
+# Shapes that say a value is about a person rather than about the business. Both
+# are deliberately narrow: this warning's whole worth is that it is worth reading,
+# and a rule that fires on every long number would be ignored within a day.
+EMAIL_SHAPE = r"^[^@\s]+@[^@\s]+\.[a-z]{2,}$"
+# Thirteen to nineteen digits behind a major issuer's prefix, spaces and dashes
+# allowed. An account number of the same length does not begin 4, 51-55, 34, 37
+# or 6011, which is what keeps ordinary identifiers out of this.
+CARD_SHAPE = r"^(4|5[1-5]|3[47]|6011)[0-9 -]{11,17}$"
 # Enough of the file to hold any header a load would accept: MAX_INGEST_COLUMNS
 # names of MAX_HEADER_LENGTH characters do not reach a tenth of it. A header that
 # does not end inside this much of the file is the "first row is data" case, and
@@ -656,6 +665,28 @@ def decode_csv(name: str, content: bytes) -> tuple[str, str]:
     )
 
 
+def _personal_data_note(name: str, present: int, emails: int, cards: int) -> str | None:
+    """Say when a column's *values* are personal, whatever the column is called.
+
+    `SDS_SENSITIVE_COLUMNS` matches names, so it protects `email` and misses
+    `notes` — and a hosted model endpoint receives the profile, the samples and
+    every query result. Naming the column is the operator's decision; noticing it
+    is this code's job, and it cannot be made by reading the header alone.
+    """
+    if is_sensitive(name):
+        return None  # already withheld; saying so again helps nobody
+    for kind, count in (("email addresses", emails), ("payment card numbers", cards)):
+        share = count / present
+        if share >= PERSONAL_DATA_SHARE:
+            return (
+                f"{name} holds what look like {kind} ({share:.0%} of a sample). It is not "
+                "withheld — the schema, samples and query results from it are sent to the "
+                "model. Add it to SDS_SENSITIVE_COLUMNS to keep it out of everything the "
+                "model sees."
+            )
+    return None
+
+
 def _markers() -> str:
     """The missing-value markers as a SQL list, each literal escaped.
 
@@ -944,6 +975,11 @@ class Dataset:
                     # A leading zero marks a code, not a quantity. Casting it away
                     # is the bug, not the fix.
                     f"count_if(regexp_matches({column}, '^0[0-9]+$')) AS coded_{index}",
+                    # Personal data by shape rather than by column name, because
+                    # the column that carries it is usually called notes.
+                    f"count_if(regexp_matches(trim({column}), '{EMAIL_SHAPE}')) AS emails_{index}",
+                    f"count_if(regexp_matches(replace(trim({column}), '-', ''), "
+                    f"'{CARD_SHAPE}')) AS cards_{index}",
                 ]
             elif "DATE" in kind or "TIMESTAMP" in kind:
                 projections += [
@@ -1016,6 +1052,14 @@ class Dataset:
                 decorated = int(values[f"decorated_{index}"] or 0)
                 missing = int(values[f"missing_{index}"] or 0)
                 coded = int(values[f"coded_{index}"] or 0)
+                personal = _personal_data_note(
+                    name,
+                    present,
+                    int(values[f"emails_{index}"] or 0),
+                    int(values[f"cards_{index}"] or 0),
+                )
+                if personal:
+                    warnings.append(personal)
                 if coded / present >= 0.05 or _looks_like_code(name):
                     # An identifier, not a quantity: text is the right type, and a
                     # cast would strip the leading zero.

@@ -126,6 +126,11 @@ CODE_COLUMN_WORDS = _words(
 # adds pounds to yen and returns a number with no unit.
 CURRENCY_COLUMN_WORDS = _words("SDS_CURRENCY_COLUMN_WORDS", "currency,ccy,curr,denomination")
 
+# The share of a text column that has to look like personal data before the load
+# says so. SENSITIVE_COLUMNS matches names, and the column that carries the risk
+# is very often called notes or comment — a name no list would have on it.
+PERSONAL_DATA_SHARE = float(os.environ.get("SDS_PERSONAL_DATA_SHARE", "0.02"))
+
 MISSING_VALUE_MARKERS = _words(
     "SDS_MISSING_VALUE_MARKERS", r"na,n/a,n.a.,nan,null,nil,none,-,--,?,.,#n/a,\N"
 )
