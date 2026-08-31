@@ -74,6 +74,10 @@ def answer(item: Answer, key: str, dataset: Dataset, question: str = "") -> None
             st.caption(label)
             # Generated SQL runs long; without wrapping the tail is simply clipped.
             st.code(result.sql, language="sql", wrap_lines=True)
+            for note in result.warnings.values():
+                # Shown whether or not the answer repeated it. A guard that only
+                # ever speaks to the model is a guard the reader cannot check.
+                st.warning(as_text(note))
             st.dataframe(result.frame, use_container_width=True, hide_index=True)
             _export(result, f"{key}-{index}", dataset)
 
@@ -551,9 +555,10 @@ def empty_state() -> None:
         """
         <div class="empty-card">
           <div class="empty-mark">▦</div>
-          <h2>Start with a CSV</h2>
-          <p>Upload a file or enter a local path. Your data stays in an in-memory database,
-          ready for fast profiling and read-only analysis.</p>
+          <h2>Start with your data</h2>
+          <p>CSV, Parquet, JSON or Excel — uploaded or by local path, several at once so
+          the tables can be joined. It stays in a database in memory, read-only from the
+          moment it is loaded.</p>
         </div>
         """,
         unsafe_allow_html=True,

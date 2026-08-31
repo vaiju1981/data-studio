@@ -204,3 +204,21 @@ def test_nested_columns_are_named_with_the_way_into_them() -> None:
         assert "customer.name" in note, "the note has to say how to reach a field"
     finally:
         dataset.close()
+
+
+def test_a_warning_is_carried_on_the_result_not_only_told_to_the_model(mixed) -> None:
+    """A guard that only ever speaks to the model is a guard the reader cannot
+    check: the model is free to leave it out of the prose, and then nobody saw it.
+
+    The same reasoning already puts the SQL and the row count on screen whether the
+    answer mentions them or not.
+    """
+    mixed.run_sql("SELECT region, sum(amount) AS total FROM sales GROUP BY region")
+    result = mixed.results[-1]
+    assert "currency" in result.warnings.get("currency_warning", "")
+
+
+def test_a_query_with_nothing_wrong_carries_no_warnings(single) -> None:
+    """So the panel stays empty when it should, and a warning means something."""
+    single.run_sql("SELECT region, sum(amount) AS total FROM sales GROUP BY region")
+    assert single.results[-1].warnings == {}

@@ -226,9 +226,11 @@ class AnalysisTools:
             result = self.dataset.query(sql)
         except Exception as error:
             return _dump({"error": str(error)})
+        found = self._warnings(sql, weighting)
+        result.warnings = found
         self.results.append(result)
         payload = self.dataset.tool_payload(result)
-        return _dump({**payload, **self._warnings(sql, weighting)})
+        return _dump({**payload, **found})
 
     def _warnings(self, sql: str, weighting: str | None) -> dict[str, str]:
         """Every warning run_sql can attach, and the only place they are listed.

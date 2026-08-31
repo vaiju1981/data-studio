@@ -715,6 +715,11 @@ class QueryResult:
     sql: str
     frame: pd.DataFrame
     total_rows: int
+    # What the guards said about this query. Carried on the result rather than only
+    # returned to the model, because a warning the model chose not to repeat is a
+    # warning nobody saw — and the same reasoning already puts the SQL and the row
+    # count on screen whether the answer mentions them or not.
+    warnings: dict[str, str] = field(default_factory=dict)
 
     @property
     def truncated(self) -> bool:

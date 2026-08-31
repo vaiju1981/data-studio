@@ -54,7 +54,7 @@ def main() -> None:
 
     if st.session_state.dataset is None:
         st.title("Smart Data Studio")
-        st.caption("Load CSVs, understand their shape, and ask questions in plain English.")
+        st.caption("Load your data, understand its shape, and ask questions in plain English.")
         if st.session_state.expired:
             st.warning(
                 "This workspace was released after sitting idle, so the data is gone from "
