@@ -592,3 +592,30 @@ def test_the_missing_level_does_not_swallow_a_real_value_of_the_same_name() -> N
     assert len(levels) == 2, "the nulls and the real value were counted as one level"
     assert analysis.MISSING_LEVEL in levels
     assert sum(mover["change"] for mover in region["movers"]) == result["total_change"]
+
+
+def test_the_level_standing_for_the_nulls_is_named() -> None:
+    """Where the column already holds "(missing)", the nulls are labelled something
+    else — and a reader who assumes the plain one reads a real value as the
+    missing bucket."""
+
+    def swept(region: list) -> dict:
+        frame = pd.DataFrame(
+            {
+                "period": ["before"] * 3 + ["after"] * 3,
+                "region": region,
+                "amount": [1, 2, 3, 4, 5, 6],
+            }
+        )
+        result = analysis.rank_drivers(frame, "amount", "period")
+        return next(item for item in result["drivers"] if item["dimension"] == "region")
+
+    plain = swept(["N", None, "S", "N", None, "S"])
+    assert plain["missing_level"] == analysis.MISSING_LEVEL
+
+    collided = swept(["(missing)", None, "(missing)", "(missing)", None, "(missing)"])
+    assert collided["missing_level"] != analysis.MISSING_LEVEL
+    assert collided["missing_level"] in {mover["level"] for mover in collided["movers"]}
+
+    # A dimension with no nulls says nothing, rather than naming a level it has not got.
+    assert "missing_level" not in swept(["N", "S", "N", "S", "N", "S"])

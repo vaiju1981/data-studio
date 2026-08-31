@@ -209,18 +209,33 @@ class CsvSource:
                 )
         return cls(name=resolved.name, path=resolved)
 
+    def _prefix_text(self) -> str:
+        """The leading chunk of the file, decoded however it happens to be written."""
+        if self.content is not None:
+            raw = self.content[:HEADER_SCAN_BYTES]
+        else:
+            with self.path.open("rb") as handle:
+                raw = handle.read(HEADER_SCAN_BYTES)
+        text, _ = decode_csv(self.name, _whole_characters(raw))
+        return text
+
     @contextmanager
     def _sniffable(self):
-        """This source as a file DuckDB's sniffer can open.
+        """The leading chunk as UTF-8 on disk — the bytes DuckDB will end up reading.
 
-        An upload has no path until it is loaded, and the leading chunk is enough:
-        the sniffer reads a sample rather than the whole file.
+        Always rewritten, never the original path. DuckDB reads UTF-8 only, so
+        sniffing a Windows-1252 file as it sits fails, the delimiter falls back to
+        a guess, and the load then transcodes and sniffs the *converted* file —
+        the two disagreeing again by a different route. A local cp1252 file
+        headed `a;b;c;d,x,x` was guessed as semicolons here, read as commas there,
+        and arrived as x and x_1.
+
+        The chunk is enough: the sniffer reads a sample rather than the whole file.
         """
-        if self.path is not None:
-            yield self.path
-            return
-        with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as handle:
-            handle.write(self.content[:HEADER_SCAN_BYTES])
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".csv", encoding="utf-8", newline="", delete=False
+        ) as handle:
+            handle.write(self._prefix_text())
             temporary = Path(handle.name)
         try:
             yield temporary
@@ -264,14 +279,9 @@ class CsvSource:
         `a` columns never met each other, and DuckDB performed exactly the silent
         rename this check exists to prevent.
         """
-        if self.content is not None:
-            raw = self.content[:HEADER_SCAN_BYTES]
-        else:
-            with self.path.open("rb") as handle:
-                raw = handle.read(HEADER_SCAN_BYTES)
-        # The same ladder decode_csv applies to an upload, so an accented header is
-        # not replaced into a false duplicate.
-        text, _ = decode_csv(self.name, _whole_characters(raw))
+        # Decoded with the same ladder decode_csv applies to an upload, so an
+        # accented header is not replaced into a false duplicate.
+        text = self._prefix_text()
         # The reader's own dialect where it could be sniffed. Otherwise whichever
         # separator divides the record into the most fields — assuming a comma
         # reads a semicolon or tab file as one enormous field, which disables the

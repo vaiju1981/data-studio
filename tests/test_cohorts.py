@@ -151,3 +151,28 @@ def test_an_entity_with_two_start_dates_belongs_to_one_cohort() -> None:
     starts = {cohort["cohort"]: cohort["size"] for cohort in found["cohorts"]}
     assert starts == {"2026-01-01": 29}, "c1 was counted in a February cohort as well"
     assert found["entities_with_more_than_one_start"]["entities"] == 1
+
+
+def test_activity_rows_need_not_repeat_the_start_date() -> None:
+    """An event table commonly writes the signup on the first row and leaves it
+    blank after.
+
+    Requiring it on every row dropped all the later ones, so two users who signed
+    up in January and came back in February came back as offset 0 alone — a
+    retention curve with the retention missing from it.
+    """
+    rows = ["customer_id,signed_up,ordered_on"]
+    for index in range(30):
+        rows.append(f"c{index},2026-01-05,2026-01-20")
+        rows.append(f"c{index},,2026-02-11")  # the signup is not repeated
+    dataset = loaded(("\n".join(rows) + "\n").encode())
+    try:
+        found = cohorts.cohort_window(
+            dataset, "orders", "customer_id", "signed_up", "ordered_on", "month", 3
+        )
+    finally:
+        dataset.close()
+
+    cohort = found["cohorts"][0]
+    assert cohort["size"] == 30
+    assert [(step["offset"], step["active"]) for step in cohort["retention"]] == [(0, 30), (1, 30)]

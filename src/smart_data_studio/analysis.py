@@ -396,9 +396,13 @@ def rank_drivers(frame: pd.DataFrame, measure: str, split: str) -> dict[str, obj
     # A row with no side belongs to neither total and is left out of every pivot
     # below, so it is counted here and named in the result rather than dropped.
     sideless = int(frame[split].isna().sum())
-    # Nulls become a level of their own, for the reason _as_level gives.
+    # Nulls become a level of their own, for the reason _as_level gives. The label
+    # each column ended up using is kept, since it is not always the same one.
+    missing_labels: dict[str, str] = {}
     for column in [name for name in working.columns if name not in {measure, split}]:
-        working[column] = _as_level(working[column])
+        working[column], label = _as_level(working[column])
+        if label:
+            missing_labels[column] = label
 
     totals = working.groupby(split)[measure].sum()
     overall = float(totals.get(after, 0.0) - totals.get(before, 0.0))
@@ -441,6 +445,11 @@ def rank_drivers(frame: pd.DataFrame, measure: str, split: str) -> dict[str, obj
                 "movers": sorted(movers, key=lambda item: item["change"]),
             }
         )
+        # Named rather than left to be inferred. Where the column already holds the
+        # string "(missing)", the nulls are labelled something else — and a reader
+        # who assumes the plain one reads a real value as the missing bucket.
+        if column in missing_labels:
+            dimensions[-1]["missing_level"] = missing_labels[column]
 
     dimensions.sort(
         key=lambda item: (item["largest_move"], item["lift_over_uniform"] or 0), reverse=True
@@ -463,7 +472,8 @@ def rank_drivers(frame: pd.DataFrame, measure: str, split: str) -> dict[str, obj
             "total change. Each dimension is that same change sliced another way, not a "
             "separate part of it: a move here and a move there are the same movement "
             "counted twice, so never add across dimensions, and a large move locates "
-            "the change rather than explaining it."
+            "the change rather than explaining it. A dimension carrying "
+            "missing_level has nulls, and that is the level they were gathered into."
         ),
     }
     if sideless:
@@ -474,7 +484,7 @@ def rank_drivers(frame: pd.DataFrame, measure: str, split: str) -> dict[str, obj
     return result
 
 
-def _as_level(series: pd.Series) -> pd.Series:
+def _as_level(series: pd.Series) -> tuple[pd.Series, str | None]:
     """Nulls as a level of their own, because pivot_table drops a NaN index.
 
     Left as NaN, every row with a missing value for that dimension leaves the
@@ -489,8 +499,9 @@ def _as_level(series: pd.Series) -> pd.Series:
     losing part of it.
     """
     if not series.isna().any():
-        return series
-    return series.astype(object).where(series.notna(), _missing_label(series))
+        return series, None
+    label = _missing_label(series)
+    return series.astype(object).where(series.notna(), label), label
 
 
 def _missing_label(series: pd.Series) -> str:

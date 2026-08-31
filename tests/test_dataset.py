@@ -303,3 +303,41 @@ def test_a_comment_or_an_alias_cannot_carry_a_value_into_the_log() -> None:
 
 def test_unparseable_sql_is_logged_as_a_word_rather_than_verbatim() -> None:
     assert redact_literals("not sql at all (((") == "unparseable"
+
+
+def test_a_literal_inside_an_aliased_expression_is_masked_too() -> None:
+    """The transform walks parents before children and does not descend into a
+    node it has replaced.
+
+    Renaming the alias in the same pass therefore handed back its expression
+    unvisited, and every literal inside it survived — in exactly the pivot that is
+    the reason for masking aliases at all.
+    """
+    masked = redact_literals("SELECT SUM(CASE WHEN region = 'North' THEN 1 END) AS North FROM t")
+    assert "North" not in masked, f"the value survived inside the alias: {masked}"
+    assert "AS c0" in masked and "CASE WHEN" in masked
+
+
+def test_a_local_file_is_sniffed_in_the_encoding_it_will_be_read_in() -> None:
+    """DuckDB reads UTF-8 only, so sniffing a Windows-1252 file as it sits fails.
+
+    The delimiter then fell back to a guess while the load transcoded and sniffed
+    the converted file — the two disagreeing by a different route, and a;b;c;d,x,x
+    arriving as x and x_1.
+    """
+    body = "a;b;c;d,x,x\n1,2,3\ncafé,5,6\n".encode("cp1252")
+    with pytest.raises(ValueError, match="repeats column name"):
+        Dataset.load([CsvSource.from_upload("amb.csv", body)])
+
+
+def test_a_windows_1252_file_still_loads_with_its_accents() -> None:
+    """The counterpart: normalising before the sniff must not refuse the files it
+    was added to read correctly."""
+    dataset = Dataset.load(
+        [CsvSource.from_upload("ok.csv", "ville,montant\nMontréal,10\n".encode("cp1252"))]
+    )
+    try:
+        assert [name for name, _ in dataset.schema("ok")] == ["ville", "montant"]
+        assert dataset.query("SELECT ville FROM ok").frame.iloc[0, 0] == "Montréal"
+    finally:
+        dataset.close()

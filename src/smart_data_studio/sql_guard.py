@@ -108,15 +108,26 @@ def redact_literals(sql: str) -> str:
 
     labels = count()
 
-    def mask(node: exp.Expression) -> exp.Expression:
+    def mask_values(node: exp.Expression) -> exp.Expression:
         node.comments = None
         if isinstance(node, exp.Literal):
             return exp.Literal.string("?") if node.is_string else exp.Literal.number(0)
+        return node
+
+    def number_aliases(node: exp.Expression) -> exp.Expression:
         if isinstance(node, exp.Alias):
             return exp.alias_(node.this, f"c{next(labels)}", quoted=False)
         return node
 
-    return tree.transform(mask).sql(dialect="duckdb", comments=False)
+    # Two passes, because transform walks parents before children and a replaced
+    # node is not descended into. Renaming the alias in the same pass therefore
+    # returned its expression *unvisited*, and every literal inside it survived —
+    # in exactly the pivot the docstring above calls the reason for masking
+    # aliases at all: `SUM(CASE WHEN region = 'North' ...) AS North` came out
+    # with the label gone and the value still in it.
+    return (
+        tree.transform(mask_values).transform(number_aliases).sql(dialect="duckdb", comments=False)
+    )
 
 
 def _depth(node: exp.Expression, level: int = 0) -> int:

@@ -7,6 +7,7 @@ import re
 import pandas as pd
 import streamlit as st
 
+from smart_data_studio import sessions
 from smart_data_studio.agent import Answer
 from smart_data_studio.config import MAX_EXPORT_ROWS, MAX_SESSION_EXPORT_BYTES
 from smart_data_studio.dataset import Dataset, QueryResult, csv_size, defuse_formulas
@@ -318,9 +319,13 @@ def _repair(dataset: Dataset) -> None:
     if st.button("Convert to number", key="repair-go"):
         table, column = choice
         try:
-            note = dataset.convert_to_number(table, column)
-            st.session_state.repair_note = note
-            _forget_the_old_data(dataset, note)
+            # Under the lease: a conversion rewrites the table and the rebuild
+            # profiles every one of them, which on a large workspace is minutes of
+            # work inside a single page run — indistinguishable from an idle tab.
+            with sessions.working(st.session_state.get("session_id", "")):
+                note = dataset.convert_to_number(table, column)
+                st.session_state.repair_note = note
+                _forget_the_old_data(dataset, note)
         except ValueError as error:
             st.session_state.repair_note = str(error)
         st.rerun()
@@ -343,8 +348,16 @@ def _forget_the_old_data(dataset: Dataset, note: str) -> None:
     Kept: the metric definitions, which are the user's own words about their data
     and are not a measurement of it.
     """
-    profiles = profile_dataset(dataset)
-    st.session_state.profiles = profiles
+    agent = st.session_state.get("agent")
+    # Cleared before the profile is rebuilt, not after. The table has already
+    # changed by the time this runs, so ordering it the other way left a window in
+    # which a failed profile — an out-of-queries workspace, a column SUMMARIZE
+    # refuses — kept the old exploration and the old results attached to data that
+    # no longer matches them. An agent holding no profile is recoverable; one
+    # holding a confident description of a column that changed is not.
+    if agent is not None:
+        agent.reset_for_changed_data([])
+    st.session_state.profiles = []
     st.session_state.chat = []
     st.session_state.understanding = ""
     st.session_state.relationship_status = {}
@@ -357,9 +370,10 @@ def _forget_the_old_data(dataset: Dataset, note: str) -> None:
         "relationships were cleared rather than carried over onto a column they no "
         "longer describe. Your metric definitions were kept. Ask again to explore afresh."
     )
-    agent = st.session_state.get("agent")
+    profiles = profile_dataset(dataset)
+    st.session_state.profiles = profiles
     if agent is not None:
-        agent.reset_for_changed_data(profiles)
+        agent.adopt_profiles(profiles)
     if st.session_state.get("repair_note"):
         st.caption(st.session_state.pop("repair_note"))
 

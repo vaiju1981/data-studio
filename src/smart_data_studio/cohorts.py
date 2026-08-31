@@ -59,17 +59,24 @@ def cohort_window(
 
     frame = dataset.run(f"""
         WITH base AS (
+            -- Every row of the entity, whether or not it carries a start date. An
+            -- event table commonly writes the signup on the first row and leaves
+            -- it blank after, and requiring it here dropped every later row: two
+            -- users with January signups and February activity came back with
+            -- offset 0 alone, a retention curve missing the retention.
             SELECT {entity} AS entity, {started} AS cohort, {acted} AS active
             FROM {quote_identifier(table)}
-            WHERE {entity} IS NOT NULL AND {started} IS NOT NULL
+            WHERE {entity} IS NOT NULL
         ),
         starts AS (
             -- One cohort per entity, and the earliest one. A file carrying the
             -- start date on every activity row can disagree with itself, and the
             -- raw per-row value put a single entity in January and again in
             -- February — counted in two cohort sizes and two sets of numerators,
-            -- which is the one thing a cohort must never be.
-            SELECT entity, min(cohort) AS cohort FROM base GROUP BY 1
+            -- which is the one thing a cohort must never be. An entity with no
+            -- start date at all is in no cohort, which is what the join below does.
+            SELECT entity, min(cohort) AS cohort FROM base
+            WHERE cohort IS NOT NULL GROUP BY 1
         ),
         sized AS (
             -- Every entity that started in the period, whether or not it ever
@@ -103,7 +110,7 @@ def cohort_window(
                    min({acted}) AS first_activity,
                    count(DISTINCT {started}) AS starts
             FROM {quote_identifier(table)}
-            WHERE {entity} IS NOT NULL AND {started} IS NOT NULL
+            WHERE {entity} IS NOT NULL
             GROUP BY 1
         )
         SELECT count(*) FILTER (WHERE first_activity < first_start),

@@ -409,3 +409,46 @@ def test_a_repair_clears_everything_measured_on_the_data_as_it_was(monkeypatch, 
     assert "margin = price minus cost" in agent.messages[0]["content"]
     # And the screen says why the conversation went, rather than showing a blank.
     assert "cleared" in app.session_state.insight_error
+
+
+def test_a_failed_rebuild_still_leaves_no_stale_analysis(monkeypatch) -> None:
+    """The table has already changed by the time the rebuild runs.
+
+    Ordering the clear after the profile left a window where a failed profile — an
+    out-of-queries workspace, a column SUMMARIZE refuses — kept the old
+    exploration and the old results attached to data no longer matching them.
+    """
+    import pytest
+
+    from smart_data_studio.agent import DataAgent
+    from smart_data_studio.dataset import CsvSource, Dataset
+    from smart_data_studio.profile import profile_dataset
+    from smart_data_studio.ui import render
+
+    dataset = Dataset.load([CsvSource.from_upload("s.csv", b"item,price\na,10\nb,20\n")])
+    try:
+        agent = DataAgent(dataset, profile_dataset(dataset), client=object())
+        agent.understanding = "price is text"
+        agent.tools.results.append("a result from before the conversion")
+
+        # Streamlit's session state takes both attribute and key access; a plain
+        # dict takes only the second.
+        class State(dict):
+            __getattr__ = dict.__getitem__
+            __setattr__ = dict.__setitem__
+
+        monkeypatch.setattr(render.st, "session_state", State(agent=agent, profiles=[]))
+        monkeypatch.setattr(
+            render,
+            "profile_dataset",
+            lambda _dataset: (_ for _ in ()).throw(RuntimeError("out of queries")),
+        )
+
+        with pytest.raises(RuntimeError):
+            render._forget_the_old_data(dataset, "converted")
+
+        assert agent.understanding == ""
+        assert agent.tools.results == []
+        assert agent.profiles == []
+    finally:
+        dataset.close()
