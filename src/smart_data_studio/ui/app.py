@@ -163,10 +163,21 @@ def _sidebar() -> None:
 
     if st.session_state.dataset is not None:
         st.divider()
+        reported = len(feedback.recall())
+        # Named rather than left to be discovered in a file: it is the one thing
+        # here that holds data rather than paths, so whoever it belongs to should
+        # be able to see that it exists and how much of it there is.
+        held = (
+            "The list of file paths is kept, on this machine, along with "
+            f"{reported} answer(s) you marked wrong — those hold the question, the SQL "
+            "and the answer, so they can be replayed."
+            if reported
+            else "Only the list of file paths is kept, on this machine, so you need not "
+            "retype them."
+        )
         st.caption(
             "Your data lives in memory and is discarded when the session ends, is replaced, "
-            "or is deleted here. Only the list of file paths is kept, on this machine, so "
-            "you need not retype them; deleting clears that too."
+            f"or is deleted here. {held} Deleting clears all of it."
         )
         if st.button("Delete my data", use_container_width=True):
             _forget()
