@@ -9,6 +9,7 @@ import duckdb
 import pytest
 
 from smart_data_studio import config
+from smart_data_studio import dataset as dataset_module
 from smart_data_studio.dataset import CsvSource, Dataset
 from smart_data_studio.sql_guard import UnsafeQuery
 
@@ -77,14 +78,39 @@ def test_the_duckdb_budget_is_applied_and_then_frozen() -> None:
         settings = dict(
             dataset.connection.execute(
                 "SELECT name, value FROM duckdb_settings() "
-                "WHERE name IN ('memory_limit', 'threads')"
+                "WHERE name IN ('memory_limit', 'threads', 'max_temp_directory_size')"
             ).fetchall()
         )
         assert settings["threads"] == str(config.DUCKDB_THREADS)
         assert settings["memory_limit"] not in ("", None)
+        # Spill is the other half of the budget, and the one DuckDB leaves at 90%
+        # of the whole volume: an in-memory database offloads table data here, so
+        # unbounded it is one large load away from filling the host's disk.
+        assert settings["max_temp_directory_size"] not in ("", None, "90% of available disk space")
         # Locked afterwards, so model-written SQL cannot lift its own budget.
-        with pytest.raises(duckdb.Error):
-            dataset.connection.execute("SET memory_limit='64GB'")
+        for lifted in ("SET memory_limit='64GB'", "SET max_temp_directory_size='1TB'"):
+            with pytest.raises(duckdb.Error):
+                dataset.connection.execute(lifted)
+    finally:
+        dataset.close()
+
+
+def test_a_workspace_stops_spilling_rather_than_filling_the_disk(monkeypatch) -> None:
+    """The bound has to bind, not merely be set. Proved by shrinking it to
+    something a load will actually reach, since the real one is 20GB.
+
+    The failure is the point: a session that cannot finish is recoverable, and a
+    host with no disk left is not — every other session on it dies too.
+    """
+    monkeypatch.setattr(dataset_module, "DUCKDB_TEMP_LIMIT", "5MB")
+    monkeypatch.setattr(dataset_module, "DUCKDB_MEMORY_LIMIT", "100MB")
+    dataset = Dataset.load([CsvSource.from_upload("s.csv", b"a\n1\n")])
+    try:
+        with pytest.raises(duckdb.Error) as refusal:
+            dataset.run(
+                "SELECT i, uuid()::VARCHAR AS pad FROM range(4000000) t(i) ORDER BY pad"
+            ).fetchall()
+        assert "max_temp_directory_size" in str(refusal.value)
     finally:
         dataset.close()
 

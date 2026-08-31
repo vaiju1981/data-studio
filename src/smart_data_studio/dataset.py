@@ -27,6 +27,7 @@ from smart_data_studio.config import (
     CODE_COLUMN_WORDS,
     DIGEST_SAMPLE_ROWS,
     DUCKDB_MEMORY_LIMIT,
+    DUCKDB_TEMP_LIMIT,
     DUCKDB_THREADS,
     IDENTIFIER_WORDS,
     MAX_CELL_CHARS_TO_MODEL,
@@ -838,6 +839,11 @@ class Dataset:
         connection.execute(f"SET memory_limit='{DUCKDB_MEMORY_LIMIT}'")
         connection.execute(f"SET threads={int(DUCKDB_THREADS)}")
         connection.execute(f"SET temp_directory='{temp_directory()}'")
+        # Bounded because memory_limit alone does not bound this. An in-memory
+        # database offloads table data here once the budget is reached, so what
+        # memory_limit refuses to hold, the disk holds instead — up to 90% of the
+        # volume, which is DuckDB's default and no bound worth the name.
+        connection.execute(f"SET max_temp_directory_size='{DUCKDB_TEMP_LIMIT}'")
 
     @staticmethod
     def _withhold_sensitive(connection: duckdb.DuckDBPyConnection, table_name: str) -> list[str]:

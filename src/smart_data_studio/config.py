@@ -50,6 +50,12 @@ ALLOW_LOCAL_PATHS = _flag("SDS_ALLOW_LOCAL_PATHS", True)
 DUCKDB_MEMORY_LIMIT = os.environ.get("SDS_DUCKDB_MEMORY_LIMIT", "4GB")
 DUCKDB_THREADS = _number("SDS_DUCKDB_THREADS", 4)
 DUCKDB_TEMP_DIR = os.environ.get("SDS_DUCKDB_TEMP_DIR", "")
+# What one workspace may spill to disk. DuckDB's own default is 90% of the whole
+# disk, which is no bound at all when several sessions share a host: an in-memory
+# database offloads table data as well as intermediates, so a single large load
+# fills the volume and takes every other session down with it. Four times the
+# largest file a load will accept, which is room for the worst honest case.
+DUCKDB_TEMP_LIMIT = os.environ.get("SDS_DUCKDB_TEMP_LIMIT", "20GB")
 QUERY_TIMEOUT_SECONDS = _number("SDS_QUERY_TIMEOUT_SECONDS", 60)
 
 # Size ceilings, checked before parsing. A local path gets its own and a looser

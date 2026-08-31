@@ -89,6 +89,7 @@ is configured rather than edited.
 | `SDS_ALLOW_LOCAL_PATHS` | `true` (`false` in the image) | Read data files from the host filesystem |
 | `SDS_SENSITIVE_COLUMNS` | *(empty)* | Comma-separated names; matching columns are withheld from everything the model sees |
 | `SDS_DUCKDB_MEMORY_LIMIT`, `SDS_DUCKDB_THREADS` | `4GB`, `4` | Query budget, applied before the connection locks |
+| `SDS_DUCKDB_TEMP_LIMIT` | `20GB` | What one workspace may spill to disk. DuckDB's own default is 90% of the volume |
 | `SDS_QUERY_TIMEOUT_SECONDS` | `60` | A query past this is interrupted; the session survives |
 | `SDS_MODEL_TIMEOUT_SECONDS` | `300` | A model call past this is abandoned and retried; without one a stalled completion holds its workspace forever |
 | `SDS_MAX_UPLOAD_BYTES`, `SDS_MAX_INGEST_ROWS`, `SDS_MAX_INGEST_COLUMNS` | 500MB, 20M, 512 | Upload ceilings, checked before parsing |
@@ -96,10 +97,12 @@ is configured rather than edited.
 | `SDS_MAX_ACTIVE_SESSIONS`, `SDS_SESSION_IDLE_SECONDS` | `8`, `3600` | Concurrent workspaces, and when an idle one is reclaimed. A workspace answering a question is never idle |
 | `SDS_LOG_FORMAT`, `SDS_LOG_LEVEL` | `json`, `INFO` | Structured logs on stdout |
 
-**Sizing.** Each session holds its own in-memory DuckDB, so a 2.7GB file is a
-2.7GB workspace and concurrency is bounded by RAM, not CPU. Set
-`SDS_MAX_ACTIVE_SESSIONS` to what the host can actually hold; the ninth user is
-turned away rather than the first eight being starved.
+**Sizing.** Each session holds its own DuckDB, bounded by
+`SDS_DUCKDB_MEMORY_LIMIT` rather than by the size of the file: past that budget
+DuckDB offloads table data to `SDS_DUCKDB_TEMP_DIR`, so a file larger than the
+budget loads and queries rather than failing. Size the host by the two budgets
+multiplied by `SDS_MAX_ACTIVE_SESSIONS` — RAM for the first, disk for the second
+— and the ninth user is turned away rather than the first eight being starved.
 
 ### Operating
 
