@@ -24,6 +24,7 @@ import re
 from pathlib import Path
 
 import pytest
+import results
 from anchors import mentions
 
 from smart_data_studio.agent import DataAgent
@@ -243,17 +244,18 @@ def test_question_bank(agent, number, question, anchors) -> None:
     # question despite having answered the same case cleanly before and after.
     # Retry only that terminal condition once: a systematic exhaustion still
     # fails, while a one-off model wobble does not fail the build.
-    for _ in range(2):
-        answer = agent.ask(question, multi_turn=False, depth="never")
-        if "could not finish" not in answer.text:
-            break
+    with results.recorded("single-CSV", question, number=number):
+        for _ in range(2):
+            answer = agent.ask(question, multi_turn=False, depth="never")
+            if "could not finish" not in answer.text:
+                break
 
-    assert answer.text.strip(), f"q{number}: empty answer"
-    assert "could not finish" not in answer.text, f"q{number}: ran out of tool rounds twice"
-    assert "could not be completed" not in answer.text, f"q{number}: the turn raised"
-    assert answer.results or answer.analyses, f"q{number}: answered with no evidence"
-    for value in anchors:
-        assert mentions(answer.text, value), f"q{number}: expected {value:,.2f} in the answer"
+        assert answer.text.strip(), f"q{number}: empty answer"
+        assert "could not finish" not in answer.text, f"q{number}: ran out of tool rounds twice"
+        assert "could not be completed" not in answer.text, f"q{number}: the turn raised"
+        assert answer.results or answer.analyses, f"q{number}: answered with no evidence"
+        for value in anchors:
+            assert mentions(answer.text, value), f"q{number}: expected {value:,.2f} in the answer"
 
 
 def test_a_cohort_is_measured_against_the_cohort(agent) -> None:

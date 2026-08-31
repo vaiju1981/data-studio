@@ -24,6 +24,7 @@ import os
 from pathlib import Path
 
 import pytest
+import results
 from anchors import mentions
 
 from smart_data_studio.agent import DataAgent
@@ -221,15 +222,16 @@ def joins_present(answer) -> list[str]:
     ("number", "question", "anchors"), BANK, ids=[f"m{item[0]:02d}" for item in BANK]
 )
 def test_multi_table_bank(agent, number, question, anchors) -> None:
-    answer = agent.ask(question, multi_turn=False, depth="never")
+    with results.recorded("multi-table", question, number=number):
+        answer = agent.ask(question, multi_turn=False, depth="never")
 
-    assert answer.text.strip(), f"m{number}: empty answer"
-    assert "could not finish" not in answer.text, f"m{number}: ran out of tool rounds"
-    assert answer.results, f"m{number}: answered without querying anything"
-    for anchor in anchors:
-        assert mentions(answer.text, anchor), (
-            f"m{number}: expected ~{anchor:,} in:\n{answer.text[:400]}"
-        )
+        assert answer.text.strip(), f"m{number}: empty answer"
+        assert "could not finish" not in answer.text, f"m{number}: ran out of tool rounds"
+        assert answer.results, f"m{number}: answered without querying anything"
+        for anchor in anchors:
+            assert mentions(answer.text, anchor), (
+                f"m{number}: expected ~{anchor:,} in:\n{answer.text[:400]}"
+            )
 
 
 def test_the_incomplete_join_never_produces_the_answer(agent) -> None:
@@ -312,15 +314,16 @@ def test_the_bank_needs_no_guard_refusals(agent) -> None:
     ids=[f"p{item[0]}" for item in PLAYER_BANK],
 )
 def test_player_bank(players, number, question, anchors) -> None:
-    answer = players.ask(question, multi_turn=False, depth="never")
+    with results.recorded("player", question, number=number):
+        answer = players.ask(question, multi_turn=False, depth="never")
 
-    assert answer.text.strip(), f"p{number}: empty answer"
-    assert "could not finish" not in answer.text, f"p{number}: ran out of tool rounds"
-    assert answer.results, f"p{number}: answered without querying anything"
-    for anchor in anchors:
-        assert mentions(answer.text, anchor), (
-            f"p{number}: expected ~{anchor:,} in:\n{answer.text[:400]}"
-        )
+        assert answer.text.strip(), f"p{number}: empty answer"
+        assert "could not finish" not in answer.text, f"p{number}: ran out of tool rounds"
+        assert answer.results, f"p{number}: answered without querying anything"
+        for anchor in anchors:
+            assert mentions(answer.text, anchor), (
+                f"p{number}: expected ~{anchor:,} in:\n{answer.text[:400]}"
+            )
 
 
 def test_a_cohort_across_two_files_is_measured_against_the_cohort(players) -> None:
@@ -388,15 +391,16 @@ def test_trio_bank(trio, number, question, anchors) -> None:
     lease status on the daily asset table. Getting one wrong is a wrong number
     rather than an error, which is the whole reason for anchoring.
     """
-    answer = trio.ask(question, multi_turn=False, depth="never")
+    with results.recorded("trio", question, number=number):
+        answer = trio.ask(question, multi_turn=False, depth="never")
 
-    assert answer.text.strip(), f"t{number}: empty answer"
-    assert "could not finish" not in answer.text, f"t{number}: ran out of tool rounds"
-    assert answer.results, f"t{number}: answered without querying anything"
-    for anchor in anchors:
-        assert mentions(answer.text, anchor), (
-            f"t{number}: expected ~{anchor:,} in:\n{answer.text[:400]}"
-        )
+        assert answer.text.strip(), f"t{number}: empty answer"
+        assert "could not finish" not in answer.text, f"t{number}: ran out of tool rounds"
+        assert answer.results, f"t{number}: answered without querying anything"
+        for anchor in anchors:
+            assert mentions(answer.text, anchor), (
+                f"t{number}: expected ~{anchor:,} in:\n{answer.text[:400]}"
+            )
 
 
 def test_the_three_file_chain_is_joined_on_complete_keys(trio) -> None:

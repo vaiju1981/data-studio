@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import json
 import os
+import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from smart_data_studio.config import MODEL_ID, PROMPT_VERSION, VERSION
@@ -43,3 +45,21 @@ def record(bank: str, question: str, passed: bool, seconds: float, **extra: obje
             handle.write(json.dumps(entry) + "\n")
     except OSError:
         pass
+
+
+@contextmanager
+def recorded(bank: str, question: str, **extra: object):
+    """Record what this question did, whichever way it went.
+
+    A context manager rather than four copies of the same try/except, and it times
+    the block itself so a bank cannot record a duration that excludes the part
+    that was slow. A failure is recorded before it is re-raised: a rate built only
+    from the passes is not a rate.
+    """
+    started = time.monotonic()
+    try:
+        yield
+    except BaseException:
+        record(bank, question, False, time.monotonic() - started, **extra)
+        raise
+    record(bank, question, True, time.monotonic() - started, **extra)
