@@ -156,6 +156,52 @@ def _aggregates_by(tree: exp.Expression, key: str) -> bool:
     return False
 
 
+# The dialects a model reaches for when it forgets which database this is. Ordered
+# by how often that happened in the banks rather than by popularity.
+OTHER_DIALECTS = ("mysql", "tsql", "postgres", "snowflake")
+# DuckDB's own words for "that is not a thing here". A failure for any other
+# reason — a mistyped column, a type mismatch — is not a dialect problem, and
+# suggesting a rewrite for it would be the wrong steer this exists to prevent.
+# "could not be parsed" is the SQL guard's own wording, and it is the case where a
+# rewrite helps most: the query never reached DuckDB at all.
+_DIALECT_ERRORS = (
+    "no function matches",
+    "does not exist",
+    "parser error",
+    "syntax error",
+    "could not be parsed",
+    "unexpected token",
+)
+
+
+def dialect_hint(sql: str, error: str) -> str | None:
+    """The DuckDB spelling of a query written in some other dialect.
+
+    The model writes `DATE_SUB(MAX(day), INTERVAL '3' MONTH)` and DuckDB answers
+    with the signature of its *own* date_sub, which takes three arguments and
+    means something else — so the reply describes a function the model did not
+    want and sends it round again. sqlglot already knows both spellings.
+
+    Only offered when reading the SQL as another dialect changes it. A query that
+    means the same thing in every dialect failed for some other reason, and a
+    rewrite suggested for that would be noise at best.
+    """
+    if not any(mark in error.lower() for mark in _DIALECT_ERRORS):
+        return None
+    try:
+        native = sqlglot.transpile(sql, read="duckdb", write="duckdb")[0]
+    except Exception:
+        native = None
+    for dialect in OTHER_DIALECTS:
+        try:
+            rewritten = sqlglot.transpile(sql, read=dialect, write="duckdb")[0]
+        except Exception:
+            continue
+        if rewritten != native:
+            return rewritten
+    return None
+
+
 _RATE_ADVICE = (
     "A rate carries a denominator and an uncertainty the number alone does not show. "
     "Call compare_rates with the group column and a column holding 1 where the thing "
@@ -225,7 +271,13 @@ class AnalysisTools:
         try:
             result = self.dataset.query(sql)
         except Exception as error:
-            return _dump({"error": str(error)})
+            message = str(error)
+            hint = dialect_hint(sql, message)
+            if hint:
+                message += (
+                    f"\n\nThat reads as another dialect's SQL. Written for DuckDB it is: {hint}"
+                )
+            return _dump({"error": message})
         found = self._warnings(sql, weighting)
         result.warnings = found
         self.results.append(result)
