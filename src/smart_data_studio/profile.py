@@ -221,6 +221,14 @@ def profile_table(
     grain, entity_key = _entity_grain(dataset, table_name, stats, row_count, exact_distinct)
     if grain:
         findings.insert(0, grain)
+    # Ahead of the grain note as well: a table that repeats whole rows makes every
+    # total over it wrong, which outranks a remark about which column identifies one.
+    repeated = _duplicate_rows(dataset, table_name, row_count)
+    if repeated:
+        findings.insert(0, repeated)
+    nested = _nested_columns(dataset, table_name)
+    if nested:
+        findings.append(nested)
     if unsummarised:
         # Said rather than silently missing, or the column reads as one the file
         # does not have. Two different reasons, and claiming the wrong one would
@@ -351,6 +359,51 @@ def _entity_grain(
             else ""
         )
     ), key
+
+
+def _duplicate_rows(dataset: Dataset, table_name: str, row_count: int) -> str | None:
+    """Rows this table holds more than once, which every total counts twice.
+
+    Hashed rather than compared: `count(DISTINCT *)` over the worst shape here —
+    7.9M rows by 57 columns, seventeen of them free text — takes 16.2s, and
+    hashing the row takes 3.9s for the same answer. `approx_count_distinct` was
+    both slower and wrong, returning more distinct values than there were rows.
+    """
+    if row_count < 2:
+        return None
+    quoted = quote_identifier(table_name)
+    try:
+        distinct = dataset.run(f"SELECT count(DISTINCT hash({quoted})) FROM {quoted}").fetchone()
+    except Exception:
+        return None
+    repeated = row_count - int(distinct[0])
+    if repeated <= 0:
+        return None
+    return (
+        f"{repeated:,} of {row_count:,} rows repeat another row exactly. A total over this "
+        "table counts each of them again — take DISTINCT, or aggregate to the key, unless "
+        "the repeats are genuinely separate events that happen to look alike."
+    )
+
+
+def _nested_columns(dataset: Dataset, table_name: str) -> str | None:
+    """Columns holding an object or a list, and how to reach inside one.
+
+    JSON arrives this way, and a struct listed only by name reads as a column with
+    nothing in it — the same failure the value dictionary was built for.
+    """
+    nested = [
+        f"{name} ({kind})"
+        for name, kind in dataset.schema(table_name)
+        if kind.upper().startswith(("STRUCT", "MAP", "UNION")) or kind.endswith("[]")
+    ]
+    if not nested:
+        return None
+    return (
+        "Nested columns, whose fields are queryable but are not columns of their own: "
+        + "; ".join(nested)
+        + ". Reach a field with a dot (customer.name) and a list element with [1]."
+    )
 
 
 def _share(count: int, total: int) -> str:

@@ -160,3 +160,47 @@ def test_the_workspace_pins_the_zone_it_reads_instants_in(mixed) -> None:
         "SELECT date_trunc('day', booked) AS day, count(*) AS n FROM sales GROUP BY day"
     ).frame
     assert len(days) == 3, "the UTC days these four rows fall in"
+
+
+# --- shapes the profile did not model -----------------------------------------
+
+
+def test_rows_this_table_holds_twice_are_reported() -> None:
+    """The classic bad export: the same row twice, every total over it inflated,
+    and nothing about the file looking wrong."""
+    from smart_data_studio.profile import profile_table
+
+    doubled = b"region,amount\nnorth,10\nsouth,20\nnorth,10\nnorth,10\n"
+    dataset = Dataset.load([CsvSource.from_upload("sales.csv", doubled)])
+    try:
+        profile = profile_table(dataset, "sales")
+        note = next((line for line in profile.findings if "repeat another row" in line), "")
+        assert note, profile.findings
+        assert "2 of 4 rows" in note
+    finally:
+        dataset.close()
+
+
+def test_a_table_with_no_repeats_says_nothing_about_them(single) -> None:
+    """Most files are fine, and a finding on every one of them is noise."""
+    from smart_data_studio.profile import profile_table
+
+    profile = profile_table(single.dataset, "sales")
+    assert not any("repeat another row" in line for line in profile.findings)
+
+
+def test_nested_columns_are_named_with_the_way_into_them() -> None:
+    """A struct listed only by name reads as a column with nothing in it — the same
+    failure the value dictionary was built for, in a different shape."""
+    from smart_data_studio.dataset import source_from_upload
+    from smart_data_studio.profile import profile_table
+
+    content = b'[{"id": 1, "customer": {"name": "ada"}, "tags": ["x"]}]'
+    dataset = Dataset.load([source_from_upload("events.json", content)])
+    try:
+        profile = profile_table(dataset, "events")
+        note = next((line for line in profile.findings if "Nested columns" in line), "")
+        assert "customer" in note and "tags" in note
+        assert "customer.name" in note, "the note has to say how to reach a field"
+    finally:
+        dataset.close()
