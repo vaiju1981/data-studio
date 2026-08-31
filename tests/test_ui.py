@@ -2,6 +2,8 @@ from pathlib import Path
 
 from streamlit.testing.v1 import AppTest
 
+from smart_data_studio import sensitive
+
 
 def test_app_starts_with_csv_empty_state() -> None:
     app_path = Path(__file__).parents[1] / "src/smart_data_studio/ui/app.py"
@@ -27,8 +29,15 @@ def test_streamlit_is_confined_to_the_ui_package() -> None:
     assert any("import streamlit" in path.read_text() for path in ui_files)
 
 
-def run_app(monkeypatch, tmp_path):
+def run_app(monkeypatch, tmp_path, proposes: set[str] | None = None):
+    """The app, with the sensitive-column proposal answered rather than asked.
+
+    That proposal calls a model. The fast suite must not: an endpoint that happens
+    to be up makes these tests slow and their outcome somebody else's opinion.
+    `proposes` is what the model would have said.
+    """
     monkeypatch.setenv("SDS_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(sensitive, "propose", lambda schema: set(proposes or ()))
     app_path = Path(__file__).parents[1] / "src/smart_data_studio/ui/app.py"
     return AppTest.from_file(str(app_path)).run(timeout=30)
 
@@ -452,3 +461,77 @@ def test_a_failed_rebuild_still_leaves_no_stale_analysis(monkeypatch) -> None:
         assert agent.profiles == []
     finally:
         dataset.close()
+
+
+def test_a_proposed_column_is_put_to_the_person_who_uploaded_it(monkeypatch, tmp_path) -> None:
+    """The setting it replaces is an operator's, decided once by somebody who has
+    not seen the file. This asks the person who has."""
+    people = make_csv(tmp_path, "people.csv", "playerId,birthDate,coinIn\n1,1970-01-01,10\n")
+    app = run_app(monkeypatch, tmp_path, proposes={"birthDate"})
+
+    app.text_area[0].set_value(str(people))
+    app.button[0].click().run(timeout=60)
+
+    assert not app.exception
+    # Nothing loaded yet: the question comes before the data exists, which is what
+    # makes withholding a promise rather than a tidy-up.
+    assert app.session_state.dataset is None
+    assert app.multiselect[0].label == "Withhold these columns"
+    assert app.multiselect[0].value == ["birthDate"]
+    assert any("personal data" in warning.value for warning in app.warning)
+
+
+def test_confirming_loads_without_the_column(monkeypatch, tmp_path) -> None:
+    people = make_csv(tmp_path, "people.csv", "playerId,birthDate,coinIn\n1,1970-01-01,10\n")
+    app = run_app(monkeypatch, tmp_path, proposes={"birthDate"})
+    app.text_area[0].set_value(str(people))
+    app.button[0].click().run(timeout=60)
+
+    # "Load without them"
+    app.button[0].click().run(timeout=60)
+    assert not app.exception
+    dataset = app.session_state.dataset
+    assert [name for name, _ in dataset.schema("people")] == ["playerId", "coinIn"]
+    assert dataset.lineage[0].withheld == ["birthDate"]
+
+
+def test_the_person_can_overrule_the_proposal(monkeypatch, tmp_path) -> None:
+    """A proposal that cannot be refused is a refusal. Somebody analysing their own
+    data may need the column the check flagged, and they are the one who knows."""
+    people = make_csv(tmp_path, "people.csv", "playerId,birthDate,coinIn\n1,1970-01-01,10\n")
+    app = run_app(monkeypatch, tmp_path, proposes={"birthDate"})
+    app.text_area[0].set_value(str(people))
+    app.button[0].click().run(timeout=60)
+
+    # "Load everything" — the second button, said plainly rather than defaulted to.
+    app.button[1].click().run(timeout=60)
+    assert not app.exception
+    dataset = app.session_state.dataset
+    assert "birthDate" in [name for name, _ in dataset.schema("people")]
+    assert dataset.lineage[0].withheld == []
+
+
+def test_the_proposal_is_made_once_per_load_not_once_per_click(monkeypatch, tmp_path) -> None:
+    """Every interaction with the panel is a rerun. Asking again on each one cost a
+    model call to be told what it had just said, and made unticking a column feel
+    like loading the file."""
+    people = make_csv(tmp_path, "people.csv", "playerId,birthDate,coinIn\n1,1970-01-01,10\n")
+    asked = []
+
+    def counting(schema):
+        asked.append(schema)
+        return {"birthDate"}
+
+    monkeypatch.setenv("SDS_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(sensitive, "propose", counting)
+    app_path = Path(__file__).parents[1] / "src/smart_data_studio/ui/app.py"
+    app = AppTest.from_file(str(app_path)).run(timeout=30)
+
+    app.text_area[0].set_value(str(people))
+    app.button[0].click().run(timeout=60)
+    assert len(asked) == 1
+
+    # Change the selection, which reruns the whole script.
+    app.multiselect[0].set_value([]).run(timeout=60)
+    assert len(asked) == 1, "the model was asked again for an answer already given"
+    assert app.multiselect[0].value == [], "and the person's own choice survived it"

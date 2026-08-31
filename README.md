@@ -60,6 +60,13 @@ into a bank question — the only file here that holds data rather than paths, a
 written only when you press the button. Both files stay on this machine, and
 **Delete my data** removes both.
 
+Before a file is loaded, its column names — names and types only, never a value —
+are put to the model, which proposes the ones that look like personal data. You
+see the proposal and decide: untick anything you need, add anything it missed, or
+load everything. A withheld column is never loaded at all, so no query can reach
+it and nothing can analyse it either. `SDS_SENSITIVE_COLUMNS` still applies on top
+and cannot be unticked, because a deployment's policy is not a user's choice.
+
 Two conversation modes: **multi-turn** lets the model see earlier questions and
 results, so follow-ups like "now chart that" work; **single turn** answers each
 question from the data alone. The full history stays on screen either way, and
@@ -92,7 +99,7 @@ is configured rather than edited.
 |---|---|---|
 | `SDS_MODEL_ID`, `SDS_OLLAMA_HOST` | `gemma4:31b-cloud`, `localhost:11434` | Which model, served from where |
 | `SDS_ALLOW_LOCAL_PATHS` | `true` (`false` in the image) | Read data files from the host filesystem |
-| `SDS_SENSITIVE_COLUMNS` | *(empty)* | Comma-separated names; matching columns are withheld from everything the model sees |
+| `SDS_SENSITIVE_COLUMNS` | *(empty)* | Comma-separated names always withheld on this deployment, whatever a user chooses |
 | `SDS_PERSONAL_DATA_SHARE` | `0.02` | How much of a column has to look like an address or a card number before the load says so. Names are matched by the setting above; values are looked at regardless of the name |
 | `SDS_DUCKDB_MEMORY_LIMIT`, `SDS_DUCKDB_THREADS` | `4GB`, `4` | Query budget, applied before the connection locks |
 | `SDS_DUCKDB_TEMP_LIMIT` | `20GB` | What one workspace may spill to disk. DuckDB's own default is 90% of the volume |

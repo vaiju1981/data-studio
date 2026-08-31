@@ -279,6 +279,20 @@ class DataFileSource:
         finally:
             book.close()
 
+    def columns(
+        self, connection: duckdb.DuckDBPyConnection, part: str = ""
+    ) -> list[tuple[str, str]]:
+        """The schema without the rows. These formats carry their own, so LIMIT 0
+        answers it: DuckDB reads the footer of a Parquet file and stops."""
+        if self.kind == "excel":
+            return [(str(name), "") for name in self._sheet(part).columns]
+        reader = "read_parquet" if self.kind == "parquet" else "read_json_auto"
+        with self._on_disk() as path:
+            described = connection.execute(
+                f"DESCRIBE SELECT * FROM {reader}(?) LIMIT 0", [str(path)]
+            ).fetchall()
+        return [(row[0], str(row[1])) for row in described]
+
     def check(self, connection: duckdb.DuckDBPyConnection, part: str = "") -> None:
         if self.kind == "excel":
             frame = self._sheet(part)
@@ -578,6 +592,13 @@ class CsvSource:
         every other format gives."""
         return [""]
 
+    def columns(
+        self, connection: duckdb.DuckDBPyConnection, part: str = ""
+    ) -> list[tuple[str, str]]:
+        """The header, before a table exists. Types are unknown until the file is
+        read, and naming them VARCHAR here would be a guess presented as a fact."""
+        return [(name, "") for name in self.header_names(self.dialect(connection))]
+
     def check(self, connection: duckdb.DuckDBPyConnection, part: str = "") -> None:
         check_column_names(self.name, self.header_names(self.dialect(connection)))
 
@@ -823,10 +844,50 @@ class Dataset:
         self.queries_run = 0
 
     @classmethod
-    def load(cls, sources: Iterable[CsvSource | DataFileSource]) -> Dataset:
+    def preview_columns(
+        cls, sources: Iterable[CsvSource | DataFileSource]
+    ) -> dict[str, list[tuple[str, str]]]:
+        """What each table would be called and what columns it would have.
+
+        Nothing is loaded and no value is read, which is what lets a decision about
+        sensitive columns be made *before* the data exists rather than after — the
+        only order in which withholding is a promise rather than a tidy-up.
+
+        A source that cannot be read is skipped rather than raised on: load()
+        reports it properly, and a preview that dies on one bad file would stop
+        the other four being asked about.
+        """
+        connection = duckdb.connect(database=":memory:")
+        found: dict[str, list[tuple[str, str]]] = {}
+        try:
+            for source in sources:
+                try:
+                    parts = source.parts()
+                except Exception:
+                    continue
+                for part in parts:
+                    stem = f"{Path(source.name).stem} {part}" if part else source.name
+                    table = cls._unique_table_name(stem, list(found))
+                    try:
+                        found[table] = source.columns(connection, part)
+                    except Exception:
+                        continue
+        finally:
+            connection.close()
+        return found
+
+    @classmethod
+    def load(
+        cls,
+        sources: Iterable[CsvSource | DataFileSource],
+        withhold: Iterable[str] = (),
+    ) -> Dataset:
         source_list = list(sources)
         if not source_list:
             raise ValueError("Choose at least one file")
+        # What the operator configured and what this person chose, together. The
+        # first is policy and the second is consent; neither overrides the other.
+        chosen = {name.lower() for name in withhold}
 
         connection = duckdb.connect(database=":memory:")
         table_names: list[str] = []
@@ -862,7 +923,7 @@ class Dataset:
                         source.check(connection, part)
                         with logs.timed("ingest", table=table_name) as fields:
                             source.create(connection, table_name, part)
-                            withheld = cls._withhold_sensitive(connection, table_name)
+                            withheld = cls._withhold_sensitive(connection, table_name, chosen)
                             shape = cls._check_size(connection, table_name)
                             fields.update(shape)
                     except Exception as error:
@@ -913,8 +974,12 @@ class Dataset:
         connection.execute(f"SET TimeZone='{TIME_ZONE}'")
 
     @staticmethod
-    def _withhold_sensitive(connection: duckdb.DuckDBPyConnection, table_name: str) -> list[str]:
-        """Drop the operator's sensitive columns out of the table as it is built.
+    def _withhold_sensitive(
+        connection: duckdb.DuckDBPyConnection,
+        table_name: str,
+        chosen: set[str] | None = None,
+    ) -> list[str]:
+        """Drop the sensitive columns out of the table as it is built.
 
         Filtering them on the way out cannot be made to work. Hiding them from the
         schema left SELECT * returning them; cutting them from the result left a
@@ -928,14 +993,15 @@ class Dataset:
         So it does not. DROP COLUMN is a catalog edit, instant on any size of
         table, and after it there is nothing left to reshape.
         """
-        if not SENSITIVE_COLUMNS:
+        chosen = chosen or set()
+        if not SENSITIVE_COLUMNS and not chosen:
             return []
         quoted = quote_identifier(table_name)
         names = [row[0] for row in connection.execute(f"DESCRIBE {quoted}").fetchall()]
-        sensitive = [name for name in names if is_sensitive(name)]
-        if len(sensitive) == len(names):
+        sensitive = [name for name in names if is_sensitive(name) or name.lower() in chosen]
+        if sensitive and len(sensitive) == len(names):
             raise ValueError(
-                f"Every column in {table_name} is withheld as sensitive on this deployment "
+                f"Every column in {table_name} would be withheld "
                 f"({', '.join(sensitive[:5])}), so there would be nothing left to analyse."
             )
         for name in sensitive:

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from smart_data_studio import feedback, logs, recent, sessions
+from smart_data_studio import feedback, logs, recent, sensitive, sessions
 from smart_data_studio.agent import Answer, DataAgent, explain_failure
 from smart_data_studio.config import (
     ALLOW_LOCAL_PATHS,
@@ -52,6 +52,12 @@ def main() -> None:
     with st.sidebar:
         _sidebar()
 
+    # A load in two halves, because the sensitive-column question sits between
+    # them and a panel drawn inside the button's own run vanishes on the next one.
+    if st.session_state.pending is not None:
+        _continue_load()
+        return
+
     if st.session_state.dataset is None:
         st.title("Smart Data Studio")
         st.caption("Load your data, understand its shape, and ask questions in plain English.")
@@ -88,6 +94,16 @@ def _initialize_state() -> None:
         "depth": next(iter(DEPTHS)),
         "metrics": "",
         "expired": False,
+        # None until the sensitive-column question has been answered for the load
+        # being set up; a list once it has.
+        "withhold": None,
+        # Sources built and waiting on the question above, and the local paths
+        # they came from, remembered only once the load succeeds.
+        "pending": None,
+        "pending_paths": [],
+        # The schema and the proposed columns, kept so the panel can be redrawn
+        # without asking again.
+        "proposal": None,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -131,7 +147,7 @@ def _sidebar() -> None:
         paths = ""
         st.caption("Server paths are disabled on this deployment. Upload the file instead.")
     if st.button("Load and analyze", type="primary", use_container_width=True):
-        _load(uploads, paths, chosen)
+        _begin_load(uploads, paths, chosen)
 
     if st.session_state.agent is not None:
         st.divider()
@@ -258,6 +274,57 @@ def _forget() -> None:
     st.rerun()
 
 
+def _continue_load() -> None:
+    """Ask about sensitive columns, then load. Both halves live here.
+
+    The proposal reads column *names* only, which is why it happens before the
+    load rather than after it: at this point no value has been read, so asking
+    cannot itself disclose the thing being asked about — and a column kept out is
+    a column no query can reach, rather than one filtered on the way out.
+    """
+    sources = st.session_state.pending
+    if st.session_state.withhold is None:
+        if st.session_state.proposal is None:
+            # Once per load, not once per click. Every interaction with the panel
+            # below is a rerun, and asking again each time cost a model call to be
+            # told what it had just said.
+            with st.spinner("Checking the columns before loading…"):
+                schema = Dataset.preview_columns(sources)
+                st.session_state.proposal = (schema, sorted(sensitive.propose(schema)))
+        schema, proposed = st.session_state.proposal
+        if proposed:
+            _sensitive_panel(schema, proposed)
+            return
+        st.session_state.withhold = []
+    _finish_load(sources, st.session_state.withhold)
+
+
+def _sensitive_panel(schema: dict, proposed: list[str]) -> None:
+    columns = sorted({name for table in schema.values() for name, _ in table})
+    st.warning(
+        f"{len(proposed)} column(s) look like personal data. Everything loaded — the "
+        "schema, sample rows and every result — is sent to the model at "
+        f"`{OLLAMA_HOST}`. Withheld columns are never loaded at all, so nothing can "
+        "reach them, and nothing can analyse them either."
+    )
+    st.multiselect(
+        "Withhold these columns",
+        columns,
+        default=proposed,
+        key="withhold_choice",
+        help="Untick a column to load it as usual. Add any the check missed.",
+    )
+    left, right = st.columns(2)
+    if left.button("Load without them", type="primary", use_container_width=True):
+        st.session_state.withhold = list(st.session_state.withhold_choice)
+        st.rerun()
+    if right.button("Load everything", use_container_width=True):
+        # Said plainly rather than offered as a quiet default: this is the choice
+        # that sends the columns to the model.
+        st.session_state.withhold = []
+        st.rerun()
+
+
 def _check_batch(uploads: list[object], local: list[Path]) -> None:
     """Refuse a batch before any of it is read.
 
@@ -292,7 +359,13 @@ def _check_batch(uploads: list[object], local: list[Path]) -> None:
         )
 
 
-def _load(uploads: list[object], paths: str, chosen: list[str] | None = None) -> None:
+def _begin_load(uploads: list[object], paths: str, chosen: list[str] | None = None) -> None:
+    """Turn the chosen files into sources and hand them to the next run.
+
+    Everything cheap and refusable happens here — capacity, batch size — so a load
+    that cannot proceed says so before the sensitive-column question is asked
+    about a file that was never going to load.
+    """
     try:
         local = [Path(line.strip()) for line in paths.splitlines() if line.strip()]
         # Remembered files and a newly typed one load together, so adding a second
@@ -305,8 +378,28 @@ def _load(uploads: list[object], paths: str, chosen: list[str] | None = None) ->
         _check_batch(uploads, local)
         sources = [source_from_upload(upload.name, upload.getvalue()) for upload in uploads]
         sources.extend(source_from_path(path) for path in local)
+    except Exception as error:
+        logs.failure("load.failed")
+        st.error(explain_failure(error))
+        return
+    # Cleared per load, or the second upload silently inherits the first one's
+    # answer about columns it has never been asked about.
+    st.session_state.pending = sources
+    st.session_state.pending_paths = local
+    st.session_state.withhold = None
+    st.session_state.proposal = None
+    # The panel's own selection belongs to the load that raised it.
+    st.session_state.pop("withhold_choice", None)
+    st.rerun()
+
+
+def _finish_load(sources: list[object], withhold: list[str]) -> None:
+    local = st.session_state.get("pending_paths") or []
+    st.session_state.pending = None
+    st.session_state.proposal = None
+    try:
         with st.spinner("Loading and profiling your data…"):
-            dataset = Dataset.load(sources)
+            dataset = Dataset.load(sources, withhold=withhold)
             try:
                 profiles = profile_dataset(dataset)
                 agent = DataAgent(dataset, profiles)
@@ -359,7 +452,7 @@ def _load(uploads: list[object], paths: str, chosen: list[str] | None = None) ->
         st.error(str(error))
     except Exception as error:
         logs.failure("load.failed")
-        st.error(f"Could not load the CSV data: {error}")
+        st.error(f"Could not load the data: {error}")
 
 
 def _conversation() -> None:

@@ -136,3 +136,68 @@ def test_ordinary_columns_that_merely_contain_a_word_are_left_alone(column: str)
     finishes."""
     body = f"{column},amount\nx,10\n".encode()
     assert not [n for n in warnings_for(body) if "the name says personal data" in n]
+
+
+# --- the proposal, which is what a person actually sees -----------------------
+
+
+def test_the_word_list_is_a_floor_under_any_proposal() -> None:
+    """A model that misses a date of birth cannot make it un-personal, so the
+    deterministic rule is unioned in rather than consulted only on failure."""
+    from smart_data_studio import sensitive
+
+    assert sensitive.by_name(["playerId", "birthDate", "coinIn"]) == {"birthDate"}
+
+
+def test_a_model_that_is_down_still_proposes_something(monkeypatch) -> None:
+    """Loading a file must not depend on a model being up. It makes the proposal
+    worse; it cannot make it absent."""
+    from smart_data_studio import sensitive
+
+    def refuse(*args, **kwargs):
+        raise ConnectionError("no endpoint")
+
+    monkeypatch.setattr(sensitive.ollama, "Client", refuse)
+    schema = {"people": [("playerId", ""), ("birthDate", ""), ("coinIn", "")]}
+    assert sensitive.propose(schema) == {"birthDate"}
+
+
+def test_a_column_the_model_invented_is_not_withheld(monkeypatch) -> None:
+    """It would withhold nothing while looking like it had."""
+    from smart_data_studio import sensitive
+
+    class Reply:
+        @staticmethod
+        def chat(**kwargs):
+            return {"message": {"content": '["birthDate", "homeAddress", "notAColumn"]'}}
+
+    monkeypatch.setattr(sensitive.ollama, "Client", lambda **kwargs: Reply())
+    schema = {"people": [("playerId", ""), ("birthDate", ""), ("homeAddress", "")]}
+    assert sensitive.propose(schema) == {"birthDate", "homeAddress"}
+
+
+def test_the_proposal_is_asked_before_any_value_is_read(tmp_path) -> None:
+    """The ordering is the point: names and types come from the header, so asking
+    which columns are sensitive cannot itself disclose one."""
+    from smart_data_studio.dataset import Dataset, source_from_path
+
+    path = tmp_path / "people.csv"
+    path.write_text("playerId,birthDate,coinIn\n1,1970-01-01,10\n")
+    schema = Dataset.preview_columns([source_from_path(path)])
+    assert list(schema) == ["people"]
+    assert [name for name, _ in schema["people"]] == ["playerId", "birthDate", "coinIn"]
+
+
+def test_a_chosen_column_is_never_loaded() -> None:
+    """Not filtered on the way out — absent. The guard's own reasoning: a column
+    in the table can be reshaped back out of it, and one that was never loaded
+    cannot."""
+    body = b"playerId,birthDate,coinIn\n1,1970-01-01,10\n2,1980-02-02,20\n"
+    dataset = Dataset.load([CsvSource.from_upload("people.csv", body)], withhold=["birthDate"])
+    try:
+        assert [name for name, _ in dataset.schema("people")] == ["playerId", "coinIn"]
+        assert dataset.lineage[0].withheld == ["birthDate"]
+        with pytest.raises(Exception, match="birthDate"):
+            dataset.query("SELECT birthDate FROM people")
+    finally:
+        dataset.close()
