@@ -20,4 +20,8 @@ dist/
 
 # Local data and scratch
 *.duckdb
+
+# Bank run records. Written by SDS_BANK_RESULTS and by tools/model_matrix.py, and
+# they hold questions and figures from whatever data the run was pointed at.
+*.jsonl
 *.csv
