@@ -19,7 +19,16 @@ jobs:
       # Three steps rather than one, so a failure names which bank fell over. The
       # later two run even when an earlier bank is red — one flaky question should
       # not hide a fortnight of join regressions — but not when Install failed.
+      # First, because it is the only bank that needs no private file: if the
+      # endpoint is broken this says so before two slower banks fail for the same
+      # reason, and it is the one a contributor can reproduce.
+      - name: Domain bank
+        env:
+          USE_LLM: "1"
+          SDS_BANK_RESULTS: bank-results.jsonl
+        run: pytest tests/test_domain_bank.py -q
       - name: Single-CSV bank
+        if: '!cancelled()'
         env:
           USE_LLM: "1"
         run: pytest tests/test_question_bank.py -q
@@ -32,4 +41,15 @@ jobs:
         if: '!cancelled()'
         env:
           USE_LLM: "1"
+          SDS_BANK_RESULTS: bank-results.jsonl
         run: pytest tests/test_answer_quality.py -q -s
+      # Printed and kept. A rate that scrolls past in a log answers "did it pass
+      # today" and nothing about whether it is falling.
+      - name: Report
+        if: '!cancelled()'
+        run: python tools/bank_report.py bank-results.jsonl
+      - uses: actions/upload-artifact@v4
+        if: '!cancelled()'
+        with:
+          name: bank-results
+          path: bank-results.jsonl

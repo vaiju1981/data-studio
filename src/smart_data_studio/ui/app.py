@@ -6,7 +6,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from smart_data_studio import logs, recent, sessions
+from smart_data_studio import feedback, logs, recent, sessions
 from smart_data_studio.agent import Answer, DataAgent, explain_failure
 from smart_data_studio.config import (
     ALLOW_LOCAL_PATHS,
@@ -239,6 +239,7 @@ def _forget() -> None:
     """Throw the workspace away on request, and prove it in the log."""
     sessions.release(st.session_state.session_id)
     recent.forget()
+    feedback.forget()
     _clear_workspace()
     st.session_state.chosen_paths = []
     st.session_state.expired = False
@@ -354,12 +355,15 @@ def _conversation() -> None:
     if st.session_state.understanding or st.session_state.insight_error:
         with st.chat_message("assistant"):
             render.understanding(st.session_state.understanding, st.session_state.insight_error)
+    asked = ""
     for index, item in enumerate(st.session_state.chat):
         with st.chat_message(item["role"]):
             if item["role"] == "user":
+                asked = item["content"]
                 st.markdown(item["content"])
             else:
-                render.answer(item["answer"], str(index), st.session_state.dataset)
+                # The question this answered, so a report of it can be replayed.
+                render.answer(item["answer"], str(index), st.session_state.dataset, asked)
 
 
 def _progress(status, message: str) -> None:

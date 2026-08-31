@@ -20,10 +20,12 @@ Skipped unless the CSV is present and USE_LLM=1 is set:
 from __future__ import annotations
 
 import os
+import time
 from collections import Counter
 from pathlib import Path
 
 import pytest
+import results
 from judge import JudgeUnusable, describe, evidence_of, failures, grade, quotes
 
 from smart_data_studio.agent import DataAgent
@@ -245,7 +247,9 @@ def test_real_answers_survive_their_evidence_at_a_rate(agent) -> None:
 
     for label, question in TEMPTING:
         for run in range(RUNS_PER_QUESTION):
+            started = time.monotonic()
             answer = agent.ask(question, multi_turn=False, depth="never")
+            elapsed = time.monotonic() - started
             # A turn that failed is not a bad answer, it is no answer, and it is
             # kept out of the rate rather than averaged into it: explain_failure
             # returns readable prose, prose with no claims in it grades clean, and
@@ -265,6 +269,10 @@ def test_real_answers_survive_their_evidence_at_a_rate(agent) -> None:
                 unusable.append(f"{label} run {run}: {error}")
                 continue
             graded_count[label] += 1
+            # Each graded answer is one observation of the rate, so each is
+            # recorded. A run kept only as its final percentage cannot say later
+            # which question moved it.
+            results.record("answer-quality", question, not faults, elapsed, label=label, run=run)
             if faults:
                 found.append(f"{label} run {run}: {describe(graded, answer.text)}")
             else:

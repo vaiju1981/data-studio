@@ -52,8 +52,13 @@ they arrive in. Each sheet of an Excel workbook becomes its own table.
 
 Local paths you have loaded before are offered as a list, so a file is picked
 rather than retyped, and a remembered file and a newly typed one load together.
-This is the only thing written to disk — paths, never data, in
-`~/.smart-data-studio/recent.json`, cleared by **Delete my data**.
+Paths, never data, in `~/.smart-data-studio/recent.json`.
+
+An answer can be marked wrong. That records the question, the SQL and the answer
+to `~/.smart-data-studio/feedback.jsonl` so the failure can be replayed and turned
+into a bank question — the only file here that holds data rather than paths, and
+written only when you press the button. Both files stay on this machine, and
+**Delete my data** removes both.
 
 Two conversation modes: **multi-turn** lets the model see earlier questions and
 results, so follow-ups like "now chart that" work; **single turn** answers each
@@ -135,6 +140,29 @@ It is slow and needs a model endpoint, so it is opt-in:
 ```bash
 USE_LLM=1 pytest tests/test_question_bank.py -q
 ```
+
+The domain bank needs no private file — its five workspaces are built from a seed
+— so it is the one anybody can reproduce, and it runs weekly in CI:
+
+```bash
+USE_LLM=1 pytest tests/test_domain_bank.py -q
+```
+
+Point `SDS_BANK_RESULTS` at a file and every question's outcome is appended to it
+with the model and prompt version that produced it, which is what makes two runs
+comparable:
+
+```bash
+SDS_BANK_RESULTS=runs.jsonl USE_LLM=1 pytest tests/test_domain_bank.py -q
+```
+
+```bash
+python tools/bank_report.py runs.jsonl
+```
+
+Answer quality is a rate, not a property. Read it as one: it has measured between
+40% and 73% depending on the bank and the model, so a single run says less than a
+trend does.
 
 Regenerate the pinned runtime after changing dependencies:
 

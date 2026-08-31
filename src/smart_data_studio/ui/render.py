@@ -7,7 +7,7 @@ import re
 import pandas as pd
 import streamlit as st
 
-from smart_data_studio import sessions
+from smart_data_studio import feedback, sessions
 from smart_data_studio.agent import Answer
 from smart_data_studio.config import MAX_EXPORT_ROWS, MAX_SESSION_EXPORT_BYTES
 from smart_data_studio.dataset import Dataset, QueryResult, csv_size, defuse_formulas
@@ -37,7 +37,7 @@ def as_text(markdown: str) -> str:
     )
 
 
-def answer(item: Answer, key: str, dataset: Dataset) -> None:
+def answer(item: Answer, key: str, dataset: Dataset, question: str = "") -> None:
     """Conclusion first, then the chart, then the evidence behind both."""
     if item.plan:
         with st.expander(f"Investigated in {len(item.plan)} steps", expanded=False):
@@ -57,6 +57,8 @@ def answer(item: Answer, key: str, dataset: Dataset) -> None:
     for index, analysis in enumerate(item.analyses, start=1):
         _analysis(analysis, f"{key}-{index}")
 
+    _mark_wrong(item, key, question)
+
     if not item.results:
         # Never let an unsupported answer look like a verified one.
         st.caption("No query was run for this answer.")
@@ -74,6 +76,41 @@ def answer(item: Answer, key: str, dataset: Dataset) -> None:
             st.code(result.sql, language="sql", wrap_lines=True)
             st.dataframe(result.frame, use_container_width=True, hide_index=True)
             _export(result, f"{key}-{index}", dataset)
+
+
+def _mark_wrong(item: Answer, key: str, question: str) -> None:
+    """Record an answer somebody says is wrong, so the bank can be built from real
+    failures rather than only from imagined ones.
+
+    Written on the click and never before it: the entry holds the question, the
+    SQL and the answer, and a query's filters carry cell values. It stays on this
+    machine and **Delete my data** removes it.
+    """
+    marked = f"marked-{key}"
+    if st.session_state.get(marked):
+        st.caption("Recorded. It stays on this machine, and Delete my data removes it.")
+        return
+    with st.expander("This answer is wrong", expanded=False):
+        note = st.text_input(
+            "What is wrong with it?",
+            key=f"note-{key}",
+            placeholder="The rate is per visit, not per player",
+        )
+        st.caption(
+            "Saved to this machine only — the question, the SQL and the answer, so it can "
+            "be replayed. Nothing is sent anywhere."
+        )
+        if st.button("Record it", key=f"record-{key}"):
+            feedback.record(
+                feedback.Report(
+                    question=question,
+                    answer=item.text,
+                    sql=[result.sql for result in item.results],
+                    note=note,
+                )
+            )
+            st.session_state[marked] = True
+            st.rerun()
 
 
 TITLES = {

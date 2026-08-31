@@ -15,8 +15,10 @@ in the bank having gone stale.
 from __future__ import annotations
 
 import os
+import time
 
 import pytest
+import results
 from anchors import mentions
 from corpus import DOMAINS
 from domain_bank import BANK
@@ -63,15 +65,34 @@ def test_domain_bank(
     agents, domain: str, number: int, question: str, proofs: dict[str, float]
 ) -> None:
     agent = agent_for(agents, domain)
+    started = time.monotonic()
     answer = agent.ask(question, multi_turn=False, depth="never")
 
-    assert answer.text.strip(), f"{domain} q{number}: empty answer"
-    assert "could not finish" not in answer.text, f"{domain} q{number}: ran out of tool rounds"
-    assert answer.results or answer.analyses, f"{domain} q{number}: answered with no evidence"
-    for value in proofs.values():
-        assert mentions(answer.text, value), (
-            f"{domain} q{number}: expected {value:,.2f} in the answer\n\n{answer.text}"
+    # Recorded either way, and before the assertions, so a run that fails is still
+    # a data point rather than a gap. A rate built only from passes is not a rate.
+    def note(passed: bool) -> None:
+        results.record(
+            "domain",
+            question,
+            passed,
+            time.monotonic() - started,
+            domain=domain,
+            number=number,
+            queries=len(answer.results),
         )
+
+    try:
+        assert answer.text.strip(), f"{domain} q{number}: empty answer"
+        assert "could not finish" not in answer.text, f"{domain} q{number}: ran out of tool rounds"
+        assert answer.results or answer.analyses, f"{domain} q{number}: answered with no evidence"
+        for value in proofs.values():
+            assert mentions(answer.text, value), (
+                f"{domain} q{number}: expected {value:,.2f} in the answer\n\n{answer.text}"
+            )
+    except AssertionError:
+        note(False)
+        raise
+    note(True)
 
 
 # --- the traps, which are why these fixtures are shaped the way they are --------
