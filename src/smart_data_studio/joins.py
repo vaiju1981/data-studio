@@ -84,18 +84,48 @@ class Source:
 
     table: str | None  # None for a derived relation
     unique_on: frozenset[str] | None = None
+    # The one base table a derived relation reads, where it reads exactly one.
+    # A DISTINCT or GROUP BY over a table already unique on the join key cannot
+    # repeat that key, and saying so costs a key check rather than running the
+    # subquery to find out.
+    reads: str | None = None
 
 
 def _grain_of(select: exp.Expression) -> frozenset[str] | None:
-    """The columns a SELECT reduces itself to one row per, if it visibly does."""
+    """The columns a SELECT reduces itself to one row per, if it visibly does.
+
+    The empty set is a real answer and not a missing one: a select that aggregates
+    without grouping is exactly one row, which no join can fail to meet.
+    """
     if not isinstance(select, exp.Select):
         return None
     if select.args.get("distinct"):
         return frozenset(item.alias_or_name.lower() for item in select.expressions)
     group = select.args.get("group")
     if group:
-        return frozenset(item.alias_or_name.lower() for item in group.expressions)
-    return None
+        return _group_names(select, group.expressions)
+    # No GROUP BY, so an aggregate here collapses the whole relation to one row.
+    return frozenset() if aggregates_in(select) else None
+
+
+def _group_names(select: exp.Select, grouped: list[exp.Expression]) -> frozenset[str] | None:
+    """The GROUP BY as column names, with ordinals resolved against the select list.
+
+    `GROUP BY 1` and `GROUP BY customer_id` are the same query, and reading the
+    first as `alias_or_name` gives the string "1" — a column no join is ever on, so
+    the relation could never prove its grain and every join onto it was refused.
+    Ordinals are how this SQL is usually written.
+    """
+    names = []
+    for item in grouped:
+        if isinstance(item, exp.Literal) and item.is_int:
+            index = int(item.name) - 1
+            if not 0 <= index < len(select.expressions):
+                return None  # out of range: DuckDB will reject it, and we prove nothing
+            names.append(select.expressions[index].alias_or_name.lower())
+        else:
+            names.append(item.alias_or_name.lower())
+    return frozenset(names)
 
 
 def sources_in(tree: exp.Expression, tables: set[str]) -> dict[str, Source]:
@@ -106,18 +136,99 @@ def sources_in(tree: exp.Expression, tables: set[str]) -> dict[str, Source]:
     """
     found: dict[str, Source] = {}
     for cte in tree.find_all(exp.CTE):
-        found[cte.alias_or_name.lower()] = Source(table=None, unique_on=_grain_of(cte.this))
+        found[cte.alias_or_name.lower()] = Source(
+            table=None, unique_on=_grain_of(cte.this), reads=_single_table(cte.this, tables)
+        )
     for node in list(tree.find_all(exp.Table)) + list(tree.find_all(exp.Subquery)):
         alias = (node.alias or getattr(node, "name", "") or "").lower()
         if isinstance(node, exp.Table):
             name = node.name.lower()
+            # `FROM firsts f` is the CTE under a second name. Registered only by its
+            # definition name, the alias the join actually uses resolved to nothing
+            # and the side came back unknown.
+            if name in found and alias and alias != name:
+                found[alias] = found[name]
+                continue
             if name in tables and (alias or name) not in found:
                 found[alias or name] = Source(table=name)
             continue
         inner = node.this
         if isinstance(inner, exp.Select) and alias:
-            found[alias] = Source(table=None, unique_on=_grain_of(inner))
+            found[alias] = Source(
+                table=None, unique_on=_grain_of(inner), reads=_single_table(inner, tables)
+            )
     return found
+
+
+def owning_select(node: exp.Expression) -> exp.Expression | None:
+    """The SELECT this node belongs to, which is the scope a join can inflate."""
+    while node is not None and not isinstance(node, exp.Select):
+        node = node.parent
+    return node
+
+
+def _reduces(select: exp.Expression) -> bool:
+    """Whether this SELECT gives its output a grain of its own.
+
+    A GROUP BY, a DISTINCT or an aggregate of its own all collapse the rows it
+    read, so a fan-out underneath cannot be totalled again above it. Anything else
+    merely renames and projects, and the repetition passes straight through.
+    """
+    if select.args.get("group") or select.args.get("distinct"):
+        return True
+    return any(owning_select(node) is select for node in aggregates_in(select))
+
+
+def scopes_affected(join: exp.Join) -> set[int]:
+    """The selects a fan-out here can inflate.
+
+    Its own, and every enclosing one that reads those rows without reducing them
+    first. Stopping at the join's own select let `SELECT sum(v) FROM (SELECT a.fee
+    AS v FROM s JOIN a ...)` through: the subquery only renames a column, so the
+    multiplication is still there when the outer sum reads it.
+    """
+    select = owning_select(join)
+    found: set[int] = set()
+    while select is not None:
+        found.add(id(select))
+        if _reduces(select):
+            break
+        select = owning_select(select.parent) if select.parent is not None else None
+    return found
+
+
+def scope_aliases(join: exp.Join) -> list[str]:
+    """The aliases in the same FROM as this join.
+
+    Its two sides are here and nothing else is. Searching every source in the tree
+    instead let a table named only inside a CTE body be picked as a side — which
+    refused correct queries when that table repeated the key, and allowed
+    double-counting ones when it did not.
+    """
+    return select_aliases(join.parent)
+
+
+def select_aliases(select: exp.Expression | None) -> list[str]:
+    """The relations this SELECT reads directly, by the name the query calls them."""
+    if not isinstance(select, exp.Select):
+        return []
+    # "from_" is what this sqlglot spells it; "from" is kept for an older one, and
+    # reading only the missing name made every scope look like joins alone.
+    source = select.args.get("from_") or select.args.get("from")
+    items = [item.this for item in [source] if item is not None]
+    items += [item.this for item in select.args.get("joins") or []]
+    return [(item.alias or getattr(item, "name", "") or "").lower() for item in items]
+
+
+def _single_table(select: exp.Expression, tables: set[str]) -> str | None:
+    """The one loaded table this SELECT reads, where it reads exactly one."""
+    if not isinstance(select, exp.Select):
+        return None
+    named = [node for node in select.find_all(exp.Table) if owning_select(node) is select]
+    if len(named) != 1:
+        return None
+    name = named[0].name.lower()
+    return name if name in tables else None
 
 
 def _is_distinct(node: exp.Expression) -> bool:
@@ -241,7 +352,11 @@ def preflight(
             "AND-ed column equalities, or aggregate each side to one row per key first."
         ), None
 
-    multiplying: dict[str, str] = {}
+    # Kept per select rather than in one pile: an aggregate inside a CTE body is
+    # computed before the outer join runs, so no join out there can inflate it.
+    # Pooled, the sum() that builds a totals CTE read as though it totalled the
+    # joined output, and the ordinary share-of-total query was refused.
+    by_scope: dict[int, dict[str, str]] = {}
     for join in joins:
         note = _join_multiplication(dataset, join, sources, cache)
         if note is None:
@@ -252,14 +367,19 @@ def preflight(
                 "join on the full key, or reduce a side with DISTINCT or GROUP BY "
                 "over the join columns."
             ), None
-        multiplying.update(note)
+        if note:
+            for scope in scopes_affected(join):
+                by_scope.setdefault(scope, {}).update(note)
 
     dropped = _dropped_note(dataset, joins, sources, cache)
-    if not multiplying:
+    if not by_scope:
         return None, dropped
 
     weighted: str | None = None
     for node in aggregates:
+        multiplying = by_scope.get(id(owning_select(node)), {})
+        if not multiplying:
+            continue
         if isinstance(node, (exp.Min, exp.Max)):
             continue  # unaffected by how often a row appears
         if _is_distinct(node):
@@ -267,12 +387,19 @@ def preflight(
             continue
         owners = [_column_alias(column, sources, dataset) for column in node.find_all(exp.Column)]
         hit = next((owner for owner in owners if owner in multiplying), None)
-        # A column reaching us through a derived relation is renamed, not traced:
-        # the alias resolves while what it selects is never examined.
+        # A base relation is traceable as it always was. A derived one is traceable
+        # only while every multiplication in this scope belongs to this scope: once
+        # a fan-out has leaked up from inside a subquery, the alias resolves and
+        # what it selects has still never been examined, which is how
+        # `sum(w.v) FROM (SELECT a.fee AS v FROM s JOIN a ...) w` launders one.
+        own = set(select_aliases(owning_select(node)))
+        leaked = any(alias not in own for alias in multiplying)
         traced = [
             owner
             for owner in owners
-            if owner and (source := sources.get(owner)) and source.table is not None
+            if owner
+            and (source := sources.get(owner)) is not None
+            and (source.table is not None or (not leaked and owner in own))
         ]
         if hit is None and traced and len(traced) == len(owners):
             continue  # every column traced to a base relation, none repeated
@@ -309,15 +436,35 @@ def _unsupported(tree: exp.Expression, joins: list, sources: dict[str, Source]) 
         # RIGHT and FULL change which unmatched rows survive, not which rows
         # repeat, and repetition is the whole question here.
         if (join.args.get("kind") or "").upper() == "CROSS":
+            if _one_row_side(join, sources):
+                continue
             return "cross join"
         if join.args.get("using"):
             continue
         condition = join.args.get("on")
         if condition is None:
+            # `FROM per, tot` where tot is one row is how a share of a total is
+            # written. It carries no condition because it needs none.
+            if _one_row_side(join, sources):
+                continue
             return "a join with no condition"
         problem = _predicate_problem(condition)
         if problem:
             return problem
+    return None
+
+
+def _one_row_side(join: exp.Join, sources: dict[str, Source]) -> str | None:
+    """The alias in this join's scope that is provably a single row, if any.
+
+    A relation of one row cannot multiply the other side — but the other side
+    multiplies *it*, once per row, which is why the alias is returned rather than
+    a yes.
+    """
+    for alias in scope_aliases(join):
+        source = sources.get(alias)
+        if source is not None and source.table is None and source.unique_on == frozenset():
+            return alias
     return None
 
 
@@ -354,7 +501,18 @@ def _join_multiplication(
     if condition is None:
         using = [item.name for item in join.args.get("using") or []]
         if not using:
-            return None
+            single = _one_row_side(join, sources)
+            if single is None:
+                return None
+            # Every row of the other side meets that one row, so it appears once
+            # per row of the output. Totalling a column of it counts it that often.
+            return {
+                single: (
+                    f"This join repeats the single row of {single} once per row it is "
+                    f"joined to, so a total taken over {single} counts it that many "
+                    f"times. Read its columns as values rather than aggregating them."
+                )
+            }
         # USING names the same column on both sides.
         left, right = _using_sides(join, sources, using, dataset)
         if left is None or right is None:
@@ -375,40 +533,26 @@ def _join_multiplication(
     (left_alias, (left_source, left_columns)), (right_alias, (right_source, right_columns)) = (
         resolved.items()
     )
-    # A derived relation already reduced to one row per key cannot multiply the
-    # other side, whatever its base table does. One that has not proved its grain
-    # cannot be reasoned about either way.
-    for source, columns in (
-        (left_source, left_columns),
-        (right_source, right_columns),
-    ):
-        if source.table is None and not _derived_is_unique(source, columns):
-            return None
     if left_source.table is None or right_source.table is None:
-        # A derived side proved unique cannot multiply the other — but the other
-        # can multiply *it*: a derived row is repeated once per base row sharing
-        # its key, so a measure computed in the subquery is summed once per match.
-        if left_source.table is None:
-            derived, base, base_columns = left_alias, right_source, right_columns
-        else:
-            derived, base, base_columns = right_alias, left_source, left_columns
-        if base.table is None:
-            return None  # two derived relations: not something to reason about yet
-        try:
-            facts = verify_key(dataset, Ref(base.table, tuple(base_columns)))
-        except Exception:
-            return None
-        if facts.unique:
-            return {}
-        return {
-            derived: (
-                f"This join repeats rows of {derived}: {base.table} is not unique on "
-                f"{', '.join(base_columns)} — {facts.distinct:,} values across "
-                f"{facts.complete:,} rows — so each {derived} row is counted once per "
-                f"match. Aggregate {base.table} to one row per key first, or take the "
-                f"measure from {base.table} instead."
-            )
-        }
+        # One side at least is derived, so there is no pair of base tables to
+        # measure against each other. Each side is judged on its own instead: it
+        # multiplies the other exactly when its own rows repeat the join key.
+        found: dict[str, str] = {}
+        for alias, source, columns, other in (
+            (left_alias, left_source, left_columns, right_alias),
+            (right_alias, right_source, right_columns, left_alias),
+        ):
+            repeats, evidence = _repeats_key(dataset, source, columns)
+            if repeats is None:
+                return None  # undetermined is not the same as safe
+            if repeats:
+                found[other] = (
+                    f"This join repeats rows of {other}: {alias} is not unique on "
+                    f"{', '.join(columns)} ({evidence}), so each {other} row is counted "
+                    f"once per match. Aggregate {alias} to one row per key first, or "
+                    f"take the measure from {alias} instead."
+                )
+        return found
 
     candidate = JoinCandidate(
         Ref(left_source.table, tuple(left_columns)),
@@ -430,6 +574,40 @@ def _join_multiplication(
         if measured.multiplies_side(side):
             found[alias] = _explain(measured, side, alias)
     return found
+
+
+def _repeats_key(dataset: Dataset, source: Source, columns: list[str]) -> tuple[bool | None, str]:
+    """Whether this relation holds more than one row per these columns.
+
+    True, False, or None for cannot be decided — and the evidence, because a
+    refusal that does not say what it measured is a steer the model cannot act on.
+
+    A derived relation grouped by more than the join columns is treated as
+    repeating them. It may not in this data, but proving that would mean running
+    the subquery, and the aggregate stage still lets MIN, MAX and the distinct
+    counts through — which is what a retention query is made of.
+    """
+    if source.table is None:
+        if _derived_is_unique(source, columns):
+            return False, ""
+        if source.unique_on is None:
+            return None, ""
+        # Grouped by more than the join key, which usually means it repeats it —
+        # but not when it reduces a table that is already unique on that key. A
+        # dimension read as SELECT DISTINCT id, label is the everyday case, and
+        # refusing it costs the ordinary join onto a dimension.
+        if source.reads is not None:
+            base, _ = _repeats_key(dataset, Source(table=source.reads), columns)
+            if base is False:
+                return False, ""
+        return True, f"it is one row per {', '.join(sorted(source.unique_on))}"
+    try:
+        facts = verify_key(dataset, Ref(source.table, tuple(columns)))
+    except Exception:
+        return None, ""
+    if facts.unique:
+        return False, ""
+    return True, f"{facts.distinct:,} values across {facts.complete:,} rows"
 
 
 def _dropped_note(
@@ -493,7 +671,8 @@ def _using_sides(join: exp.Join, sources: dict[str, Source], using: list[str], d
     answer to the question that was asked.
     """
     joined = (join.this.alias or getattr(join.this, "name", "") or "").lower()
-    others = [alias for alias in sources if alias != joined]
+    scope = [alias for alias in scope_aliases(join) if alias in sources]
+    others = [alias for alias in scope or sources if alias != joined]
     wanted = {column.lower() for column in using}
 
     def carries(alias: str) -> bool:
@@ -518,7 +697,7 @@ def _derived_is_unique(source: Source, columns: list[str]) -> bool:
     The subset runs this way round: a subquery grouped by (a, b) is one row per
     pair, and joining on a alone still meets many of them.
     """
-    return bool(source.unique_on) and source.unique_on <= {c.lower() for c in columns}
+    return source.unique_on is not None and source.unique_on <= {c.lower() for c in columns}
 
 
 def _name(alias: str, ref: Ref) -> str:
