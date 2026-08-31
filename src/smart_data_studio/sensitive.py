@@ -40,15 +40,22 @@ Reply with a JSON array of column names and nothing else. [] if none do.
 You are shown names and types and no values, deliberately — this runs before the
 file is read, so that asking cannot itself disclose anything.
 
-Include a column when it names, contacts or locates a person, records something
-about their body or life, or identifies them: names, emails, phone numbers, dates
-of birth, home addresses, postcodes, government or account numbers held by a
-person, and anything that would identify somebody once set beside another column
-in this list.
+Include a column that would tell a stranger *who* somebody is, or something about
+them they did not choose to publish: names, emails, phone numbers, dates of birth,
+home addresses, postcodes, government or account numbers, and attributes of the
+person such as age, gender or ethnicity.
 
 Exclude business measures, event dates, categories, and identifiers of things
-rather than people — a machine, a game, an order, a store. A player or customer
-id is a person's identifier and belongs in the list."""
+rather than people — a machine, a game, an order, a store.
+
+**Exclude a bare pseudonymous key**: playerId, customer_id, account_id and the
+like. It identifies a row's subject only inside this file, it is what every
+question about a person is grouped by, and withholding it does not protect
+anybody while making the data unanalysable. What re-identifies somebody is the
+attributes above, which is what this list is for.
+
+Exclude a business attribute of the person's account rather than of the person:
+a loyalty tier, a segment, a plan."""
 
 
 def by_name(columns: list[str]) -> set[str]:

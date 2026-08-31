@@ -76,6 +76,28 @@ def test_domain_bank(
             )
 
 
+def test_the_proposal_does_not_withhold_the_key_every_question_needs() -> None:
+    """A proposal that breaks the analysis is one people learn to dismiss.
+
+    Measured on two real files before this was tightened: it proposed
+    `customer_id` on a five-column orders file and `playerId` and `clubLevel` on
+    the casino visits — the join key and the tier every question groups by. Nobody
+    would accept that twice; they would press "load everything" from then on, and
+    the feature would be theatre.
+
+    A pseudonymous key identifies a row's subject only inside the file. What
+    re-identifies a person is the attributes beside it, and those are what the
+    proposal is for.
+    """
+    from smart_data_studio import sensitive
+    from smart_data_studio.dataset import Dataset
+
+    schema = Dataset.preview_columns(DOMAINS["healthcare"]())
+    proposed = sensitive.propose(schema)
+    keys = {"patient_id", "encounter_id"}
+    assert not (proposed & keys), f"withholding {proposed & keys} leaves nothing to join on"
+
+
 # --- the traps, which are why these fixtures are shaped the way they are --------
 
 
