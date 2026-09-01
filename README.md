@@ -151,13 +151,24 @@ USE_LLM=1 pytest tests/test_question_bank.py -q
 ```
 
 The domain bank needs no private file — its five workspaces are built from a seed
-— so it is the one anybody can reproduce, and it runs weekly in CI:
+— so it is the one anybody can reproduce:
 
 ```bash
 USE_LLM=1 pytest tests/test_domain_bank.py -q
 ```
 
-Point `SDS_BANK_RESULTS` at a file and every question's outcome is appended to it
+**These do not run in CI, deliberately.** They need a model endpoint and, for two
+of them, a private file; both live on the machine you run the app from. A hosted
+runner can reach neither, and publishing an endpoint so that it could would be a
+production decision taken for the sake of a test. CI runs the fast suite, which
+needs no model. The banks run where the endpoint is:
+
+```bash
+python tools/banks.py
+```
+
+`tools/banks.py` records outcomes and prints the report for you. To do it by hand,
+point `SDS_BANK_RESULTS` at a file and every question's outcome is appended to it
 with the model and prompt version that produced it, which is what makes two runs
 comparable:
 

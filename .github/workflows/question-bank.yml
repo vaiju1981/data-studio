@@ -1,13 +1,20 @@
 name: Question bank
 
-# The live-model regression. Slow, needs a model endpoint and the visits file, so
-# it runs on request or on a schedule rather than on every push. All three live
-# banks run here: the multi-table one was written and then never scheduled, so
-# the join and key-discovery guards went unexercised between manual runs.
+# The live-model regression, which does not belong on GitHub's runners.
+#
+# It needs a model endpoint and the private visits file, and both live on one
+# laptop. A hosted runner can reach neither, and exposing an endpoint so that it
+# could would be a production decision taken for the sake of a test.
+#
+# So this is dispatch-only, for a self-hosted runner if one ever exists. There was
+# a weekly cron here and it never once completed: three runs queued against a
+# runner nobody had registered until GitHub cancelled them, which reads exactly
+# like a bank that ran and passed. A schedule that cannot fire is worse than none.
+#
+# The way these actually run is `python tools/banks.py`, on the machine with the
+# endpoint. CI runs the fast suite, which needs no model at all.
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 6 * * 1"
 
 jobs:
   bank:
