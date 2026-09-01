@@ -19,7 +19,7 @@ jobs:
     # A queue that never starts is invisible; a job that gives up is not.
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Before anything slow: every bank here needs a model, and a run that cannot
       # reach one should say that in ten seconds rather than fail four times over
       # an hour with four different-looking errors.
